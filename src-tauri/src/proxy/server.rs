@@ -1,5 +1,5 @@
 use crate::models::AppConfig;
-use crate::modules::{account, config, logger, migration, proxy_db, security_db, token_stats};
+use crate::modules::{account, config, logger, proxy_db, security_db, token_stats};
 use crate::proxy::TokenManager;
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -50,10 +50,7 @@ pub fn trigger_account_reload(account_id: &str) {
 pub fn trigger_account_delete(account_id: &str) {
     if let Ok(mut pending) = get_pending_delete_accounts().write() {
         pending.insert(account_id.to_string());
-        tracing::debug!(
-            "[Proxy] Queued account {} for cache removal",
-            account_id
-        );
+        tracing::debug!("[Proxy] Queued account {} for cache removal", account_id);
     }
 }
 
@@ -93,7 +90,11 @@ pub fn take_pending_delete_accounts() -> Vec<String> {
 #[derive(Clone)]
 pub struct AppState {
     pub token_manager: Arc<TokenManager>,
-    pub custom_mapping: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    pub custom_mapping: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, crate::proxy::config::ModelRouteTarget>,
+        >,
+    >,
     #[allow(dead_code)]
     pub request_timeout: u64, // API 请求超时(秒)
     #[allow(dead_code)]
@@ -117,6 +118,10 @@ pub struct AppState {
     pub port: u16,                     // [NEW] 本地监听端口 (v4.0.8 修复)
     pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>, // [FIX Web Mode]
     pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>, // [FIX Web Mode]
+    pub llm_logging_enabled: Arc<std::sync::atomic::AtomicBool>, // LLM traffic logging toggle
+    pub cooldown_manager: Option<Arc<crate::proxy::common::model_cooldown::ModelCooldownManager>>, // 模型冷却管理器
+    pub fallback_model: Arc<RwLock<crate::proxy::config::FallbackModelConfig>>, // 兜底模型
+    pub upstream_trace_cache: crate::proxy::upstream_trace::UpstreamTraceCache, // Upstream request/response cache
 }
 
 // 为 AppState 实现 FromRef，以便中间件提取 security 状态
@@ -216,20 +221,26 @@ fn to_account_response(
 #[derive(Clone)]
 pub struct AxumServer {
     shutdown_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
-    custom_mapping: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    custom_mapping: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, crate::proxy::config::ModelRouteTarget>,
+        >,
+    >,
     proxy_state: Arc<tokio::sync::RwLock<crate::proxy::config::UpstreamProxyConfig>>,
     upstream: Arc<crate::proxy::upstream::client::UpstreamClient>,
     security_state: Arc<RwLock<crate::proxy::ProxySecurityConfig>>,
     zai_state: Arc<RwLock<crate::proxy::ZaiConfig>>,
     experimental: Arc<RwLock<crate::proxy::config::ExperimentalConfig>>,
     debug_logging: Arc<RwLock<crate::proxy::config::DebugLoggingConfig>>,
-    #[allow(dead_code)] // 预留给 cloudflared 运行状态查询与后续控制
+    #[allow(dead_code)]
     pub cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
     pub is_running: Arc<RwLock<bool>>,
-    pub token_manager: Arc<TokenManager>, // [NEW] 暴露出 TokenManager 供反代服务复用
-    pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>, // [NEW] 代理池配置状态
-    pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>, // [NEW] 暴露代理池管理器供命令调用
+    pub token_manager: Arc<TokenManager>,
+    pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>,
+    pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>,
     provider_router: Arc<RwLock<crate::proxy::providers::router::ProviderRouter>>,
+    pub cooldown_manager: Option<Arc<crate::proxy::common::model_cooldown::ModelCooldownManager>>,
+    pub fallback_model: Arc<RwLock<crate::proxy::config::FallbackModelConfig>>,
 }
 
 impl AxumServer {
@@ -239,6 +250,24 @@ impl AxumServer {
             *m = config.custom_mapping.clone();
         }
         tracing::debug!("模型映射 (Custom) 已全量热更新");
+
+        // 更新冷却配置
+        if let Some(_mgr) = &self.cooldown_manager {
+            // 更新冷却时长（通过新建管理器）
+            // 这里简单记录日志，实际时长变化需要重启才生效
+            tracing::debug!(
+                "模型冷却配置: enabled={}, duration={}s",
+                config.model_cooldown.enabled,
+                config.model_cooldown.duration_secs
+            );
+        }
+
+        // 更新兜底模型
+        {
+            let mut fb = self.fallback_model.write().await;
+            *fb = config.fallback_model.clone();
+        }
+        tracing::debug!("兜底模型配置已热更新");
     }
 
     /// 更新代理配置
@@ -286,12 +315,13 @@ impl AxumServer {
         tracing::info!("User-Agent 配置已热更新: {:?}", config.user_agent_override);
     }
 
-    pub async fn update_provider_router(&self, providers: Vec<crate::proxy::config::UpstreamProvider>) {
+    pub async fn update_provider_router(
+        &self,
+        providers: Vec<crate::proxy::config::UpstreamProvider>,
+    ) {
         let zai = self.zai_state.read().await.clone();
-        let new_router = crate::proxy::providers::router::ProviderRouter::new(
-            providers,
-            Some(&zai),
-        );
+        let new_router =
+            crate::proxy::providers::router::ProviderRouter::new(providers, Some(&zai));
         let mut router = self.provider_router.write().await;
         *router = new_router;
         tracing::info!("供应商路由已热更新");
@@ -313,7 +343,7 @@ impl AxumServer {
         host: String,
         port: u16,
         token_manager: Arc<TokenManager>,
-        custom_mapping: std::collections::HashMap<String, String>,
+        custom_mapping: std::collections::HashMap<String, crate::proxy::config::ModelRouteTarget>,
         _request_timeout: u64,
         upstream_proxy: crate::proxy::config::UpstreamProxyConfig,
         user_agent_override: Option<String>,
@@ -323,18 +353,20 @@ impl AxumServer {
         monitor: Arc<crate::proxy::monitor::ProxyMonitor>,
         experimental_config: crate::proxy::config::ExperimentalConfig,
         debug_logging: crate::proxy::config::DebugLoggingConfig,
-
         integration: crate::modules::integration::SystemManager,
         cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
-        proxy_pool_config: crate::proxy::config::ProxyPoolConfig, // [NEW]
+        proxy_pool_config: crate::proxy::config::ProxyPoolConfig,
+        cooldown_config: crate::proxy::config::ModelCooldownConfig,
+        fallback_model_config: crate::proxy::config::FallbackModelConfig,
     ) -> Result<(Self, tokio::task::JoinHandle<()>), String> {
         let custom_mapping_state = Arc::new(tokio::sync::RwLock::new(custom_mapping));
         let proxy_state = Arc::new(tokio::sync::RwLock::new(upstream_proxy.clone()));
         let proxy_pool_state = Arc::new(tokio::sync::RwLock::new(proxy_pool_config));
-        let proxy_pool_manager = crate::proxy::proxy_pool::init_global_proxy_pool(proxy_pool_state.clone());
-    
-    // Start health check loop
-    proxy_pool_manager.clone().start_health_check_loop();
+        let proxy_pool_manager =
+            crate::proxy::proxy_pool::init_global_proxy_pool(proxy_pool_state.clone());
+
+        // Start health check loop
+        proxy_pool_manager.clone().start_health_check_loop();
         let security_state = Arc::new(RwLock::new(security_config));
         let zai_state = Arc::new(RwLock::new(zai_config.clone()));
         let provider_rr = Arc::new(AtomicUsize::new(0));
@@ -387,13 +419,26 @@ impl AxumServer {
             port,
             proxy_pool_state: proxy_pool_state.clone(),
             proxy_pool_manager: proxy_pool_manager.clone(),
+            llm_logging_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            cooldown_manager: Some(Arc::new(
+                crate::proxy::common::model_cooldown::ModelCooldownManager::new(
+                    cooldown_config.duration_secs,
+                ),
+            )),
+            fallback_model: Arc::new(RwLock::new(fallback_model_config)),
+            upstream_trace_cache: crate::proxy::upstream_trace::UpstreamTraceCache::new(),
         };
+
+        // Initialize LLM traffic logger (enabled by default)
+        crate::proxy::llm_logger::init();
+        crate::proxy::llm_logger::set_enabled(true);
 
         // 构建路由 - 使用新架构的 handlers！
         use crate::proxy::handlers;
         use crate::proxy::middleware::{
-            admin_auth_middleware, auth_middleware, cors_layer, ip_filter_middleware,
-            monitor_middleware, service_status_middleware,
+            admin_auth_middleware, admin_cors_layer, auth_middleware, ip_filter_middleware,
+            json_safety_middleware, monitor_middleware, proxy_cors_layer,
+            service_status_middleware,
         };
 
         // 1. 构建主 AI 代理路由 (遵循 auth_mode 配置)
@@ -463,21 +508,27 @@ impl AxumServer {
             .route("/v1/api/event_logging", post(silent_ok_handler))
             // 应用 AI 服务特定的层
             // 注意：Axum layer 执行顺序是从下往上（洋葱模型）
-            // 请求: ip_filter -> auth -> monitor -> handler
-            // 响应: handler -> monitor -> auth -> ip_filter
-            // monitor 需要在 auth 之后执行才能获取 UserTokenIdentity
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                monitor_middleware,
-            ))
+            // 请求: ip_filter -> auth -> json_safety -> monitor -> handler
+            // 响应: handler -> monitor -> json_safety -> auth -> ip_filter
+            // json_safety 在 auth 和 handler 之间，确保所有响应（包括认证失败的）都返回完整 JSON
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 auth_middleware,
             ))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
+                json_safety_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                monitor_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
                 ip_filter_middleware,
-            ));
+            ))
+            // 代理接口 CORS（对外开放）
+            .layer(proxy_cors_layer());
 
         // 2. 构建管理 API (强制鉴权)
         let admin_routes = Router::new()
@@ -519,10 +570,6 @@ impl AxumServer {
                 "/accounts/:accountId/device-versions/:versionId",
                 delete(admin_delete_device_version),
             )
-            .route("/accounts/import/v1", post(admin_import_v1_accounts))
-            .route("/accounts/import/db", post(admin_import_from_db))
-            .route("/accounts/import/db-custom", post(admin_import_custom_db))
-            .route("/accounts/sync/db", post(admin_sync_account_from_db))
             .route("/stats/summary", get(admin_get_token_stats_summary))
             .route("/stats/hourly", get(admin_get_token_stats_hourly))
             .route("/stats/daily", get(admin_get_token_stats_daily))
@@ -530,30 +577,36 @@ impl AxumServer {
             .route("/stats/accounts", get(admin_get_token_stats_by_account))
             .route("/stats/models", get(admin_get_token_stats_by_model))
             .route("/config", get(admin_get_config).post(admin_save_config))
-            .route("/proxy/cli/status", post(admin_get_cli_sync_status))
-            .route("/proxy/cli/sync", post(admin_execute_cli_sync))
-            .route("/proxy/cli/restore", post(admin_execute_cli_restore))
-            .route("/proxy/cli/config", post(admin_get_cli_config_content))
-            .route("/proxy/opencode/status", post(admin_get_opencode_sync_status))
-            .route("/proxy/opencode/sync", post(admin_execute_opencode_sync))
-            .route("/proxy/opencode/restore", post(admin_execute_opencode_restore))
-            .route("/proxy/opencode/clear", post(admin_execute_opencode_clear))
-            .route("/proxy/opencode/config", post(admin_get_opencode_config_content))
-            .route("/proxy/droid/status", post(admin_get_droid_sync_status))
-            .route("/proxy/droid/sync", post(admin_execute_droid_sync))
-            .route("/proxy/droid/restore", post(admin_execute_droid_restore))
-            .route("/proxy/droid/config", post(admin_get_droid_config_content))
             .route("/proxy/status", get(admin_get_proxy_status))
             .route("/proxy/pool/config", get(admin_get_proxy_pool_config))
             .route("/proxy/pool/bindings", get(admin_get_all_account_bindings))
             .route("/proxy/pool/bind", post(admin_bind_account_proxy))
             .route("/proxy/pool/unbind", post(admin_unbind_account_proxy))
-            .route("/proxy/pool/binding/:accountId", get(admin_get_account_proxy_binding))
+            .route(
+                "/proxy/pool/binding/:accountId",
+                get(admin_get_account_proxy_binding),
+            )
             .route("/proxy/providers/test", post(admin_test_provider_models))
-            .route("/proxy/health-check/trigger", post(admin_trigger_proxy_health_check))
+            .route(
+                "/proxy/providers/discover",
+                post(admin_discover_provider_models),
+            )
+            .route(
+                "/proxy/providers/discover-all",
+                post(admin_discover_all_provider_models),
+            )
+            .route(
+                "/proxy/health-check/trigger",
+                post(admin_trigger_proxy_health_check),
+            )
             .route("/proxy/start", post(admin_start_proxy_service))
             .route("/proxy/stop", post(admin_stop_proxy_service))
             .route("/proxy/mapping", post(admin_update_model_mapping))
+            .route("/proxy/model-cooldowns", get(admin_list_model_cooldowns))
+            .route(
+                "/proxy/model-cooldowns/clear",
+                post(admin_clear_model_cooldowns),
+            )
             .route("/proxy/api-key/generate", post(admin_generate_api_key))
             .route(
                 "/proxy/session-bindings/clear",
@@ -605,6 +658,21 @@ impl AxumServer {
             .route("/debug/enabled", get(admin_is_debug_console_enabled))
             .route("/debug/logs", get(admin_get_debug_console_logs))
             .route("/debug/logs/clear", post(admin_clear_debug_console_logs))
+            // LLM Traffic Logging
+            .route("/proxy/llm-logging/enable", post(admin_enable_llm_logging))
+            .route(
+                "/proxy/llm-logging/disable",
+                post(admin_disable_llm_logging),
+            )
+            .route(
+                "/proxy/llm-logging/status",
+                get(admin_get_llm_logging_status),
+            )
+            .route("/proxy/llm-logging/traces", get(admin_list_llm_traces))
+            .route(
+                "/proxy/llm-logging/traces/:traceId",
+                get(admin_get_llm_trace_detail).delete(admin_delete_llm_trace),
+            )
             .route("/stats/token/clear", post(admin_clear_token_stats))
             .route("/stats/token/hourly", get(admin_get_token_stats_hourly))
             .route("/stats/token/daily", get(admin_get_token_stats_daily))
@@ -642,14 +710,6 @@ impl AxumServer {
             .route("/accounts/warmup", post(admin_warm_up_all_accounts))
             .route("/accounts/:accountId/warmup", post(admin_warm_up_account))
             .route("/system/data-dir", get(admin_get_data_dir_path))
-            .route("/system/updates/settings", get(admin_get_update_settings))
-            .route(
-                "/system/updates/check-status",
-                get(admin_should_check_updates),
-            )
-            .route("/system/updates/check", post(admin_check_for_updates))
-            .route("/system/updates/touch", post(admin_update_last_check_time))
-            .route("/system/updates/save", post(admin_save_update_settings))
             .route(
                 "/system/autostart/status",
                 get(admin_is_auto_launch_enabled),
@@ -659,38 +719,58 @@ impl AxumServer {
                 "/system/http-api/settings",
                 get(admin_get_http_api_settings).post(admin_save_http_api_settings),
             )
-            .route("/system/antigravity/path", get(admin_get_antigravity_path))
-            .route("/system/antigravity/args", get(admin_get_antigravity_args))
-            .route("/system/cache/clear", post(admin_clear_antigravity_cache))
-            .route(
-                "/system/cache/paths",
-                get(admin_get_antigravity_cache_paths),
-            )
             .route("/system/logs/clear-cache", post(admin_clear_log_cache))
             // Security / IP Monitoring
             .route("/security/logs", get(admin_get_ip_access_logs))
             .route("/security/logs/clear", post(admin_clear_ip_access_logs))
             .route("/security/stats", get(admin_get_ip_stats))
             .route("/security/token-stats", get(admin_get_ip_token_stats)) // For IP Token usage
-            .route("/security/blacklist", get(admin_get_ip_blacklist).post(admin_add_ip_to_blacklist).delete(admin_remove_ip_from_blacklist))
+            .route(
+                "/security/blacklist",
+                get(admin_get_ip_blacklist)
+                    .post(admin_add_ip_to_blacklist)
+                    .delete(admin_remove_ip_from_blacklist),
+            )
             .route("/security/blacklist/clear", post(admin_clear_ip_blacklist))
-            .route("/security/blacklist/check", get(admin_check_ip_in_blacklist))
-            .route("/security/whitelist", get(admin_get_ip_whitelist).post(admin_add_ip_to_whitelist).delete(admin_remove_ip_from_whitelist))
+            .route(
+                "/security/blacklist/check",
+                get(admin_check_ip_in_blacklist),
+            )
+            .route(
+                "/security/whitelist",
+                get(admin_get_ip_whitelist)
+                    .post(admin_add_ip_to_whitelist)
+                    .delete(admin_remove_ip_from_whitelist),
+            )
             .route("/security/whitelist/clear", post(admin_clear_ip_whitelist))
-            .route("/security/whitelist/check", get(admin_check_ip_in_whitelist))
-            .route("/security/config", get(admin_get_security_config).post(admin_update_security_config))
+            .route(
+                "/security/whitelist/check",
+                get(admin_check_ip_in_whitelist),
+            )
+            .route(
+                "/security/config",
+                get(admin_get_security_config).post(admin_update_security_config),
+            )
             // User Tokens
-            .route("/user-tokens", get(admin_list_user_tokens).post(admin_create_user_token))
+            .route(
+                "/user-tokens",
+                get(admin_list_user_tokens).post(admin_create_user_token),
+            )
             .route("/user-tokens/summary", get(admin_get_user_token_summary))
             .route("/user-tokens/:id/renew", post(admin_renew_user_token))
-            .route("/user-tokens/:id", delete(admin_delete_user_token).patch(admin_update_user_token))
+            .route(
+                "/user-tokens/:id",
+                delete(admin_delete_user_token).patch(admin_update_user_token),
+            )
             // OAuth (Web) - Admin 接口
             .route("/auth/url", get(admin_prepare_oauth_url_web))
             // 应用管理特定鉴权层 (强制校验)
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 admin_auth_middleware,
-            ));
+            ))
+            // 管理接口 CORS 白名单
+            .layer(admin_cors_layer());
 
         // 3. 整合并应用全局层
         // 从环境变量读取 body 大小限制，默认 50MB
@@ -710,7 +790,6 @@ impl AxumServer {
                 state.clone(),
                 service_status_middleware,
             ))
-            .layer(cors_layer())
             .layer(DefaultBodyLimit::max(max_body_size)) // 放宽 body 大小限制
             .with_state(state.clone());
 
@@ -746,11 +825,13 @@ impl AxumServer {
             experimental: experimental_state.clone(),
             debug_logging: debug_logging_state.clone(),
             cloudflared_state,
-            is_running: is_running_state,
+            is_running: is_running_state.clone(),
             token_manager: token_manager.clone(),
             proxy_pool_state,
             proxy_pool_manager,
             provider_router,
+            cooldown_manager: state.cooldown_manager.clone(),
+            fallback_model: state.fallback_model.clone(),
         };
 
         // 在新任务中启动服务器
@@ -765,7 +846,7 @@ impl AxumServer {
                         match res {
                             Ok((stream, remote_addr)) => {
                                 let io = TokioIo::new(stream);
-                                
+
                                 // 注入 ConnectInfo (用于获取真实 IP)
                                 use tower::ServiceExt;
                                 use hyper::body::Incoming;
@@ -1208,8 +1289,8 @@ struct SetOAuthClientRequest {
     client_key: String,
 }
 
-async fn admin_list_oauth_clients(
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+async fn admin_list_oauth_clients() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
+{
     let clients = crate::modules::oauth::list_oauth_clients().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1233,12 +1314,8 @@ async fn admin_get_active_oauth_client(
 async fn admin_set_active_oauth_client(
     Json(payload): Json<SetOAuthClientRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::modules::oauth::set_active_oauth_client_key(&payload.client_key).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+    crate::modules::oauth::set_active_oauth_client_key(&payload.client_key)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
     Ok(StatusCode::OK)
 }
 
@@ -1427,10 +1504,16 @@ async fn admin_bind_account_proxy(
     State(state): State<AppState>,
     Json(payload): Json<BindAccountProxyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    state.proxy_pool_manager
+    state
+        .proxy_pool_manager
         .bind_account_to_proxy(payload.account_id, payload.proxy_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     Ok(StatusCode::OK)
 }
 
@@ -1445,7 +1528,10 @@ async fn admin_unbind_account_proxy(
     State(state): State<AppState>,
     Json(payload): Json<UnbindAccountProxyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    state.proxy_pool_manager.unbind_account_proxy(payload.account_id).await;
+    state
+        .proxy_pool_manager
+        .unbind_account_proxy(payload.account_id)
+        .await;
     Ok(StatusCode::OK)
 }
 
@@ -1561,6 +1647,42 @@ async fn admin_update_model_mapping(
     })?;
 
     logger::log_info("[API] 模型映射已通过 API 热更新并保存");
+    Ok(StatusCode::OK)
+}
+
+#[derive(Serialize)]
+struct CooldownEntryResponse {
+    model: String,
+    provider: String,
+    remaining_secs: u64,
+}
+
+async fn admin_list_model_cooldowns(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(ref mgr) = state.cooldown_manager {
+        let cooldowns = mgr.get_active_cooldowns();
+        let entries: Vec<CooldownEntryResponse> = cooldowns
+            .into_iter()
+            .map(|(key, remaining)| CooldownEntryResponse {
+                model: key.model,
+                provider: key.provider,
+                remaining_secs: remaining,
+            })
+            .collect();
+        Ok(Json(entries))
+    } else {
+        Ok(Json::<Vec<CooldownEntryResponse>>(vec![]))
+    }
+}
+
+async fn admin_clear_model_cooldowns(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(ref mgr) = state.cooldown_manager {
+        let count = mgr.clear();
+        logger::log_info(&format!("[API] 已清除所有模型冷却状态，共 {} 条", count));
+    }
     Ok(StatusCode::OK)
 }
 
@@ -1815,34 +1937,41 @@ async fn admin_get_data_dir_path() -> impl IntoResponse {
 // --- User Token Handlers ---
 
 async fn admin_list_user_tokens() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let tokens = crate::commands::user_token::list_user_tokens().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+    let tokens = crate::commands::user_token::list_user_tokens()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     Ok(Json(tokens))
 }
 
-async fn admin_get_user_token_summary() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let summary = crate::commands::user_token::get_user_token_summary().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+async fn admin_get_user_token_summary(
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let summary = crate::commands::user_token::get_user_token_summary()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     Ok(Json(summary))
 }
 
 async fn admin_create_user_token(
     Json(payload): Json<crate::commands::user_token::CreateTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let token = crate::commands::user_token::create_user_token(payload).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+    let token = crate::commands::user_token::create_user_token(payload)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     Ok(Json(token))
 }
 
@@ -1856,24 +1985,28 @@ async fn admin_renew_user_token(
     Path(id): Path<String>,
     Json(payload): Json<RenewTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::user_token::renew_user_token(id, payload.expires_type).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+    crate::commands::user_token::renew_user_token(id, payload.expires_type)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     Ok(StatusCode::OK)
 }
 
 async fn admin_delete_user_token(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::user_token::delete_user_token(id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+    crate::commands::user_token::delete_user_token(id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1881,73 +2014,15 @@ async fn admin_update_user_token(
     Path(id): Path<String>,
     Json(payload): Json<crate::commands::user_token::UpdateTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::user_token::update_user_token(id, payload).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
+    crate::commands::user_token::update_user_token(id, payload)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     Ok(StatusCode::OK)
-}
-
-async fn admin_should_check_updates() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
-{
-    let settings = crate::modules::update_checker::load_update_settings().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-    let should = crate::modules::update_checker::should_check_for_updates(&settings);
-    Ok(Json(should))
-}
-
-async fn admin_get_antigravity_path() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
-{
-    let path = crate::commands::get_antigravity_path(Some(true))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-    Ok(Json(path))
-}
-
-async fn admin_get_antigravity_args() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
-{
-    let args = crate::commands::get_antigravity_args().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-    Ok(Json(args))
-}
-
-async fn admin_clear_antigravity_cache(
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let res = crate::commands::clear_antigravity_cache().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-    Ok(Json(res))
-}
-
-async fn admin_get_antigravity_cache_paths(
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let res = crate::commands::get_antigravity_cache_paths()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-    Ok(Json(res))
 }
 
 async fn admin_clear_log_cache() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
@@ -2205,52 +2280,6 @@ async fn admin_clear_token_stats() -> impl IntoResponse {
     }
 }
 
-async fn admin_get_update_settings() -> impl IntoResponse {
-    // 從真實模組加載設置
-    match crate::modules::update_checker::load_update_settings() {
-        Ok(s) => Json(serde_json::to_value(s).unwrap_or_default()),
-        Err(_) => Json(serde_json::json!({
-            "auto_check": true,
-            "last_check_time": 0,
-            "check_interval_hours": 24
-        })),
-    }
-}
-
-async fn admin_check_for_updates() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let info = crate::modules::update_checker::check_for_updates()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-    Ok(Json(info))
-}
-
-async fn admin_update_last_check_time(
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::modules::update_checker::update_last_check_time().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-    Ok(StatusCode::OK)
-}
-
-async fn admin_save_update_settings(Json(settings): Json<serde_json::Value>) -> impl IntoResponse {
-    if let Ok(s) =
-        serde_json::from_value::<crate::modules::update_checker::UpdateSettings>(settings)
-    {
-        let _ = crate::modules::update_checker::save_update_settings(&s);
-        StatusCode::OK
-    } else {
-        StatusCode::BAD_REQUEST
-    }
-}
-
 async fn admin_is_auto_launch_enabled() -> impl IntoResponse {
     // Note: Autostart requires tauri::AppHandle, which is not available in Axum State easily.
     // For now, return false in Web mode.
@@ -2399,7 +2428,6 @@ async fn admin_warm_up_account(
         })?;
     Ok(Json(result))
 }
-
 
 async fn admin_save_http_api_settings(
     Json(payload): Json<crate::modules::http_api::HttpApiSettings>,
@@ -2630,11 +2658,11 @@ async fn admin_bind_device_profile_with_profile(
     } else {
         &account_id
     };
-    
+
     let profile: crate::models::account::DeviceProfile = payload.profile_wrapper.into();
-    
-    let result =
-        account::bind_device_profile_with_profile(target_account_id, profile, None).map_err(|e| {
+
+    let result = account::bind_device_profile_with_profile(target_account_id, profile, None)
+        .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse { error: e }),
@@ -2692,225 +2720,6 @@ async fn admin_open_folder() -> Result<impl IntoResponse, (StatusCode, Json<Erro
     Ok(StatusCode::OK)
 }
 
-// --- Import Handlers ---
-
-async fn admin_import_v1_accounts(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let accounts = migration::import_from_v1().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-
-    // [FIX #1166] 导入后立即加载
-    let _ = state.token_manager.load_accounts().await;
-
-    let current_id = state.account_service.get_current_id().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-    let responses: Vec<AccountResponse> = accounts
-        .iter()
-        .map(|a| to_account_response(a, &current_id))
-        .collect();
-    Ok(Json(responses))
-}
-
-async fn admin_import_from_db(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let account = migration::import_from_db().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-
-    // [FIX #1166] 导入后立即加载
-    let _ = state.token_manager.load_accounts().await;
-
-    let current_id = state.account_service.get_current_id().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-    Ok(Json(to_account_response(&account, &current_id)))
-}
-
-#[derive(Deserialize)]
-struct CustomDbRequest {
-    path: String,
-}
-
-async fn admin_import_custom_db(
-    State(state): State<AppState>,
-    Json(payload): Json<CustomDbRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // [SECURITY] 禁止目录遍历
-    if payload.path.contains("..") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "非法路径: 不允许目录遍历".to_string(),
-            }),
-        ));
-    }
-
-    let account = migration::import_from_custom_db_path(payload.path)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-
-    // [FIX #1166] 导入后立即加载
-    let _ = state.token_manager.load_accounts().await;
-
-    let current_id = state.account_service.get_current_id().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-    Ok(Json(to_account_response(&account, &current_id)))
-}
-
-async fn admin_sync_account_from_db(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // 逻辑参考自 sync_account_from_db command
-    let db_refresh_token = match migration::get_refresh_token_from_db() {
-        Ok(token) => token,
-        Err(_e) => {
-            return Ok(Json(None));
-        }
-    };
-    let curr_account = account::get_current_account().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-
-    if let Some(acc) = curr_account {
-        if acc.token.refresh_token == db_refresh_token {
-            return Ok(Json(None));
-        }
-    }
-
-    let account = migration::import_from_db().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-
-    // [FIX #1166] 同步后立即重新加载 TokenManager
-    let _ = state.token_manager.load_accounts().await;
-
-    let current_id = state.account_service.get_current_id().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })?;
-    Ok(Json(Some(to_account_response(&account, &current_id))))
-}
-
-// --- CLI Sync Handlers ---
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CliSyncStatusRequest {
-    app_type: crate::proxy::cli_sync::CliApp,
-    proxy_url: String,
-}
-
-async fn admin_get_cli_sync_status(
-    Json(payload): Json<CliSyncStatusRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::cli_sync::get_cli_sync_status(payload.app_type, payload.proxy_url)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CliSyncRequest {
-    app_type: crate::proxy::cli_sync::CliApp,
-    proxy_url: String,
-    api_key: String,
-    pub model: Option<String>,
-}
-
-async fn admin_execute_cli_sync(
-    Json(payload): Json<CliSyncRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::cli_sync::execute_cli_sync(payload.app_type, payload.proxy_url, payload.api_key, payload.model)
-        .await
-        .map(|_| StatusCode::OK)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CliRestoreRequest {
-    app_type: crate::proxy::cli_sync::CliApp,
-}
-
-async fn admin_execute_cli_restore(
-    Json(payload): Json<CliRestoreRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::cli_sync::execute_cli_restore(payload.app_type)
-        .await
-        .map(|_| StatusCode::OK)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CliConfigContentRequest {
-    app_type: crate::proxy::cli_sync::CliApp,
-    file_name: Option<String>,
-}
-
-async fn admin_get_cli_config_content(
-    Json(payload): Json<CliConfigContentRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::cli_sync::get_cli_config_content(payload.app_type, payload.file_name)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })
-}
-
 #[derive(Deserialize)]
 struct OAuthParams {
     code: String,
@@ -2926,6 +2735,23 @@ async fn handle_oauth_callback(
     State(state): State<AppState>,
 ) -> Result<Html<String>, StatusCode> {
     let code = params.code;
+    let received_state = params.state;
+
+    // [SEC-003] Validate OAuth state parameter
+    let Some(state_value) = received_state else {
+        error!("OAuth callback missing state parameter");
+        return Ok(Html(format!(
+            r#"<html><body><h1>Authorization Failed</h1><p>Missing OAuth state parameter (CSRF protection).</p></body></html>"#
+        )));
+    };
+
+    let state_valid = crate::modules::oauth_server::validate_web_oauth_state(&state_value);
+    if !state_valid {
+        error!("OAuth callback state mismatch (CSRF protection)");
+        return Ok(Html(format!(
+            r#"<html><body><h1>Authorization Failed</h1><p>OAuth state mismatch. This request may have been forged (CSRF protection).</p></body></html>"#
+        )));
+    }
 
     // Exchange token
     let port = state.security.read().await.port;
@@ -2999,11 +2825,18 @@ async fn handle_oauth_callback(
                     </div>
                     <script>
                         // 1. Notify opener if exists
-                        if (window.opener) {{
-                            window.opener.postMessage({{
-                                type: 'oauth-success',
-                                message: 'login success'
-                            }}, '*');
+                        // [R2-SEC-001] Use '*' as targetOrigin because the callback (port 8045)
+                        // and the opener (port 1420) are different origins. Security is maintained
+                        // by the receiver's strict origin/source validation (SEC-006).
+                        if (window.opener && !window.opener.closed) {{
+                            try {{
+                                window.opener.postMessage({{
+                                    type: 'oauth-success',
+                                    message: 'login success'
+                                }}, '*');
+                            }} catch(e) {{
+                                console.warn('Failed to notify opener:', e);
+                            }}
                         }}
 
                         // 2. Copy URL functionality
@@ -3169,8 +3002,12 @@ struct IpAccessLogQuery {
     blocked_only: bool,
 }
 
-fn default_page() -> usize { 1 }
-fn default_page_size() -> usize { 50 }
+fn default_page() -> usize {
+    1
+}
+fn default_page_size() -> usize {
+    50
+}
 
 #[derive(Serialize)]
 struct IpAccessLogResponse {
@@ -3182,21 +3019,28 @@ async fn admin_get_ip_access_logs(
     Query(q): Query<IpAccessLogQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let offset = (q.page.max(1) - 1) * q.page_size;
-    let logs = security_db::get_ip_access_logs(
-        q.page_size,
-        offset,
-        q.search.as_deref(),
-        q.blocked_only,
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    let logs =
+        security_db::get_ip_access_logs(q.page_size, offset, q.search.as_deref(), q.blocked_only)
+            .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
 
     let total = logs.len(); // Simple total
-    
+
     Ok(Json(IpAccessLogResponse { logs, total }))
 }
 
-async fn admin_clear_ip_access_logs() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    security_db::clear_ip_access_logs()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+async fn admin_clear_ip_access_logs() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
+{
+    security_db::clear_ip_access_logs().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     Ok(StatusCode::OK)
 }
 
@@ -3209,10 +3053,18 @@ struct IpStatsResponse {
 }
 
 async fn admin_get_ip_stats() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let stats = security_db::get_ip_stats()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
-    let top_ips = security_db::get_top_ips(10, 24)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    let stats = security_db::get_ip_stats().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+    let top_ips = security_db::get_top_ips(10, 24).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
 
     let response = IpStatsResponse {
         total_requests: stats.total_requests as usize,
@@ -3232,16 +3084,23 @@ struct IpTokenStatsQuery {
 async fn admin_get_ip_token_stats(
     Query(q): Query<IpTokenStatsQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let stats = proxy_db::get_token_usage_by_ip(
-        q.limit.unwrap_or(100),
-        q.hours.unwrap_or(720)
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    let stats = proxy_db::get_token_usage_by_ip(q.limit.unwrap_or(100), q.hours.unwrap_or(720))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     Ok(Json(stats))
 }
 
 async fn admin_get_ip_blacklist() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let list = security_db::get_blacklist()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    let list = security_db::get_blacklist().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     Ok(Json(list))
 }
 
@@ -3261,7 +3120,13 @@ async fn admin_add_ip_to_blacklist(
         req.reason.as_deref(),
         req.expires_at,
         "manual",
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
 
     Ok(StatusCode::CREATED)
 }
@@ -3275,25 +3140,47 @@ struct RemoveIpRequest {
 async fn admin_remove_ip_from_blacklist(
     Query(q): Query<RemoveIpRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let entries = security_db::get_blacklist()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
-    
+    let entries = security_db::get_blacklist().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+
     if let Some(entry) = entries.iter().find(|e| e.ip_pattern == q.ip_pattern) {
-        security_db::remove_from_blacklist(&entry.id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+        security_db::remove_from_blacklist(&entry.id).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     } else {
-        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("IP pattern {} not found", q.ip_pattern) })));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("IP pattern {} not found", q.ip_pattern),
+            }),
+        ));
     }
-    
+
     Ok(StatusCode::OK)
 }
 
-async fn admin_clear_ip_blacklist() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let entries = security_db::get_blacklist()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+async fn admin_clear_ip_blacklist() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
+{
+    let entries = security_db::get_blacklist().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     for entry in entries {
-        security_db::remove_from_blacklist(&entry.id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+        security_db::remove_from_blacklist(&entry.id).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     }
     Ok(StatusCode::OK)
 }
@@ -3307,14 +3194,22 @@ struct CheckIpQuery {
 async fn admin_check_ip_in_blacklist(
     Query(q): Query<CheckIpQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let result = security_db::is_ip_in_blacklist(&q.ip)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    let result = security_db::is_ip_in_blacklist(&q.ip).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     Ok(Json(serde_json::json!({ "result": result })))
 }
 
 async fn admin_get_ip_whitelist() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let list = security_db::get_whitelist()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    let list = security_db::get_whitelist().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     Ok(Json(list))
 }
 
@@ -3328,34 +3223,58 @@ struct AddWhitelistRequest {
 async fn admin_add_ip_to_whitelist(
     Json(req): Json<AddWhitelistRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    security_db::add_to_whitelist(
-        &req.ip_pattern,
-        req.description.as_deref(),
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    security_db::add_to_whitelist(&req.ip_pattern, req.description.as_deref()).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     Ok(StatusCode::CREATED)
 }
 
 async fn admin_remove_ip_from_whitelist(
     Query(q): Query<RemoveIpRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let entries = security_db::get_whitelist()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
-    
+    let entries = security_db::get_whitelist().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
+
     if let Some(entry) = entries.iter().find(|e| e.ip_pattern == q.ip_pattern) {
-        security_db::remove_from_whitelist(&entry.id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+        security_db::remove_from_whitelist(&entry.id).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     } else {
-        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("IP pattern {} not found", q.ip_pattern) })));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("IP pattern {} not found", q.ip_pattern),
+            }),
+        ));
     }
     Ok(StatusCode::OK)
 }
 
-async fn admin_clear_ip_whitelist() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let entries = security_db::get_whitelist()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+async fn admin_clear_ip_whitelist() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
+{
+    let entries = security_db::get_whitelist().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     for entry in entries {
-        security_db::remove_from_whitelist(&entry.ip_pattern)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+        security_db::remove_from_whitelist(&entry.ip_pattern).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
     }
     Ok(StatusCode::OK)
 }
@@ -3363,17 +3282,27 @@ async fn admin_clear_ip_whitelist() -> Result<impl IntoResponse, (StatusCode, Js
 async fn admin_check_ip_in_whitelist(
     Query(q): Query<CheckIpQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let result = security_db::is_ip_in_whitelist(&q.ip)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    let result = security_db::is_ip_in_whitelist(&q.ip).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     Ok(Json(serde_json::json!({ "result": result })))
 }
 
 async fn admin_get_security_config(
     State(_state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let app_config = crate::modules::config::load_app_config()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
-    
+    let app_config = crate::modules::config::load_app_config().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
     Ok(Json(app_config.proxy.security_monitor))
 }
 
@@ -3387,13 +3316,25 @@ async fn admin_update_security_config(
     Json(payload): Json<UpdateSecurityConfigWrapper>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let config = payload.config;
-    let mut app_config = crate::modules::config::load_app_config()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
-        
+    let mut app_config = crate::modules::config::load_app_config().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
     app_config.proxy.security_monitor = config.clone();
-    
-    crate::modules::config::save_app_config(&app_config)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+
+    crate::modules::config::save_app_config(&app_config).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     {
         let mut sec = state.security.write().await;
@@ -3430,170 +3371,189 @@ async fn admin_clear_debug_console_logs() -> impl IntoResponse {
     StatusCode::OK
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpencodeSyncStatusRequest {
-    proxy_url: String,
+// ===== LLM Traffic Logging API =====
+
+async fn admin_enable_llm_logging() -> impl IntoResponse {
+    crate::proxy::llm_logger::set_enabled(true);
+    StatusCode::OK
 }
 
-async fn admin_get_opencode_sync_status(
-    Json(payload): Json<OpencodeSyncStatusRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::opencode_sync::get_opencode_sync_status(payload.proxy_url)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })
+async fn admin_disable_llm_logging() -> impl IntoResponse {
+    crate::proxy::llm_logger::set_enabled(false);
+    StatusCode::OK
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpencodeSyncRequest {
-    proxy_url: String,
-    api_key: String,
-    #[serde(default)]
-    sync_accounts: bool,
-    pub models: Option<Vec<String>>,
+async fn admin_get_llm_logging_status() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "enabled": crate::proxy::llm_logger::is_enabled(),
+        "log_file": "/tmp/proxy_llm.log",
+        "details_dir": "/tmp/proxy_llm_details",
+    }))
 }
 
-async fn admin_execute_opencode_sync(
-    Json(payload): Json<OpencodeSyncRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::opencode_sync::execute_opencode_sync(
-        payload.proxy_url,
-        payload.api_key,
-        Some(payload.sync_accounts),
-        payload.models,
-    )
-    .await
-    .map(|_| StatusCode::OK)
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-    })
+// ===== LLM Trace Detail Viewer API =====
+
+const LLM_DETAILS_DIR: &str = "/tmp/proxy_llm_details";
+
+#[derive(Serialize)]
+pub(crate) struct LlmTraceSummary {
+    pub(crate) trace_id: String,
+    pub(crate) timestamp: String,
+    pub(crate) model: Option<String>,
+    pub(crate) stages: Vec<String>,
 }
 
-async fn admin_execute_opencode_restore(
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::opencode_sync::execute_opencode_restore()
-        .await
-        .map(|_| StatusCode::OK)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })
+#[derive(Serialize)]
+pub(crate) struct LlmTraceDetail {
+    pub(crate) trace_id: String,
+    pub(crate) client_request: Option<serde_json::Value>,
+    pub(crate) upstream_request: Option<serde_json::Value>,
+    pub(crate) upstream_response: Option<serde_json::Value>,
+    pub(crate) client_response: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GetOpencodeConfigRequest {
-    file_name: Option<String>,
+const LLM_STAGES: &[&str] = &[
+    "client_request",
+    "upstream_request",
+    "upstream_response",
+    "client_response",
+];
+
+pub(crate) fn scan_llm_traces() -> Vec<LlmTraceSummary> {
+    let dir = std::path::Path::new(LLM_DETAILS_DIR);
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut traces: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".json") {
+                continue;
+            }
+            if let Some(dot_pos) = name.rfind('.') {
+                let base = &name[..dot_pos];
+                if let Some(underscore_pos) = base.find('_') {
+                    let trace_id = &base[..underscore_pos];
+                    let stage = &base[underscore_pos + 1..];
+                    if LLM_STAGES.contains(&stage) {
+                        traces
+                            .entry(trace_id.to_string())
+                            .or_default()
+                            .push(stage.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut summaries: Vec<LlmTraceSummary> = Vec::new();
+    for (trace_id, stages) in &traces {
+        let cr_path = dir.join(format!("{}_client_request.json", trace_id));
+        let (timestamp, model) = if let Ok(content) = std::fs::read_to_string(&cr_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                (
+                    json["timestamp"].as_str().unwrap_or("").to_string(),
+                    json["model"].as_str().map(|s| s.to_string()),
+                )
+            } else {
+                (String::new(), None)
+            }
+        } else {
+            (String::new(), None)
+        };
+        let mut stages = stages.clone();
+        stages.sort();
+        summaries.push(LlmTraceSummary {
+            trace_id: trace_id.clone(),
+            timestamp,
+            model,
+            stages,
+        });
+    }
+
+    summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    summaries
 }
 
-async fn admin_get_opencode_config_content(
-    Json(payload): Json<GetOpencodeConfigRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let file_name = payload.file_name;
-    tokio::task::spawn_blocking(move || crate::proxy::opencode_sync::read_opencode_config_content(file_name))
-        .await
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e.to_string() }),
-        ))?
-        .map(Json)
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        ))
+pub(crate) fn read_llm_trace_detail(trace_id: &str) -> Result<LlmTraceDetail, String> {
+    if trace_id.contains("..") || trace_id.contains('/') || trace_id.contains('\\') {
+        return Err("Invalid trace ID".to_string());
+    }
+
+    let dir = std::path::Path::new(LLM_DETAILS_DIR);
+    let mut detail = LlmTraceDetail {
+        trace_id: trace_id.to_string(),
+        client_request: None,
+        upstream_request: None,
+        upstream_response: None,
+        client_response: None,
+    };
+
+    for stage in LLM_STAGES {
+        let path = dir.join(format!("{}_{}.json", trace_id, stage));
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                match *stage {
+                    "client_request" => detail.client_request = Some(json),
+                    "upstream_request" => detail.upstream_request = Some(json),
+                    "upstream_response" => detail.upstream_response = Some(json),
+                    "client_response" => detail.client_response = Some(json),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if detail.client_request.is_none()
+        && detail.upstream_request.is_none()
+        && detail.upstream_response.is_none()
+        && detail.client_response.is_none()
+    {
+        return Err("Trace not found".to_string());
+    }
+
+    Ok(detail)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpencodeClearRequest {
-    proxy_url: Option<String>,
-    clear_legacy: Option<bool>,
+async fn admin_list_llm_traces() -> impl IntoResponse {
+    Json(scan_llm_traces())
 }
 
-async fn admin_execute_opencode_clear(
-    Json(payload): Json<OpencodeClearRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::opencode_sync::execute_opencode_clear(payload.proxy_url, payload.clear_legacy)
-        .await
-        .map(|_| StatusCode::OK)
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        ))
+async fn admin_get_llm_trace_detail(
+    Path(trace_id): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    match read_llm_trace_detail(&trace_id) {
+        Ok(detail) => Ok(Json(detail).into_response()),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
 }
 
-// ── Droid (Factory CLI) Sync Admin Handlers ──
+async fn admin_delete_llm_trace(
+    Path(trace_id): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    if trace_id.contains("..") || trace_id.contains('/') || trace_id.contains('\\') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DroidSyncStatusRequest {
-    proxy_url: String,
-}
+    let dir = std::path::Path::new(LLM_DETAILS_DIR);
+    let mut deleted = 0;
+    for stage in LLM_STAGES {
+        let path = dir.join(format!("{}_{}.json", trace_id, stage));
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            deleted += 1;
+        }
+    }
 
-async fn admin_get_droid_sync_status(
-    Json(payload): Json<DroidSyncStatusRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::droid_sync::get_droid_sync_status(payload.proxy_url)
-        .await
-        .map(Json)
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        ))
-}
+    if deleted == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DroidSyncRequest {
-    custom_models: Vec<serde_json::Value>,
-}
-
-async fn admin_execute_droid_sync(
-    Json(payload): Json<DroidSyncRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::droid_sync::execute_droid_sync(
-        payload.custom_models,
-    )
-        .await
-        .map(|count| Json(serde_json::json!({ "added": count })))
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        ))
-}
-
-async fn admin_execute_droid_restore(
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::droid_sync::execute_droid_restore()
-        .await
-        .map(|_| StatusCode::OK)
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        ))
-}
-
-async fn admin_get_droid_config_content(
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::proxy::droid_sync::get_droid_config_content()
-        .await
-        .map(Json)
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        ))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ─── Provider Model Testing ───
@@ -3608,14 +3568,16 @@ async fn admin_test_provider_models(
     State(state): State<AppState>,
     Json(payload): Json<TestProviderRequest>,
 ) -> impl IntoResponse {
-    use crate::proxy::config::ProviderProtocol;
+    
 
     let provider = payload.provider;
 
     if provider.api_key.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: "Provider API key is empty".into() }),
+            Json(ErrorResponse {
+                error: "Provider API key is empty".into(),
+            }),
         ));
     }
 
@@ -3633,7 +3595,9 @@ async fn admin_test_provider_models(
     if models.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: "No models configured for this provider".into() }),
+            Json(ErrorResponse {
+                error: "No models configured for this provider".into(),
+            }),
         ));
     }
 
@@ -3668,6 +3632,266 @@ async fn admin_test_provider_models(
     Ok(Json(serde_json::json!({ "results": results })))
 }
 
+/// Discover models from a provider's API
+async fn admin_discover_provider_models(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // 手动提取 provider 字段
+    let provider_value = payload.get("provider").cloned().unwrap_or_else(|| payload.clone());
+    // 手动提取布尔参数
+    let update_config = payload.get("update_config").and_then(|v| v.as_bool()).unwrap_or(false);
+    let reload_router = payload.get("reload_router").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let provider: crate::proxy::config::UpstreamProvider =
+        match serde_json::from_value(provider_value) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid provider config: {}", e),
+                    }),
+                ))
+            }
+        };
+
+    if provider.api_key.trim().is_empty() && !matches!(provider.protocol, crate::proxy::config::ProviderProtocol::AnthropicPassthrough) {
+        // Some providers (like Ollama local) don't need API keys
+        tracing::warn!(
+            "[ModelDiscovery] Provider '{}' has empty API key, attempting discovery anyway",
+            provider.name
+        );
+    }
+
+    match crate::proxy::provider_discovery::discover_provider_models(&provider).await {
+        Ok(discovered) => {
+            let model_ids: Vec<String> = discovered.iter().map(|m| m.id.clone()).collect();
+            let csv = crate::proxy::provider_discovery::models_to_csv(&discovered);
+
+            tracing::info!(
+                "[ModelDiscovery] Provider '{}' discovered {} models: {}",
+                provider.name,
+                model_ids.len(),
+                csv
+            );
+
+            // Optionally update config and reload router
+            if update_config || reload_router {
+                // Get current config, update the provider's available_models
+                match crate::modules::config::load_app_config() {
+                    Ok(mut config) => {
+                        let mut updated = false;
+                        for p in config.proxy.providers.iter_mut() {
+                            if p.provider_id == provider.provider_id
+                                || (p.provider_id.is_none() && p.name == provider.name)
+                            {
+                                p.available_models = if csv.is_empty() {
+                                    None
+                                } else {
+                                    Some(csv.clone())
+                                };
+                                updated = true;
+                                tracing::info!(
+                                    "[ModelDiscovery] Updated available_models for provider '{}' in config",
+                                    p.name
+                                );
+                                break;
+                            }
+                        }
+
+                        if updated {
+                            // Save config
+                            if let Err(e) = crate::modules::config::save_app_config(&config) {
+                                tracing::error!("[ModelDiscovery] Failed to save config: {}", e);
+                            } else {
+                                tracing::info!("[ModelDiscovery] Config saved to disk");
+                            }
+
+                            // Reload provider router if requested
+                            if reload_router {
+                                let zai = state.zai.read().await.clone();
+                                let new_router =
+                                    crate::proxy::providers::router::ProviderRouter::new(
+                                        config.proxy.providers.clone(),
+                                        Some(&zai),
+                                    );
+                                let mut router = state.provider_router.write().await;
+                                *router = new_router;
+                                drop(router);
+                                tracing::info!("[ModelDiscovery] Provider router hot-reloaded with new models");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[ModelDiscovery] Failed to load config for update: {}", e);
+                    }
+                }
+            }
+
+            Ok(Json(serde_json::json!({
+                "provider": provider.name,
+                "providerId": provider.provider_id,
+                "protocol": format!("{:?}", provider.protocol),
+                "discoveredCount": discovered.len(),
+                "models": model_ids,
+                "availableModelsCsv": csv,
+            })))
+        }
+        Err(e) => {
+            tracing::error!("[ModelDiscovery] Failed for provider '{}': {}", provider.name, e);
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Model discovery failed: {}", e),
+                }),
+            ))
+        }
+    }
+}
+
+/// Discover models from ALL enabled providers
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoverAllProvidersRequest {
+    /// Whether to update the config file with discovered models
+    #[serde(default)]
+    update_config: bool,
+    /// Whether to trigger a hot-reload of the provider router
+    #[serde(default)]
+    reload_router: bool,
+}
+
+async fn admin_discover_all_provider_models(
+    State(state): State<AppState>,
+    Json(payload): Json<DiscoverAllProvidersRequest>,
+) -> impl IntoResponse {
+    // Load current config to get all providers
+    let config = match crate::modules::config::load_app_config() {
+        Ok(c) => c,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to load config: {}", e),
+                }),
+            ))
+        }
+    };
+
+    let mut results = Vec::new();
+
+    for provider in &config.proxy.providers {
+        if !provider.enabled {
+            continue;
+        }
+
+        let result = match crate::proxy::provider_discovery::discover_provider_models(provider).await
+        {
+            Ok(discovered) => {
+                let model_ids: Vec<String> = discovered.iter().map(|m| m.id.clone()).collect();
+                let csv = crate::proxy::provider_discovery::models_to_csv(&discovered);
+
+                tracing::info!(
+                    "[ModelDiscovery] Provider '{}' discovered {} models",
+                    provider.name,
+                    model_ids.len()
+                );
+
+                serde_json::json!({
+                    "provider": provider.name,
+                    "providerId": provider.provider_id,
+                    "protocol": format!("{:?}", provider.protocol),
+                    "success": true,
+                    "discoveredCount": discovered.len(),
+                    "models": model_ids,
+                    "availableModelsCsv": csv,
+                })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[ModelDiscovery] Provider '{}' failed: {}",
+                    provider.name,
+                    e
+                );
+                serde_json::json!({
+                    "provider": provider.name,
+                    "providerId": provider.provider_id,
+                    "success": false,
+                    "error": e.to_string(),
+                })
+            }
+        };
+        results.push(result);
+    }
+
+    // Optionally update config and reload router
+    if payload.update_config || payload.reload_router {
+        let mut updated_config = config.clone();
+        let mut any_updated = false;
+
+        for result in &results {
+            if !result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                continue;
+            }
+
+            let csv = result.get("availableModelsCsv").and_then(|v| v.as_str());
+            let provider_name = result.get("provider").and_then(|v| v.as_str());
+
+            if let (Some(csv_val), Some(name)) = (csv, provider_name) {
+                for p in updated_config.proxy.providers.iter_mut() {
+                    if p.name == name {
+                        p.available_models = if csv_val.is_empty() {
+                            None
+                        } else {
+                            Some(csv_val.to_string())
+                        };
+                        any_updated = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if any_updated {
+            if let Err(e) = crate::modules::config::save_app_config(&updated_config) {
+                tracing::error!("[ModelDiscovery] Failed to save config: {}", e);
+            } else {
+                tracing::info!("[ModelDiscovery] All discovered models saved to config");
+
+                if payload.reload_router {
+                    let zai = state.zai.read().await.clone();
+                    let new_router =
+                        crate::proxy::providers::router::ProviderRouter::new(
+                            updated_config.proxy.providers.clone(),
+                            Some(&zai),
+                        );
+                    let mut router = state.provider_router.write().await;
+                    *router = new_router;
+                    drop(router);
+                    tracing::info!("[ModelDiscovery] Provider router hot-reloaded");
+                }
+            }
+        }
+    }
+
+    let success_count = results
+        .iter()
+        .filter(|r| r.get("success").and_then(|v| v.as_bool()).unwrap_or(false))
+        .count();
+    let total_models: usize = results
+        .iter()
+        .filter_map(|r| r.get("discoveredCount").and_then(|v| v.as_u64()).map(|v| v as usize))
+        .sum();
+
+    Ok(Json(serde_json::json!({
+        "totalProviders": results.len(),
+        "successCount": success_count,
+        "totalModelsDiscovered": total_models,
+        "results": results,
+    })))
+}
+
 fn build_test_provider_client(
     upstream_proxy: &crate::proxy::config::UpstreamProxyConfig,
     timeout_secs: u64,
@@ -3679,8 +3903,7 @@ fn build_test_provider_client(
     if upstream_proxy.enabled && !upstream_proxy.url.is_empty() {
         let url = crate::proxy::config::normalize_proxy_url(&upstream_proxy.url);
         builder = builder.proxy(
-            reqwest::Proxy::all(&url)
-                .map_err(|e| format!("Invalid upstream proxy url: {}", e))?,
+            reqwest::Proxy::all(&url).map_err(|e| format!("Invalid upstream proxy url: {}", e))?,
         );
     }
 
@@ -3696,19 +3919,36 @@ async fn test_provider_single_model(
 ) -> Result<(), String> {
     use crate::proxy::config::ProviderProtocol;
 
+    /// Check if a base URL already ends with an API version segment like /v1, /v2, /v3, /v4, etc.
+    /// Returns true if the URL ends with a version segment, meaning no additional /v1 should be appended.
+    fn has_api_version_suffix(base: &str) -> bool {
+        let tail = base.trim_end_matches('/');
+        // Check if the last path segment matches /v{digit}
+        if let Some(pos) = tail.rfind('/') {
+            let last_segment = &tail[pos + 1..];
+            if last_segment.len() >= 2
+                && last_segment.starts_with('v')
+                && last_segment[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     let base = provider.base_url.trim_end_matches('/');
 
-    // If base_url already contains "/v1/", the endpoint path is fully configured.
-    // Don't append additional version segments (e.g. BAILIAN: .../apps/anthropic).
-    let has_v1 = base.contains("/v1/");
+    // If base_url already contains "/v1/" or ends with a version segment like /v4,
+    // the endpoint path is fully configured. Don't append additional version segments.
+    let has_version = base.contains("/v1/") || has_api_version_suffix(base);
 
     let resp = match provider.protocol {
         ProviderProtocol::AnthropicPassthrough => {
             // Anthropic-compatible endpoint: join base_url with /v1/messages path.
             // e.g. BAILIAN: https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages
-            // e.g. BIGMODEL: https://open.bigmodel.cn/api/anthropic/v1/messages
-            let url = if has_v1 {
-                base.to_string()
+            // e.g. BIGMODEL_OP: https://open.bigmodel.cn/api/paas/v4/chat/completions (OpenAI compat)
+            let url = if has_version {
+                format!("{}/messages", base)
             } else {
                 format!("{}/v1/messages", base)
             };
@@ -3731,8 +3971,12 @@ async fn test_provider_single_model(
                 .await
         }
         ProviderProtocol::OpenAICompatible => {
-            let url = if has_v1 {
-                base.to_string()
+            // OpenAI-compatible endpoint: append /chat/completions.
+            // If base_url already has a version like /v4, skip the /v1 prefix.
+            // e.g. BIGMODEL_OP: https://open.bigmodel.cn/api/paas/v4/chat/completions
+            // e.g. Normal: https://api.openai.com/v1/chat/completions
+            let url = if has_version {
+                format!("{}/chat/completions", base)
             } else {
                 format!("{}/v1/chat/completions", base)
             };
@@ -3743,6 +3987,7 @@ async fn test_provider_single_model(
             client
                 .post(&url)
                 .header("content-type", "application/json")
+                .header("user-agent", "claude-code/1.0.0")
                 .bearer_auth(&provider.api_key)
                 .json(&body)
                 .send()

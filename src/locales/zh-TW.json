@@ -325,14 +325,7 @@
             "auto_launch": "開機自動啟動",
             "auto_launch_enabled": "啟用",
             "auto_launch_disabled": "停用",
-            "auto_launch_desc": "系統啟動時自動執行 Antigravity Tools",
-            "auto_check_update": "自動檢查更新",
-            "auto_check_update_desc": "啟動時自動檢查新版本",
-            "auto_check_update_enabled": "已啟用自動檢查更新",
-            "auto_check_update_disabled": "已停用自動檢查更新",
-            "update_check_interval": "檢查間隔(小時)",
-            "update_check_interval_desc": "設定自動檢查更新的時間間隔(1-168 小時)",
-            "update_check_interval_saved": "已儲存檢查間隔設定"
+            "auto_launch_desc": "系統啟動時自動執行 Antigravity Tools"
         },
         "account": {
             "title": "帳號設定",
@@ -483,12 +476,6 @@
             "github": "開源地址",
             "view_code": "檢視程式碼",
             "copyright": "Copyright © 2025-2026 Antigravity. All rights reserved.",
-            "check_update": "檢查更新",
-            "checking_update": "檢查中...",
-            "latest_version": "已是最新版本",
-            "new_version_available": "發現新版本 {{version}}",
-            "download_update": "前往下載",
-            "update_check_failed": "檢查更新失敗",
             "support_btn": "贊助作者",
             "support_title": "贊助支持",
             "support_desc": "如果您覺得本工具對您有幫助，歡迎掃碼請作者喝杯咖啡！您的支持是我持續維護項目的最大動力。",

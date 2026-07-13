@@ -42,17 +42,15 @@ pub fn claude_to_openai_body(request: &ClaudeRequest) -> Value {
             }
             MessageContent::Array(blocks) => {
                 // Check if all blocks are text and can be joined into a single string
-                let all_text: Option<String> = blocks.iter().try_fold(
-                    String::new(),
-                    |mut acc, b| {
+                let all_text: Option<String> =
+                    blocks.iter().try_fold(String::new(), |mut acc, b| {
                         if let ContentBlock::Text { text } = b {
                             acc.push_str(text);
                             Some(acc)
                         } else {
                             None
                         }
-                    },
-                );
+                    });
 
                 if let Some(text) = all_text {
                     messages.push(json!({
@@ -136,12 +134,26 @@ pub fn claude_to_openai_body(request: &ClaudeRequest) -> Value {
     }
 
     // Convert Claude thinking to OpenAI thinking format
-    if let Some(ref thinking) = request.thinking {
-        body["thinking"] = json!({
-            "type": thinking.type_.clone(),
-            "budget_tokens": thinking.budget_tokens,
-            "effort": thinking.effort,
-        });
+    // Only include thinking config if there are actual thinking blocks in messages.
+    // If they were stripped by the sanitizer (e.g. signature mismatch, cache miss),
+    // sending the thinking config causes "content[].thinking must be passed back" errors.
+    let has_thinking_blocks = request.messages.iter().any(|msg| {
+        if let MessageContent::Array(blocks) = &msg.content {
+            blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Thinking { .. }))
+        } else {
+            false
+        }
+    });
+    if has_thinking_blocks {
+        if let Some(ref thinking) = request.thinking {
+            body["thinking"] = json!({
+                "type": thinking.type_.clone(),
+                "budget_tokens": thinking.budget_tokens,
+                "effort": thinking.effort,
+            });
+        }
     }
 
     body
@@ -157,10 +169,7 @@ fn content_block_to_openai(block: &ContentBlock) -> Option<Value> {
         })),
         ContentBlock::Image { source, .. } => {
             // Convert base64 image to data URL
-            let data_url = format!(
-                "data:{};base64,{}",
-                source.media_type, source.data
-            );
+            let data_url = format!("data:{};base64,{}", source.media_type, source.data);
             Some(json!({
                 "type": "image_url",
                 "image_url": {
@@ -172,13 +181,19 @@ fn content_block_to_openai(block: &ContentBlock) -> Option<Value> {
             "type": "text",
             "text": format!("<thinking>{}</thinking>", thinking),
         })),
-        ContentBlock::ToolUse { id, name, input, .. } => Some(json!({
+        ContentBlock::ToolUse {
+            id, name, input, ..
+        } => Some(json!({
             "type": "tool_use",
             "id": id,
             "name": name,
             "input": input,
         })),
-        ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
             let text = match content {
                 serde_json::Value::String(s) => s.clone(),
                 other => serde_json::to_string(other).unwrap_or_default(),
@@ -210,12 +225,10 @@ mod tests {
     fn test_basic_text_conversion() {
         let claude_req = ClaudeRequest {
             model: "claude-sonnet-4-20250514".to_string(),
-            messages: vec![
-                Message {
-                    role: "user".to_string(),
-                    content: MessageContent::String("Hello".to_string()),
-                },
-            ],
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::String("Hello".to_string()),
+            }],
             system: None,
             tools: None,
             stream: false,
@@ -239,6 +252,94 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[0]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_thinking_config_omitted_when_no_thinking_blocks() {
+        // Regression test for DeepSeek 400 error:
+        // "content[].thinking in thinking mode must be passed back"
+        // When thinking blocks are stripped by the sanitizer, the thinking config
+        // must NOT be included in the OpenAI body.
+        let claude_req = ClaudeRequest {
+            model: "claude-opus-4-6".to_string(),
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: MessageContent::String("Hello".to_string()),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: MessageContent::Array(vec![ContentBlock::Text {
+                        text: "Let me think.".to_string(),
+                    }]),
+                },
+            ],
+            system: None,
+            tools: None,
+            stream: false,
+            max_tokens: Some(1024),
+            temperature: Some(0.7),
+            top_p: None,
+            top_k: None,
+            thinking: Some(crate::proxy::mappers::claude::models::ThinkingConfig {
+                type_: "enabled".to_string(),
+                budget_tokens: Some(4096),
+                effort: None,
+            }),
+            metadata: None,
+            output_config: None,
+            size: None,
+            quality: None,
+        };
+
+        let openai_body = claude_to_openai_body(&claude_req);
+        assert!(
+            openai_body.get("thinking").is_none(),
+            "thinking config should NOT be present when messages have no thinking blocks"
+        );
+    }
+
+    #[test]
+    fn test_thinking_config_included_when_thinking_blocks_exist() {
+        let claude_req = ClaudeRequest {
+            model: "claude-opus-4-6".to_string(),
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Array(vec![
+                    ContentBlock::Thinking {
+                        thinking: "hmm...".to_string(),
+                        signature: Some("sig123".to_string()),
+                        cache_control: None,
+                    },
+                    ContentBlock::Text {
+                        text: "Answer.".to_string(),
+                    },
+                ]),
+            }],
+            system: None,
+            tools: None,
+            stream: false,
+            max_tokens: Some(1024),
+            temperature: Some(0.7),
+            top_p: None,
+            top_k: None,
+            thinking: Some(crate::proxy::mappers::claude::models::ThinkingConfig {
+                type_: "enabled".to_string(),
+                budget_tokens: Some(4096),
+                effort: None,
+            }),
+            metadata: None,
+            output_config: None,
+            size: None,
+            quality: None,
+        };
+
+        let openai_body = claude_to_openai_body(&claude_req);
+        assert!(
+            openai_body.get("thinking").is_some(),
+            "thinking config should be present when messages contain thinking blocks"
+        );
+        assert_eq!(openai_body["thinking"]["budget_tokens"], 4096);
     }
 
     #[test]

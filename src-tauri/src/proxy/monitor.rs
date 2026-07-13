@@ -1,8 +1,8 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use tokio::sync::RwLock;
-use tauri::Emitter;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::Emitter;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyRequestLog {
@@ -11,19 +11,25 @@ pub struct ProxyRequestLog {
     pub method: String,
     pub url: String,
     pub status: u16,
-    pub duration: u64, // ms
+    pub duration: u64,                // ms
     pub model: Option<String>,        // 客户端请求的模型名
     pub mapped_model: Option<String>, // 实际路由后使用的模型名
     pub account_email: Option<String>,
-    pub provider_name: Option<String>,   // 供应商名称（使用供应商通道时）
-    pub client_ip: Option<String>,    // 客户端 IP 地址
+    pub provider_name: Option<String>, // 供应商名称（使用供应商通道时）
+    pub client_ip: Option<String>,     // 客户端 IP 地址
     pub error: Option<String>,
     pub request_body: Option<String>,
     pub response_body: Option<String>,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
-    pub protocol: Option<String>,     // 协议类型: "openai", "anthropic", "gemini"
-    pub username: Option<String>,     // User token username
+    pub protocol: Option<String>, // 协议类型: "openai", "anthropic", "gemini"
+    pub upstream_protocol: Option<String>, // 上游供应商协议 (egress), e.g. "anthropic", "openai", "gemini"
+    pub upstream_model: Option<String>,    // 实际发送给上游的模型名
+    pub upstream_url: Option<String>,      // 实际请求的上游 URL
+    pub upstream_request_body: Option<String>, // 发送给供应商的请求报文
+    pub upstream_response_body: Option<String>, // 供应商的响应报文
+    pub username: Option<String>,          // User token username
+    pub in_flight: bool,                   // 请求是否正在进行中（分段更新）
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -38,7 +44,7 @@ pub struct ProxyMonitor {
     pub stats: RwLock<ProxyStats>,
     pub max_logs: usize,
     pub enabled: AtomicBool,
-    app_handle: Option<tauri::AppHandle>,
+    pub(crate) app_handle: Option<tauri::AppHandle>,
 }
 
 impl ProxyMonitor {
@@ -66,7 +72,7 @@ impl ProxyMonitor {
             logs: RwLock::new(VecDeque::with_capacity(max_logs)),
             stats: RwLock::new(ProxyStats::default()),
             max_logs,
-            enabled: AtomicBool::new(false), // Default to disabled
+            enabled: AtomicBool::new(true), // Default to enabled
             app_handle,
         }
     }
@@ -80,15 +86,15 @@ impl ProxyMonitor {
     }
 
     pub async fn log_request(&self, log: ProxyRequestLog) {
-        if let (Some(account), Some(input), Some(output)) = (
-            &log.account_email,
-            log.input_tokens,
-            log.output_tokens,
-        ) {
+        if let (Some(account), Some(input), Some(output)) =
+            (&log.account_email, log.input_tokens, log.output_tokens)
+        {
             let model = log.model.clone().unwrap_or_else(|| "unknown".to_string());
             let account = account.clone();
             tokio::spawn(async move {
-                if let Err(e) = crate::modules::token_stats::record_usage(&account, &model, input, output) {
+                if let Err(e) =
+                    crate::modules::token_stats::record_usage(&account, &model, input, output)
+                {
                     tracing::debug!("Failed to record token stats: {}", e);
                 }
             });
@@ -143,7 +149,7 @@ impl ProxyMonitor {
                 };
 
                 if let Err(e) = crate::modules::security_db::save_ip_access_log(&security_log) {
-                     tracing::error!("Failed to save security log: {}", e);
+                    tracing::error!("Failed to save security log: {}", e);
                 }
             }
 
@@ -153,8 +159,13 @@ impl ProxyMonitor {
                 log_to_save.input_tokens,
                 log_to_save.output_tokens,
             ) {
-                let model = log_to_save.model.clone().unwrap_or_else(|| "unknown".to_string());
-                if let Err(e) = crate::modules::token_stats::record_usage(account, &model, input, output) {
+                let model = log_to_save
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                if let Err(e) =
+                    crate::modules::token_stats::record_usage(account, &model, input, output)
+                {
                     tracing::debug!("Failed to record token stats: {}", e);
                 }
             }
@@ -180,7 +191,13 @@ impl ProxyMonitor {
                 input_tokens: log.input_tokens,
                 output_tokens: log.output_tokens,
                 protocol: log.protocol.clone(),
+                upstream_protocol: log.upstream_protocol.clone(),
+                upstream_model: log.upstream_model.clone(),
+                upstream_url: log.upstream_url.clone(),
+                upstream_request_body: None,  // Don't send body in event
+                upstream_response_body: None, // Don't send body in event
                 username: log.username.clone(),
+                in_flight: log.in_flight,
             };
             let _ = app.emit("proxy://request", &log_summary);
         }
@@ -188,9 +205,8 @@ impl ProxyMonitor {
 
     pub async fn get_logs(&self, limit: usize) -> Vec<ProxyRequestLog> {
         // Try to get from DB first for true history
-        let db_result = tokio::task::spawn_blocking(move || {
-            crate::modules::proxy_db::get_logs(limit)
-        }).await;
+        let db_result =
+            tokio::task::spawn_blocking(move || crate::modules::proxy_db::get_logs(limit)).await;
 
         match db_result {
             Ok(Ok(logs)) => logs,
@@ -209,9 +225,7 @@ impl ProxyMonitor {
     }
 
     pub async fn get_stats(&self) -> ProxyStats {
-        let db_result = tokio::task::spawn_blocking(|| {
-            crate::modules::proxy_db::get_stats()
-        }).await;
+        let db_result = tokio::task::spawn_blocking(|| crate::modules::proxy_db::get_stats()).await;
 
         match db_result {
             Ok(Ok(stats)) => stats,
@@ -225,7 +239,7 @@ impl ProxyMonitor {
             }
         }
     }
-    
+
     pub async fn get_logs_filtered(
         &self,
         page: usize,
@@ -239,14 +253,15 @@ impl ProxyMonitor {
 
         let res = tokio::task::spawn_blocking(move || {
             crate::modules::proxy_db::get_logs_filtered(&search, errors_only, page_size, offset)
-        }).await;
+        })
+        .await;
 
         match res {
             Ok(r) => r,
             Err(e) => Err(format!("Spawn blocking failed: {}", e)),
         }
     }
-    
+
     pub async fn clear(&self) {
         let mut logs = self.logs.write().await;
         logs.clear();
@@ -257,6 +272,7 @@ impl ProxyMonitor {
             if let Err(e) = crate::modules::proxy_db::clear_logs() {
                 tracing::error!("Failed to clear logs in DB: {}", e);
             }
-        }).await;
+        })
+        .await;
     }
 }

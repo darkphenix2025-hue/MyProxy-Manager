@@ -327,14 +327,7 @@
             "auto_launch": "تشغيل عند البدء",
             "auto_launch_enabled": "مفعل",
             "auto_launch_disabled": "معطل",
-            "auto_launch_desc": "تشغيل Antigravity Tools تلقائيًا عند بدء النظام",
-            "auto_check_update": "تحقق تلقائي من التحديثات",
-            "auto_check_update_desc": "التحقق تلقائيًا من الإصدارات الجديدة عند البدء",
-            "auto_check_update_enabled": "التحقق التلقائي مفعل",
-            "auto_check_update_disabled": "التحقق التلقائي معطل",
-            "update_check_interval": "فاصل التحقق (ساعات)",
-            "update_check_interval_desc": "تعيين فاصل التحقق التلقائي (1-168 ساعة)",
-            "update_check_interval_saved": "تم حفظ إعدادات فاصل التحقق"
+            "auto_launch_desc": "تشغيل Antigravity Tools تلقائيًا عند بدء النظام"
         },
         "account": {
             "title": "إعدادات الحساب",
@@ -491,12 +484,6 @@
             "github": "GitHub",
             "view_code": "عرض الكود",
             "copyright": "حقوق النشر © 2025-2026 Antigravity. جميع الحقوق محفوظة.",
-            "check_update": "تحقق من التحديثات",
-            "checking_update": "جاري التحقق...",
-            "latest_version": "أنت على أحدث إصدار",
-            "new_version_available": "إصدار جديد {{version}} متاح",
-            "download_update": "تنزيل",
-            "update_check_failed": "فشل التحقق من التحديث",
             "support_btn": "دعم المؤلف",
             "support_title": "تبرع ودعم",
             "support_desc": "إذا وجدت هذا المشروع مفيدًا، لا تتردد في شراء قهوة لي! دعمك هو أكبر حافز لي لصيانة هذا المشروع.",

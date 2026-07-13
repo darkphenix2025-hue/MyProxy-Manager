@@ -7,9 +7,9 @@ use bytes::Bytes;
 use serde_json::Value;
 use tokio::time::Duration;
 
-use crate::proxy::server::AppState;
 use crate::proxy::config::UpstreamProvider;
 use crate::proxy::mappers::openai::OpenAIRequest;
+use crate::proxy::server::AppState;
 
 /// Build a URL for Google v1internal API using the colon separator convention.
 fn build_v1internal_url(base_url: &str, method: &str, query: Option<&str>) -> String {
@@ -25,8 +25,7 @@ fn build_v1internal_client(
     upstream_proxy: Option<crate::proxy::config::UpstreamProxyConfig>,
     timeout_secs: u64,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs.max(5)));
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs.max(5)));
 
     if let Some(config) = upstream_proxy {
         if config.enabled && !config.url.is_empty() {
@@ -52,14 +51,10 @@ pub async fn forward_gemini_v1internal_with_provider(
     headers: &axum::http::HeaderMap,
 ) -> Response {
     use crate::proxy::mappers::openai::{
-        transform_openai_request, transform_openai_response,
-        streaming::create_openai_sse_stream,
+        streaming::create_openai_sse_stream, transform_openai_request, transform_openai_response,
     };
 
-    let trace_id = format!(
-        "req_{}",
-        chrono::Utc::now().timestamp_subsec_millis()
-    );
+    let trace_id = format!("req_{}", chrono::Utc::now().timestamp_subsec_millis());
     let _trace_id = &trace_id; // reserved for future debug logging
 
     // Map model name using provider config
@@ -84,11 +79,7 @@ pub async fn forward_gemini_v1internal_with_provider(
     } else {
         "generateContent"
     };
-    let query_string = if actual_stream {
-        Some("alt=sse")
-    } else {
-        None
-    };
+    let query_string = if actual_stream { Some("alt=sse") } else { None };
 
     let url = build_v1internal_url(&provider.base_url, method, query_string);
 
@@ -121,10 +112,7 @@ pub async fn forward_gemini_v1internal_with_provider(
 
     // Build request headers
     let mut req_headers = axum::http::HeaderMap::new();
-    req_headers.insert(
-        "content-type",
-        HeaderValue::from_static("application/json"),
-    );
+    req_headers.insert("content-type", HeaderValue::from_static("application/json"));
     // v1internal uses Bearer token auth with the API key
     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", provider.api_key)) {
         req_headers.insert("authorization", v);
@@ -160,7 +148,13 @@ pub async fn forward_gemini_v1internal_with_provider(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.bytes().await.unwrap_or_default();
-        return (status, String::from_utf8_lossy(&error_body).to_string()).into_response();
+        return Response::builder()
+            .status(status)
+            .header("x-provider-name", &provider.name)
+            .header("x-mapped-model", &mapped_model)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(String::from_utf8_lossy(&error_body).to_string()))
+            .unwrap_or_else(|_| (status, "Failed to build response").into_response());
     }
 
     // Stream the response
@@ -270,6 +264,8 @@ pub async fn forward_gemini_via_anthropic(
         claude_body,
         0, // message_count not available in Gemini native format
         &provider.name,
+        None,
+        None,
     )
     .await;
 
@@ -341,7 +337,7 @@ pub async fn forward_gemini_via_openai_compat(
     provider: &UpstreamProvider,
     model_name: &str, // [FIX] Pass model from URL path, not from body
     body: &Value,
-    headers: &axum::http::HeaderMap,
+    _headers: &axum::http::HeaderMap,
     client_wants_stream: bool,
 ) -> Response {
     use crate::proxy::mappers::gemini::openai_bridge::{
@@ -374,19 +370,20 @@ pub async fn forward_gemini_via_openai_compat(
         .request_timeout_secs
         .unwrap_or(state.request_timeout.max(5));
 
-    let client = match crate::proxy::providers::zai_openai_compat::build_openai_compat_client_for_provider(
-        Some(state.upstream_proxy.read().await.clone()),
-        timeout_secs,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to build client: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let client =
+        match crate::proxy::providers::zai_openai_compat::build_openai_compat_client_for_provider(
+            Some(state.upstream_proxy.read().await.clone()),
+            timeout_secs,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to build client: {}", e),
+                )
+                    .into_response();
+            }
+        };
 
     let body_bytes = match serde_json::to_vec(&openai_req) {
         Ok(b) => b,
@@ -400,15 +397,18 @@ pub async fn forward_gemini_via_openai_compat(
     };
 
     let mut req_headers = axum::http::HeaderMap::new();
-    req_headers.insert(
-        "content-type",
-        HeaderValue::from_static("application/json"),
-    );
+    req_headers.insert("content-type", HeaderValue::from_static("application/json"));
     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", provider.api_key)) {
         req_headers.insert("authorization", v);
     }
 
-    let response = match client.post(&url).headers(req_headers).body(body_bytes).send().await {
+    let response = match client
+        .post(&url)
+        .headers(req_headers)
+        .body(body_bytes)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -422,7 +422,13 @@ pub async fn forward_gemini_via_openai_compat(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.bytes().await.unwrap_or_default();
-        return (status, String::from_utf8_lossy(&error_body).to_string()).into_response();
+        return Response::builder()
+            .status(status)
+            .header("x-provider-name", &provider.name)
+            .header("x-mapped-model", &mapped_model)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(String::from_utf8_lossy(&error_body).to_string()))
+            .unwrap_or_else(|_| (status, "Failed to build response").into_response());
     }
 
     if client_wants_stream {
@@ -431,7 +437,7 @@ pub async fn forward_gemini_via_openai_compat(
         let gemini_stream = async_stream::stream! {
             use bytes::BytesMut;
             use futures::StreamExt;
-            let mut buffer = BytesMut::new();
+            let _buffer = BytesMut::new();
             let mut pinned = Box::pin(openai_stream);
             loop {
                 match pinned.next().await {

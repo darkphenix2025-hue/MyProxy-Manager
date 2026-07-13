@@ -14,8 +14,7 @@ fn build_audio_client(
     upstream_proxy: Option<crate::proxy::config::UpstreamProxyConfig>,
     timeout_secs: u64,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs.max(5)));
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs.max(5)));
 
     if let Some(config) = upstream_proxy {
         if config.enabled && !config.url.is_empty() {
@@ -57,11 +56,15 @@ pub async fn forward_audio_to_openai_compat(
         .text("model", model.to_string())
         .text("prompt", prompt.to_string());
 
-    let url = format!(
-        "{}{}",
-        provider.base_url.trim_end_matches('/'),
-        "/v1/audio/transcriptions"
+    let api_path = format!(
+        "{}/audio/transcriptions",
+        provider
+            .api_path
+            .as_deref()
+            .unwrap_or("/v1")
+            .trim_end_matches('/')
     );
+    let url = format!("{}{}", provider.base_url.trim_end_matches('/'), &api_path);
 
     let timeout_secs = provider
         .request_timeout_secs
@@ -106,7 +109,15 @@ pub async fn forward_audio_to_openai_compat(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.bytes().await.unwrap_or_default();
-        return (status, String::from_utf8_lossy(&error_body).to_string()).into_response();
+        return axum::response::Response::builder()
+            .status(status)
+            .header("x-provider-name", &provider.name)
+            .header("x-mapped-model", model)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                String::from_utf8_lossy(&error_body).to_string(),
+            ))
+            .unwrap_or_else(|_| (status, "Failed to build response").into_response());
     }
 
     let bytes = match response.bytes().await {
@@ -124,10 +135,7 @@ pub async fn forward_audio_to_openai_compat(
     match serde_json::from_slice::<Value>(&bytes) {
         Ok(value) => {
             // Extract text if present, otherwise return raw response
-            let text = value
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let text = value.get("text").and_then(|v| v.as_str()).unwrap_or("");
             (
                 StatusCode::OK,
                 [("X-Provider-Name", provider.name.as_str())],

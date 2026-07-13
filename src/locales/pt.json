@@ -321,14 +321,7 @@
             "auto_launch": "Iniciar na Inicialização",
             "auto_launch_enabled": "Habilitado",
             "auto_launch_disabled": "Desabilitado",
-            "auto_launch_desc": "Iniciar automaticamente o Antigravity Tools quando o sistema iniciar",
-            "auto_check_update": "Verificar Atualizações Automaticamente",
-            "auto_check_update_desc": "Verificar automaticamente novas versões na inicialização",
-            "auto_check_update_enabled": "Verificação automática habilitada",
-            "auto_check_update_disabled": "Verificação automática desabilitada",
-            "update_check_interval": "Intervalo de Verificação (horas)",
-            "update_check_interval_desc": "Definir intervalo de verificação automática (1-168 horas)",
-            "update_check_interval_saved": "Configurações de intervalo de verificação salvas"
+            "auto_launch_desc": "Iniciar automaticamente o Antigravity Tools quando o sistema iniciar"
         },
         "account": {
             "title": "Configurações de Conta",
@@ -485,12 +478,6 @@
             "github": "GitHub",
             "view_code": "Ver Código",
             "copyright": "Copyright © 2025-2026 Antigravity. Todos os direitos reservados.",
-            "check_update": "Verificar Atualizações",
-            "checking_update": "Verificando...",
-            "latest_version": "Você está atualizado",
-            "new_version_available": "Nova versão {{version}} disponível",
-            "download_update": "Baixar",
-            "update_check_failed": "Falha na verificação de atualização",
             "support_btn": "Apoiar Autor",
             "support_title": "Doação e Suporte",
             "support_desc": "Se você acha este projeto útil, sinta-se à vontade para me pagar um café! Seu apoio é a maior motivação para eu manter este projeto.",

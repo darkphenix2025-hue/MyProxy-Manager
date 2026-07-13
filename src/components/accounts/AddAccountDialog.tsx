@@ -300,7 +300,20 @@ function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
 
             // 3. 监听消息
             const handleMessage = async (event: MessageEvent) => {
-                // 安全检查: 如果定义了 ORIGIN 校验更好，这里暂时检查 data type
+                // [R2-SEC-001] 精确端口白名单校验，避免宽松前缀匹配
+                // 回调页运行在代理服务器端口 (8045)，前端在开发服务器 (1420)
+                const allowedOrigins = [
+                    'http://localhost:8045',
+                    'http://127.0.0.1:8045',
+                    'http://localhost:1420',
+                    'http://127.0.0.1:1420',
+                    'app://localhost',
+                ];
+                const eventOrigin = event.origin;
+                if (!eventOrigin || !allowedOrigins.includes(eventOrigin)) return;
+                // 1. 来源必须是弹出的窗口
+                if (event.source !== popup) return;
+
                 if (event.data?.type === 'oauth-success') {
                     popup.close();
                     window.removeEventListener('message', handleMessage);

@@ -325,14 +325,7 @@
             "auto_launch": "Lancar pada Permulaan",
             "auto_launch_enabled": "Diaktifkan",
             "auto_launch_disabled": "Dinyahaktifkan",
-            "auto_launch_desc": "Lancarkan Antigravity Tools secara automatik apabila sistem bermula",
-            "auto_check_update": "Semak Kemas Kini Automatik",
-            "auto_check_update_desc": "Semak versi baharu secara automatik pada permulaan",
-            "auto_check_update_enabled": "Semakan automatik diaktifkan",
-            "auto_check_update_disabled": "Semakan automatik dinyahaktifkan",
-            "update_check_interval": "Selang Semakan (jam)",
-            "update_check_interval_desc": "Tetapkan selang semakan automatik (1-168 jam)",
-            "update_check_interval_saved": "Tetapan selang semakan disimpan"
+            "auto_launch_desc": "Lancarkan Antigravity Tools secara automatik apabila sistem bermula"
         },
         "account": {
             "title": "Tetapan Akaun",
@@ -489,12 +482,6 @@
             "github": "GitHub",
             "view_code": "Lihat Kod",
             "copyright": "Hak Cipta © 2025-2026 Antigravity. Semua hak terpelihara.",
-            "check_update": "Semak Kemas Kini",
-            "checking_update": "Menyemak...",
-            "latest_version": "Anda sudah dikemas kini",
-            "new_version_available": "Versi baharu {{version}} tersedia",
-            "download_update": "Muat Turun",
-            "update_check_failed": "Semakan kemas kini gagal",
             "support_btn": "Sokong Pengarang",
             "support_title": "Derma & Sokongan",
             "support_desc": "Jika anda mendapati projek ini berguna, sila belanja saya kopi! Sokongan anda adalah motivasi terbesar untuk saya menyelenggara projek ini.",

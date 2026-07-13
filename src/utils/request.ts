@@ -48,6 +48,16 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_proxy_stats': { url: '/api/proxy/stats', method: 'GET' },
   'set_proxy_monitor_enabled': { url: '/api/proxy/monitor/toggle', method: 'POST' },
 
+  // LLM Traffic Logging
+  'get_llm_logging_status': { url: '/api/proxy/llm-logging/status', method: 'GET' },
+  'enable_llm_logging': { url: '/api/proxy/llm-logging/enable', method: 'POST' },
+  'disable_llm_logging': { url: '/api/proxy/llm-logging/disable', method: 'POST' },
+
+  // LLM Trace Detail Viewer
+  'get_llm_log_traces': { url: '/api/proxy/llm-logging/traces', method: 'GET' },
+  'get_llm_log_detail': { url: '/api/proxy/llm-logging/traces/:traceId', method: 'GET' },
+  'delete_llm_log_trace': { url: '/api/proxy/llm-logging/traces/:traceId', method: 'DELETE' },
+
   // Logs & Monitoring
   'get_proxy_logs_filtered': { url: '/api/logs', method: 'GET' },
   'get_proxy_logs_count_filtered': { url: '/api/logs/count', method: 'GET' },
@@ -89,8 +99,6 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
 
   // System
   'get_data_dir_path': { url: '/api/system/data-dir', method: 'GET' },
-  'get_update_settings': { url: '/api/system/updates/settings', method: 'GET' },
-  'save_update_settings': { url: '/api/system/updates/save', method: 'POST' },
   'is_auto_launch_enabled': { url: '/api/system/autostart/status', method: 'GET' },
   'toggle_auto_launch': { url: '/api/system/autostart/toggle', method: 'POST' },
   'get_http_api_settings': { url: '/api/system/http-api/settings', method: 'GET' },
@@ -103,11 +111,6 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'cloudflared_start': { url: '/api/proxy/cloudflared/start', method: 'POST' },
   'cloudflared_stop': { url: '/api/proxy/cloudflared/stop', method: 'POST' },
   'cloudflared_get_status': { url: '/api/proxy/cloudflared/status', method: 'GET' },
-
-  // Updates
-  'should_check_updates': { url: '/api/system/updates/check-status', method: 'GET' },
-  'check_for_updates': { url: '/api/system/updates/check', method: 'POST' },
-  'update_last_check_time': { url: '/api/system/updates/touch', method: 'POST' },
 
   // OAuth
   'prepare_oauth_url': { url: '/api/auth/url', method: 'GET' },
@@ -171,6 +174,10 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'bind_account_proxy': { url: '/api/proxy/pool/bind', method: 'POST' },
   'unbind_account_proxy': { url: '/api/proxy/pool/unbind', method: 'POST' },
   'get_account_proxy_binding': { url: '/api/proxy/pool/binding/:accountId', method: 'GET' },
+
+  // Model Cooldown
+  'get_model_cooldowns': { url: '/api/proxy/model-cooldowns', method: 'GET' },
+  'clear_model_cooldowns': { url: '/api/proxy/model-cooldowns/clear', method: 'POST' },
 };
 
 export async function request<T>(cmd: string, args?: any): Promise<T> {

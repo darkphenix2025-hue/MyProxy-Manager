@@ -303,9 +303,9 @@ impl UpstreamClient {
         // 2. Device & Session Identity
         // Machine ID (Persistent)
         if let Ok(mid) = machine_uid::get() {
-             if let Ok(mid_val) = header::HeaderValue::from_str(&mid) {
-                 headers.insert("x-machine-id", mid_val);
-             }
+            if let Ok(mid_val) = header::HeaderValue::from_str(&mid) {
+                headers.insert("x-machine-id", mid_val);
+            }
         }
         // Session ID (Per App Launch)
         if let Ok(sess_val) = header::HeaderValue::from_str(&crate::constants::SESSION_ID) {

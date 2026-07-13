@@ -400,7 +400,10 @@ pub async fn save_config(
 // --- OAuth 命令 ---
 
 #[tauri::command]
-pub async fn start_oauth_login(app_handle: tauri::AppHandle, oauth_client_key: Option<String>) -> Result<Account, String> {
+pub async fn start_oauth_login(
+    app_handle: tauri::AppHandle,
+    oauth_client_key: Option<String>,
+) -> Result<Account, String> {
     modules::logger::log_info("开始 OAuth 授权流程...");
     let service = modules::account_service::AccountService::new(
         crate::modules::integration::SystemManager::Desktop(app_handle.clone()),
@@ -444,7 +447,10 @@ pub async fn complete_oauth_login(app_handle: tauri::AppHandle) -> Result<Accoun
 
 /// 预生成 OAuth 授权链接 (不打开浏览器)
 #[tauri::command]
-pub async fn prepare_oauth_url(app_handle: tauri::AppHandle, oauth_client_key: Option<String>) -> Result<String, String> {
+pub async fn prepare_oauth_url(
+    app_handle: tauri::AppHandle,
+    oauth_client_key: Option<String>,
+) -> Result<String, String> {
     let service = modules::account_service::AccountService::new(
         crate::modules::integration::SystemManager::Desktop(app_handle.clone()),
     );
@@ -465,7 +471,8 @@ pub async fn submit_oauth_code(code: String, state: Option<String>) -> Result<()
 }
 
 #[tauri::command]
-pub async fn list_oauth_clients() -> Result<Vec<crate::modules::oauth::OAuthClientDescriptor>, String> {
+pub async fn list_oauth_clients(
+) -> Result<Vec<crate::modules::oauth::OAuthClientDescriptor>, String> {
     crate::modules::oauth::list_oauth_clients()
 }
 
@@ -479,112 +486,7 @@ pub async fn set_active_oauth_client(client_key: String) -> Result<(), String> {
     crate::modules::oauth::set_active_oauth_client_key(&client_key)
 }
 
-// --- 导入命令 ---
-
-#[tauri::command]
-pub async fn import_v1_accounts(
-    app: tauri::AppHandle,
-    proxy_state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
-) -> Result<Vec<Account>, String> {
-    let accounts = modules::migration::import_from_v1().await?;
-
-    // 对导入的账号尝试刷新一波
-    for mut account in accounts.clone() {
-        let _ = internal_refresh_account_quota(&app, &mut account).await;
-    }
-
-    // Reload token pool
-    let _ = crate::commands::proxy::reload_proxy_accounts(proxy_state).await;
-
-    Ok(accounts)
-}
-
-#[tauri::command]
-pub async fn import_from_db(
-    app: tauri::AppHandle,
-    proxy_state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
-) -> Result<Account, String> {
-    // 同步函数包装为 async
-    let mut account = modules::migration::import_from_db().await?;
-
-    // 既然是从数据库导入（即 IDE 当前账号），自动将其设为 Manager 的当前账号
-    let account_id = account.id.clone();
-    modules::account::set_current_account_id(&account_id)?;
-
-    // 自动触发刷新额度
-    let _ = internal_refresh_account_quota(&app, &mut account).await;
-
-    // 刷新托盘图标展示
-    crate::modules::tray::update_tray_menus(&app);
-
-    // Reload token pool
-    let _ = crate::commands::proxy::reload_proxy_accounts(proxy_state).await;
-
-    Ok(account)
-}
-
-#[tauri::command]
-#[allow(dead_code)]
-pub async fn import_custom_db(
-    app: tauri::AppHandle,
-    proxy_state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
-    path: String,
-) -> Result<Account, String> {
-    // 调用重构后的自定义导入函数
-    let mut account = modules::migration::import_from_custom_db_path(path).await?;
-
-    // 自动设为当前账号
-    let account_id = account.id.clone();
-    modules::account::set_current_account_id(&account_id)?;
-
-    // 自动触发刷新额度
-    let _ = internal_refresh_account_quota(&app, &mut account).await;
-
-    // 刷新托盘图标展示
-    crate::modules::tray::update_tray_menus(&app);
-
-    // Reload token pool
-    let _ = crate::commands::proxy::reload_proxy_accounts(proxy_state).await;
-
-    Ok(account)
-}
-
-#[tauri::command]
-pub async fn sync_account_from_db(
-    app: tauri::AppHandle,
-    proxy_state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
-) -> Result<Option<Account>, String> {
-    // 1. 获取 DB 中的 Refresh Token
-    let db_refresh_token = match modules::migration::get_refresh_token_from_db() {
-        Ok(token) => token,
-        Err(e) => {
-            modules::logger::log_info(&format!("自动同步跳过: {}", e));
-            return Ok(None);
-        }
-    };
-
-    // 2. 获取 Manager 当前账号
-    let curr_account = modules::account::get_current_account()?;
-
-    // 3. 对比：如果 Refresh Token 相同，说明账号没变，无需导入
-    if let Some(acc) = curr_account {
-        if acc.token.refresh_token == db_refresh_token {
-            // 账号未变，由于已经是周期性任务，我们可以选择性刷新一下配额，或者直接返回
-            // 这里为了节省 API 流量，直接返回
-            return Ok(None);
-        }
-        modules::logger::log_info(&format!(
-            "检测到账号切换 ({} -> DB新账号)，正在同步...",
-            acc.email
-        ));
-    } else {
-        modules::logger::log_info("检测到新登录账号，正在自动同步...");
-    }
-
-    // 4. 执行完整导入
-    let account = import_from_db(app, proxy_state).await?;
-    Ok(Some(account))
-}
+// --- 系统命令 ---
 
 fn validate_path(path: &str) -> Result<(), String> {
     if path.contains("..") {
@@ -632,22 +534,6 @@ pub async fn read_text_file(path: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn clear_log_cache() -> Result<(), String> {
     modules::logger::clear_logs()
-}
-
-/// 清理 Antigravity 应用缓存
-/// 用于解决登录失败、版本验证错误等问题
-#[tauri::command]
-pub async fn clear_antigravity_cache() -> Result<modules::cache::ClearResult, String> {
-    modules::cache::clear_antigravity_cache(None)
-}
-
-/// 获取 Antigravity 缓存路径列表（用于预览）
-#[tauri::command]
-pub async fn get_antigravity_cache_paths() -> Result<Vec<String>, String> {
-    Ok(modules::cache::get_existing_cache_paths()
-        .into_iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect())
 }
 
 /// 打开数据目录
@@ -709,89 +595,6 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
     };
 
     window.set_theme(tauri_theme).map_err(|e| e.to_string())
-}
-
-/// 获取 Antigravity 可执行文件路径
-#[tauri::command]
-pub async fn get_antigravity_path(bypass_config: Option<bool>) -> Result<String, String> {
-    // 1. 优先从配置查询 (除非明确要求绕过)
-    if bypass_config != Some(true) {
-        if let Ok(config) = crate::modules::config::load_app_config() {
-            if let Some(path) = config.antigravity_executable {
-                if std::path::Path::new(&path).exists() {
-                    return Ok(path);
-                }
-            }
-        }
-    }
-
-    // 2. 执行实时探测
-    match crate::modules::process::get_antigravity_executable_path() {
-        Some(path) => Ok(path.to_string_lossy().to_string()),
-        None => Err("未找到 Antigravity 安装路径".to_string()),
-    }
-}
-
-/// 获取 Antigravity 启动参数
-#[tauri::command]
-pub async fn get_antigravity_args() -> Result<Vec<String>, String> {
-    match crate::modules::process::get_args_from_running_process() {
-        Some(args) => Ok(args),
-        None => Err("未找到正在运行的 Antigravity 进程".to_string()),
-    }
-}
-
-/// 检测更新响应结构
-pub use crate::modules::update_checker::UpdateInfo;
-
-/// 检测 GitHub releases 更新
-#[tauri::command]
-pub async fn check_for_updates() -> Result<UpdateInfo, String> {
-    modules::logger::log_info("收到前端触发的更新检查请求");
-    crate::modules::update_checker::check_for_updates().await
-}
-
-#[tauri::command]
-pub async fn should_check_updates() -> Result<bool, String> {
-    let settings = crate::modules::update_checker::load_update_settings()?;
-    Ok(crate::modules::update_checker::should_check_for_updates(
-        &settings,
-    ))
-}
-
-#[tauri::command]
-pub async fn update_last_check_time() -> Result<(), String> {
-    crate::modules::update_checker::update_last_check_time()
-}
-
-
-/// 检测是否通过 Homebrew Cask 安装
-#[tauri::command]
-pub async fn check_homebrew_installation() -> Result<bool, String> {
-    Ok(crate::modules::update_checker::is_homebrew_installed())
-}
-
-/// 通过 Homebrew Cask 升级应用
-#[tauri::command]
-pub async fn brew_upgrade_cask() -> Result<String, String> {
-    modules::logger::log_info("收到前端触发的 Homebrew 升级请求");
-    crate::modules::update_checker::brew_upgrade_cask().await
-}
-
-
-/// 获取更新设置
-#[tauri::command]
-pub async fn get_update_settings() -> Result<crate::modules::update_checker::UpdateSettings, String>
-{
-    crate::modules::update_checker::load_update_settings()
-}
-
-/// 保存更新设置
-#[tauri::command]
-pub async fn save_update_settings(
-    settings: crate::modules::update_checker::UpdateSettings,
-) -> Result<(), String> {
-    crate::modules::update_checker::save_update_settings(&settings)
 }
 
 /// 切换账号的反代禁用状态
@@ -1033,4 +836,175 @@ pub async fn get_token_stats_account_trend_daily(
     days: i64,
 ) -> Result<Vec<crate::modules::token_stats::AccountTrendPoint>, String> {
     crate::modules::token_stats::get_account_trend_daily(days)
+}
+
+// ============================================================================
+// LLM Trace Detail Viewer Commands
+// ============================================================================
+
+const LLM_DETAILS_DIR: &str = "/tmp/proxy_llm_details";
+const LLM_STAGES: &[&str] = &[
+    "client_request",
+    "upstream_request",
+    "upstream_response",
+    "client_response",
+];
+
+#[tauri::command]
+pub async fn get_llm_log_traces() -> Result<Vec<serde_json::Value>, String> {
+    let dir = std::path::Path::new(LLM_DETAILS_DIR);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut traces: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".json") {
+                continue;
+            }
+            if let Some(dot_pos) = name.rfind('.') {
+                let base = &name[..dot_pos];
+                if let Some(underscore_pos) = base.find('_') {
+                    let trace_id = &base[..underscore_pos];
+                    let stage = &base[underscore_pos + 1..];
+                    if LLM_STAGES.contains(&stage) {
+                        traces
+                            .entry(trace_id.to_string())
+                            .or_default()
+                            .push(stage.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut summaries: Vec<serde_json::Value> = Vec::new();
+    for (trace_id, stages) in &traces {
+        let cr_path = dir.join(format!("{}_client_request.json", trace_id));
+        let (timestamp, model) = if let Ok(content) = std::fs::read_to_string(&cr_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                (
+                    json["timestamp"].as_str().unwrap_or("").to_string(),
+                    json["model"].as_str().map(|s| s.to_string()),
+                )
+            } else {
+                (String::new(), None)
+            }
+        } else {
+            (String::new(), None)
+        };
+        let mut stages = stages.clone();
+        stages.sort();
+        summaries.push(serde_json::json!({
+            "trace_id": trace_id,
+            "timestamp": timestamp,
+            "model": model,
+            "stages": stages,
+        }));
+    }
+
+    summaries.sort_by(|a, b| {
+        let ta = a["timestamp"].as_str().unwrap_or("");
+        let tb = b["timestamp"].as_str().unwrap_or("");
+        tb.cmp(ta)
+    });
+    Ok(summaries)
+}
+
+#[tauri::command]
+pub async fn get_llm_log_detail(trace_id: String) -> Result<serde_json::Value, String> {
+    if trace_id.contains("..") || trace_id.contains('/') || trace_id.contains('\\') {
+        return Err("Invalid trace ID".to_string());
+    }
+
+    let dir = std::path::Path::new(LLM_DETAILS_DIR);
+    let mut detail = serde_json::Map::new();
+    detail.insert(
+        "trace_id".to_string(),
+        serde_json::Value::String(trace_id.clone()),
+    );
+
+    let mut found = false;
+    for stage in LLM_STAGES {
+        let path = dir.join(format!("{}_{}.json", trace_id, stage));
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                detail.insert(stage.to_string(), json);
+                found = true;
+            }
+        }
+    }
+
+    if !found {
+        return Err("Trace not found".to_string());
+    }
+
+    Ok(serde_json::Value::Object(detail))
+}
+
+#[tauri::command]
+pub async fn delete_llm_log_trace(trace_id: String) -> Result<(), String> {
+    if trace_id.contains("..") || trace_id.contains('/') || trace_id.contains('\\') {
+        return Err("Invalid trace ID".to_string());
+    }
+
+    let dir = std::path::Path::new(LLM_DETAILS_DIR);
+    let mut deleted = 0;
+    for stage in LLM_STAGES {
+        let path = dir.join(format!("{}_{}.json", trace_id, stage));
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            deleted += 1;
+        }
+    }
+
+    if deleted == 0 {
+        return Err("Trace not found".to_string());
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Model Cooldown Commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn get_model_cooldowns(
+    proxy_state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let instance_lock = proxy_state.instance.read().await;
+    if let Some(instance) = instance_lock.as_ref() {
+        if let Some(ref mgr) = instance.axum_server.cooldown_manager {
+            let cooldowns = mgr.get_active_cooldowns();
+            return Ok(cooldowns
+                .into_iter()
+                .map(|(key, remaining)| {
+                    serde_json::json!({
+                        "model": key.model,
+                        "provider": key.provider,
+                        "remaining_secs": remaining,
+                    })
+                })
+                .collect());
+        }
+    }
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+pub async fn clear_model_cooldowns(
+    proxy_state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
+) -> Result<usize, String> {
+    let instance_lock = proxy_state.instance.read().await;
+    if let Some(instance) = instance_lock.as_ref() {
+        if let Some(ref mgr) = instance.axum_server.cooldown_manager {
+            return Ok(mgr.clear());
+        }
+    }
+    Ok(0)
 }

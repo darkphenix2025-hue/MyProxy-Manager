@@ -324,14 +324,7 @@
             "auto_launch": "Запуск при старте системы",
             "auto_launch_enabled": "Включено",
             "auto_launch_disabled": "Отключено",
-            "auto_launch_desc": "Автоматически запускать Antigravity Tools при старте системы",
-            "auto_check_update": "Автоматическая проверка обновлений",
-            "auto_check_update_desc": "Автоматически проверять наличие новой версии при запуске",
-            "auto_check_update_enabled": "Автопроверка включена",
-            "auto_check_update_disabled": "Автопроверка отключена",
-            "update_check_interval": "Интервал проверки (часы)",
-            "update_check_interval_desc": "Установите интервал автопроверки (1-168 часов)",
-            "update_check_interval_saved": "Настройки интервала проверки сохранены"
+            "auto_launch_desc": "Автоматически запускать Antigravity Tools при старте системы"
         },
         "account": {
             "title": "Настройки аккаунта",
@@ -478,12 +471,6 @@
             "github": "GitHub",
             "view_code": "Просмотреть код",
             "copyright": "Copyright © 2025-2026 Antigravity. Все права защищены.",
-            "check_update": "Проверить обновления",
-            "checking_update": "Проверка...",
-            "latest_version": "У вас актуальная версия",
-            "new_version_available": "Доступна новая версия {{version}}",
-            "download_update": "Скачать",
-            "update_check_failed": "Не удалось проверить обновления",
             "support_btn": "Поддержать автора",
             "support_title": "Донат и поддержка",
             "support_desc": "Если вы считаете этот проект полезным, не стесняйтесь купить мне кофе! Ваша поддержка — главная мотивация для меня поддерживать этот проект.",

@@ -113,6 +113,17 @@ The app provides a system tray with account switching and refresh controls, defi
 - **No frontend test framework** is installed (no Jest/Vitest, no `*.test.ts`/`*.spec.ts` files)
 - Tests cover protocol mappers, security, rate limiting, retry strategies, quota protection, and integration flows
 
+## 文档地图 / Docs
+
+| Path | Description |
+|---|---|
+| `docs/` | Project documentation root |
+| `docs/API_REFERENCE.md` | API 参考文档 |
+| `docs/proxy/` | 代理相关技术文档 |
+| `docs/zai/` | Z.AI (Google) 相关文档 |
+| `docs/testing/` | 测试相关文档 |
+| `docs/images/` | 文档附图 |
+
 ## Important Conventions
 
 - TypeScript strict mode: `noUnusedLocals`, `noUnusedParameters`, `noFallthroughCasesInSwitch` are all `true`

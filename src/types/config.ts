@@ -37,7 +37,7 @@ export interface ProxyConfig {
     api_key: string;
     admin_password?: string;
     auto_start: boolean;
-    custom_mapping?: Record<string, string>;
+    custom_mapping?: Record<string, string | WeightedTarget[]>;
     request_timeout: number;
     enable_logging: boolean;
     debug_logging?: DebugLoggingConfig;
@@ -52,6 +52,8 @@ export interface ProxyConfig {
     global_system_prompt?: GlobalSystemPromptConfig;
     image_thinking_mode?: 'enabled' | 'disabled'; // [NEW] 图像思维模式开关
     proxy_pool?: ProxyPoolConfig;
+    model_cooldown?: ModelCooldownConfig;
+    fallback_model?: FallbackModelConfig;
 }
 
 // ============================================================================
@@ -161,8 +163,6 @@ export interface AppConfig {
     antigravity_executable?: string; // [NEW] 手动指定的反重力程序路径
     antigravity_args?: string[]; // [NEW] Antigravity 启动参数
     auto_launch?: boolean; // 开机自动启动
-    auto_check_update?: boolean; // 自动检查更新
-    update_check_interval?: number; // 更新检查间隔（小时）
     accounts_page_size?: number; // 账号列表每页显示数量,默认 0 表示自动计算
     hidden_menu_items?: string[]; // 隐藏的菜单项路径列表
     scheduled_warmup: ScheduledWarmupConfig;
@@ -171,6 +171,8 @@ export interface AppConfig {
     circuit_breaker: CircuitBreakerConfig; // [NEW] 熔断器配置
     proxy: ProxyConfig;
     cloudflared: CloudflaredConfig; // [NEW] Cloudflared 配置
+    oauth_client_id?: string; // Google OAuth client ID
+    oauth_client_secret?: string; // Google OAuth client secret
 }
 
 // ============================================================================
@@ -231,4 +233,34 @@ export interface ProxyPoolConfig {
     auto_failover: boolean;
     strategy: ProxySelectionStrategy;
     account_bindings?: Record<string, string>;
+}
+
+// ============================================================================
+// 模型冷却 + 兜底模型 + 权重路由
+// ============================================================================
+
+/** 带权重的路由目标 */
+export interface WeightedTarget {
+    target: string;
+    weight: number;
+}
+
+/** 模型冷却配置 */
+export interface ModelCooldownConfig {
+    enabled: boolean;
+    duration_secs: number;
+}
+
+/** 兜底模型配置 */
+export interface FallbackModelConfig {
+    enabled: boolean;
+    model: string;
+    provider_id: string;
+}
+
+/** 活跃冷却条目（前端展示用） */
+export interface ModelCooldownEntry {
+    model: string;
+    provider: string;
+    remaining_secs: number;
 }

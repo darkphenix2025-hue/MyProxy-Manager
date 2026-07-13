@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=
+Comment=A Tauri App
+Exec=antigravity_tools
+StartupWMClass=antigravity_tools
+Icon=antigravity_tools
+Name=Antigravity Tools
+Terminal=false
+Type=Application

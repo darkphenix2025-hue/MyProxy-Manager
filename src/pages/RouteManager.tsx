@@ -12,9 +12,12 @@ import {
     X,
     RefreshCw,
     Save,
-    Target,
+    ShieldAlert,
+    Activity,
+    Clock,
+    Zap,
 } from 'lucide-react';
-import { ProxyConfig, ExperimentalConfig, StickySessionConfig } from '../types/config';
+import { ProxyConfig, ExperimentalConfig, StickySessionConfig, WeightedTarget } from '../types/config';
 import HelpTooltip from '../components/common/HelpTooltip';
 import ModalDialog from '../components/common/ModalDialog';
 import { showToast } from '../components/common/ToastContainer';
@@ -29,15 +32,14 @@ interface CustomPreset {
     id: string;
     name: string;
     description: string;
-    mappings: Record<string, string>;
+    mappings: Record<string, string | WeightedTarget[]>;
 }
 
 export default function RouteManager() {
     const { t } = useTranslation();
-    const { appConfig, configLoading, configError, status, setAppConfig, saveConfig, loadConfig } = useProxyConfig();
+    const { appConfig, configLoading, configError, status, setAppConfig, saveConfig } = useProxyConfig();
 
     // Model routing state
-    const [customMappingValue, setCustomMappingValue] = useState('');
     const [editingKey, setEditingKey] = useState<string | null>(null);
     const [editingValue, setEditingValue] = useState<string>('');
     const [selectedPreset, setSelectedPreset] = useState<string>('default');
@@ -48,6 +50,33 @@ export default function RouteManager() {
     const [preferredAccountId, setPreferredAccountId] = useState<string | null>(null);
     const [availableAccounts, setAvailableAccounts] = useState<Array<{ id: string; email: string }>>([]);
     const [isClearBindingsConfirmOpen, setIsClearBindingsConfirmOpen] = useState(false);
+
+    // Weighted mapping state
+    const [weightedKey, setWeightedKey] = useState('');
+    const [weightedTargets, setWeightedTargets] = useState<WeightedTarget[]>([{ target: '', weight: 50 }]);
+    const [addMode, setAddMode] = useState<'single' | 'weighted'>('single');
+
+    // Fallback model state
+    const [fallbackEnabled, setFallbackEnabled] = useState(appConfig?.proxy?.fallback_model?.enabled ?? false);
+    const [fallbackModel, setFallbackModel] = useState(appConfig?.proxy?.fallback_model?.model ?? '');
+    const [fallbackProviderId, setFallbackProviderId] = useState(appConfig?.proxy?.fallback_model?.provider_id ?? '');
+
+    // Cooldown state
+    const [cooldowns, setCooldowns] = useState<Array<{ model: string; provider: string; remaining_secs: number }>>([]);
+    const [cooldownEnabled, setCooldownEnabled] = useState(appConfig?.proxy?.model_cooldown?.enabled ?? true);
+    const [cooldownDuration, setCooldownDuration] = useState(appConfig?.proxy?.model_cooldown?.duration_secs ?? 600);
+
+    /** Resolve a mapping value to display string (handles both string and weighted array) */
+    const resolveMappingDisplay = (val: string | WeightedTarget[]): string => {
+        if (typeof val === 'string') return val;
+        return val.map(t => `${t.target}(${t.weight})`).join(', ');
+    };
+
+    /** Get the string target for editing (first weighted target or the string itself) */
+    const resolveMappingEditValue = (val: string | WeightedTarget[]): string => {
+        if (typeof val === 'string') return val;
+        return val.length > 0 ? val[0].target : '';
+    };
 
     // Custom mapping options: only from provider available_models
     const customMappingOptions: SelectOption[] = useMemo(() => {
@@ -85,6 +114,28 @@ export default function RouteManager() {
         loadAccounts();
         loadPreferredAccount();
     }, []);
+
+    // Load cooldowns on mount
+    useEffect(() => {
+        loadCooldowns();
+    }, []);
+
+    // Sync fallback/cooldown state from config
+    useEffect(() => {
+        if (appConfig?.proxy?.fallback_model) {
+            setFallbackEnabled(appConfig.proxy.fallback_model.enabled);
+            setFallbackModel(appConfig.proxy.fallback_model.model);
+            setFallbackProviderId(appConfig.proxy.fallback_model.provider_id ?? '');
+        }
+    }, [appConfig?.proxy?.fallback_model]);
+
+    // Sync cooldown state from config
+    useEffect(() => {
+        if (appConfig?.proxy?.model_cooldown) {
+            setCooldownEnabled(appConfig.proxy.model_cooldown.enabled);
+            setCooldownDuration(appConfig.proxy.model_cooldown.duration_secs ?? 600);
+        }
+    }, [appConfig?.proxy?.model_cooldown]);
 
     // Default presets
     const defaultPresets = useMemo(() => [
@@ -201,15 +252,14 @@ export default function RouteManager() {
 
         const newConfig = {
             ...appConfig.proxy,
-            custom_mapping: { ...appConfig.proxy.custom_mapping, ...selectedPresetData.mappings } as Record<string, string>
+            custom_mapping: { ...appConfig.proxy.custom_mapping, ...selectedPresetData.mappings }
         };
         const oldConfig = { ...appConfig };
 
         try {
             setAppConfig({ ...appConfig, proxy: newConfig });
             showToast(t('proxy.router.presets_applied') + ` (${selectedPresetData.name})`, 'success');
-            await invoke('update_model_mapping', { config: newConfig });
-            await loadConfig();
+            await saveConfig({ ...appConfig, proxy: newConfig });
         } catch (error) {
             console.error('Failed to apply presets:', error);
             setAppConfig(oldConfig);
@@ -223,7 +273,7 @@ export default function RouteManager() {
         newConfig.custom_mapping = { ...(newConfig.custom_mapping || {}), [key]: value };
 
         try {
-            await invoke('update_model_mapping', { config: newConfig });
+            await saveConfig({ ...appConfig, proxy: newConfig });
             setAppConfig({ ...appConfig, proxy: newConfig });
             showToast(t('common.saved'), 'success');
         } catch (error) {
@@ -238,10 +288,104 @@ export default function RouteManager() {
         delete newCustom[key];
         const newConfig = { ...appConfig.proxy, custom_mapping: newCustom };
         try {
-            await invoke('update_model_mapping', { config: newConfig });
+            await saveConfig({ ...appConfig, proxy: newConfig });
             setAppConfig({ ...appConfig, proxy: newConfig });
         } catch (error) {
             console.error('Failed to remove custom mapping:', error);
+        }
+    };
+
+    // --- Weighted mapping handlers ---
+    const handleAddWeightedMapping = async () => {
+        if (!appConfig || !weightedKey || weightedTargets.some(t => !t.target)) return;
+        const newProxyConfig = {
+            ...appConfig.proxy,
+            custom_mapping: { ...(appConfig.proxy.custom_mapping || {}), [weightedKey]: weightedTargets }
+        };
+        try {
+            await saveConfig({ ...appConfig, proxy: newProxyConfig });
+            setWeightedKey('');
+            setWeightedTargets([{ target: '', weight: 50 }]);
+            showToast(t('common.saved'), 'success');
+        } catch (error) {
+            showToast(`${t('common.error')}: ${error}`, 'error');
+        }
+    };
+
+    const handleAddWeightedTarget = () => {
+        setWeightedTargets([...weightedTargets, { target: '', weight: 50 }]);
+    };
+
+    const handleRemoveWeightedTarget = (index: number) => {
+        if (weightedTargets.length <= 1) return;
+        setWeightedTargets(weightedTargets.filter((_, i) => i !== index));
+    };
+
+    const updateWeightedTarget = (index: number, field: keyof WeightedTarget, value: string | number) => {
+        const updated = [...weightedTargets];
+        updated[index] = { ...updated[index], [field]: value };
+        setWeightedTargets(updated);
+    };
+
+    // --- Fallback model handlers ---
+    const handleSaveFallbackModel = async () => {
+        if (!appConfig) return;
+        const newProxyConfig = {
+            ...appConfig.proxy,
+            fallback_model: { enabled: fallbackEnabled, model: fallbackModel, provider_id: fallbackProviderId }
+        };
+        try {
+            await saveConfig({ ...appConfig, proxy: newProxyConfig });
+            showToast(t('common.saved'), 'success');
+        } catch (error) {
+            showToast(`${t('common.error')}: ${error}`, 'error');
+        }
+    };
+
+    // --- Cooldown handlers ---
+    const loadCooldowns = async () => {
+        try {
+            const data = await invoke<Array<{ model: string; provider: string; remaining_secs: number }>>('get_model_cooldowns');
+            setCooldowns(data);
+        } catch { /* Service not running */ }
+    };
+
+    const handleClearCooldowns = async () => {
+        try {
+            await invoke('clear_model_cooldowns');
+            setCooldowns([]);
+            showToast('冷却状态已清除', 'success');
+        } catch (error) {
+            showToast(`${t('common.error')}: ${error}`, 'error');
+        }
+    };
+
+    const handleSaveCooldownConfig = async () => {
+        if (!appConfig) return;
+        const newProxyConfig = {
+            ...appConfig.proxy,
+            model_cooldown: { enabled: cooldownEnabled, duration_secs: cooldownDuration }
+        };
+        try {
+            await saveConfig({ ...appConfig, proxy: newProxyConfig });
+            showToast(t('common.saved'), 'success');
+        } catch (error) {
+            showToast(`${t('common.error')}: ${error}`, 'error');
+        }
+    };
+
+    const handleToggleCooldown = async (enabled: boolean) => {
+        setCooldownEnabled(enabled);
+        if (!appConfig) return;
+        const newProxyConfig = {
+            ...appConfig.proxy,
+            model_cooldown: { enabled, duration_secs: cooldownDuration }
+        };
+        try {
+            await saveConfig({ ...appConfig, proxy: newProxyConfig });
+            showToast(t('common.saved'), 'success');
+        } catch (error) {
+            showToast(`${t('common.error')}: ${error}`, 'error');
         }
     };
 
@@ -260,7 +404,7 @@ export default function RouteManager() {
         };
 
         try {
-            await invoke('update_model_mapping', { config: newConfig });
+            await saveConfig({ ...appConfig, proxy: newConfig });
             setAppConfig({ ...appConfig, proxy: newConfig });
             showToast(t('common.success'), 'success');
         } catch (error) {
@@ -496,7 +640,7 @@ export default function RouteManager() {
                                 <div className="flex items-center gap-2 w-full sm:w-auto min-w-[200px] max-w-sm">
                                     <div className="relative flex-1">
                                         <GroupedSelect
-                                            value={appConfig.proxy.custom_mapping?.['internal-background-task'] || ''}
+                                            value={resolveMappingEditValue(appConfig.proxy.custom_mapping?.['internal-background-task'] || '')}
                                             onChange={(val) => handleMappingUpdate('custom', 'internal-background-task', val)}
                                             options={[
                                                 { value: '', label: 'Default (auto-match provider)', group: 'System' },
@@ -528,10 +672,13 @@ export default function RouteManager() {
                                         {t('proxy.router.current_list')}
                                     </span>
                                 </div>
-                                <div className="overflow-y-auto max-h-[180px] border border-gray-100 dark:border-white/5 rounded-lg bg-gray-50/10 dark:bg-white/5 p-3" data-custom-mapping-list>
+                                <div className="overflow-y-auto max-h-[500px] border border-gray-100 dark:border-white/5 rounded-lg bg-gray-50/10 dark:bg-white/5 p-3" data-custom-mapping-list>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
                                         {appConfig.proxy.custom_mapping && Object.entries(appConfig.proxy.custom_mapping).length > 0 ? (
-                                            Object.entries(appConfig.proxy.custom_mapping).map(([key, val]) => (
+                                            Object.entries(appConfig.proxy.custom_mapping).map(([key, val]) => {
+                                                const displayVal = resolveMappingDisplay(val);
+                                                const editVal = resolveMappingEditValue(val);
+                                                return (
                                                 <div key={key} className={`flex items-center justify-between p-1.5 rounded-md transition-all border group ${editingKey === key ? 'bg-blue-50/80 dark:bg-blue-900/15 border-blue-300/50 dark:border-blue-500/30 shadow-sm' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/5 hover:border-gray-200 dark:hover:border-white/10'}`}>
                                                     <div className="flex items-center gap-2.5 overflow-hidden flex-1">
                                                         <span className="font-mono text-[10px] font-bold text-blue-600 dark:text-blue-400 truncate max-w-[140px]" title={key}>{key}</span>
@@ -550,8 +697,8 @@ export default function RouteManager() {
                                                             </div>
                                                         ) : (
                                                             <span className="font-mono text-[10px] text-gray-500 dark:text-gray-400 truncate cursor-pointer hover:text-blue-500"
-                                                                onClick={() => { setEditingKey(key); setEditingValue(val); }}
-                                                                title={val}>{val}</span>
+                                                                onClick={() => { setEditingKey(key); setEditingValue(editVal); }}
+                                                                title={displayVal}>{displayVal}</span>
                                                         )}
                                                     </div>
 
@@ -581,7 +728,7 @@ export default function RouteManager() {
                                                             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                                                 <button
                                                                     className="btn btn-ghost btn-xs text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-white/10 p-0 h-6 w-6 min-h-0"
-                                                                    onClick={() => { setEditingKey(key); setEditingValue(val); }}
+                                                                    onClick={() => { setEditingKey(key); setEditingValue(editVal); }}
                                                                     title={t('common.edit') || 'Edit'}
                                                                 >
                                                                     <Edit2 size={12} />
@@ -597,7 +744,7 @@ export default function RouteManager() {
                                                         )}
                                                     </div>
                                                 </div>
-                                            ))
+                                            ); })
                                         ) : (
                                             <div className="col-span-full text-center py-4 text-gray-400 dark:text-gray-600 italic text-[11px]">{t('proxy.router.no_custom_mapping')}</div>
                                         )}
@@ -605,50 +752,123 @@ export default function RouteManager() {
                                 </div>
                             </div>
 
-                            {/* Add Mapping Form */}
+                            {/* Weighted Mapping Add Form */}
                             <div className="w-full bg-gray-50/50 dark:bg-white/5 p-2.5 rounded-xl border border-gray-100 dark:border-white/5 shadow-inner">
-                                <div className="flex flex-col sm:flex-row items-center gap-3">
-                                    <div className="flex items-center gap-1.5 shrink-0">
-                                        <Target size={14} className="text-gray-400 dark:text-gray-500" />
-                                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">{t('proxy.router.add_mapping')}</span>
+                                <div className="flex items-center gap-2 mb-2">
+                                    <Zap size={12} className="text-amber-500" />
+                                    <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                                        1对N 权重映射
+                                    </span>
+                                    <div className="flex gap-1 ml-auto">
+                                        <button onClick={() => setAddMode('single')} className={`text-[10px] px-2 py-0.5 rounded ${addMode === 'single' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-500'}`}>单目标</button>
+                                        <button onClick={() => setAddMode('weighted')} className={`text-[10px] px-2 py-0.5 rounded ${addMode === 'weighted' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-500'}`}>多目标</button>
                                     </div>
-                                    <div className="flex-1 flex flex-col sm:flex-row gap-2 w-full">
-                                        <input
-                                            id="custom-key"
-                                            type="text"
-                                            placeholder={t('proxy.router.original_placeholder') || "Original (e.g. gpt-4 or gpt-4*)"}
-                                            className="input input-xs input-bordered flex-1 font-mono text-[11px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all placeholder:text-gray-400 dark:placeholder:text-gray-600 h-8"
-                                        />
+                                </div>
+
+                                {addMode === 'single' ? (
+                                    <div className="flex flex-col sm:flex-row items-center gap-2">
+                                        <input type="text" placeholder="原始模型名 (如 gpt-4*)" className="input input-xs input-bordered flex-1 font-mono text-[11px] bg-white dark:bg-gray-800 h-8"
+                                            onChange={e => { setWeightedKey(e.target.value); }} value={weightedKey} />
                                         <div className="w-full sm:w-48">
-                                            <GroupedSelect
-                                                value={customMappingValue}
-                                                onChange={setCustomMappingValue}
-                                                options={customMappingOptions}
-                                                placeholder={t('proxy.router.select_target_model') || 'Select Target Model'}
-                                                className="font-mono text-[11px] h-8 dark:bg-gray-800"
-                                                allowCustomInput={true}
-                                            />
+                                            <GroupedSelect value={weightedTargets[0]?.target || ''} onChange={v => updateWeightedTarget(0, 'target', v)} options={customMappingOptions} placeholder="目标模型" className="font-mono text-[11px] h-8 dark:bg-gray-800" allowCustomInput={true} />
+                                        </div>
+                                        <button className="btn btn-xs sm:w-20 gap-1.5 shadow-md hover:shadow-lg transition-all bg-blue-600 hover:bg-blue-700 text-white border-none h-8" onClick={handleAddWeightedMapping}><Plus size={14} />{t('common.add')}</button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        <input type="text" placeholder="原始模型名 (如 claude-sonnet-*)" className="input input-xs input-bordered w-full font-mono text-[11px] bg-white dark:bg-gray-800 h-8"
+                                            onChange={e => setWeightedKey(e.target.value)} value={weightedKey} />
+                                        {weightedTargets.map((wt, idx) => (
+                                            <div key={idx} className="flex items-center gap-2">
+                                                <span className="text-[10px] text-gray-400 w-6">#{idx + 1}</span>
+                                                <div className="flex-1">
+                                                    <GroupedSelect value={wt.target} onChange={v => updateWeightedTarget(idx, 'target', v)} options={customMappingOptions} placeholder="目标模型" className="font-mono text-[11px] h-8 dark:bg-gray-800 w-full" allowCustomInput={true} />
+                                                </div>
+                                                <input type="number" min={1} max={100} value={wt.weight} onChange={e => updateWeightedTarget(idx, 'weight', parseInt(e.target.value) || 1)} className="input input-xs input-bordered w-16 font-mono text-[11px] bg-white dark:bg-gray-800 h-8 text-center" title="权重" />
+                                                <button onClick={() => handleRemoveWeightedTarget(idx)} className="btn btn-ghost btn-xs text-error p-0 h-6 w-6 min-h-0" disabled={weightedTargets.length <= 1}><X size={12} /></button>
+                                            </div>
+                                        ))}
+                                        <div className="flex gap-2 justify-end">
+                                            <button onClick={handleAddWeightedTarget} className="btn btn-xs btn-ghost gap-1"><Plus size={12} />添加目标</button>
+                                            <button className="btn btn-xs sm:w-20 gap-1.5 shadow-md hover:shadow-lg transition-all bg-blue-600 hover:bg-blue-700 text-white border-none h-8" onClick={handleAddWeightedMapping}><Plus size={14} />{t('common.add')}</button>
                                         </div>
                                     </div>
-                                    <button
-                                        className="btn btn-xs sm:w-20 gap-1.5 shadow-md hover:shadow-lg transition-all bg-blue-600 hover:bg-blue-700 text-white border-none h-8"
-                                        onClick={() => {
-                                            const k = (document.getElementById('custom-key') as HTMLInputElement).value;
-                                            const v = customMappingValue;
-                                            if (k && v) {
-                                                handleMappingUpdate('custom', k, v);
-                                                (document.getElementById('custom-key') as HTMLInputElement).value = '';
-                                                setCustomMappingValue('');
-                                            }
-                                        }}
-                                    >
-                                        <Plus size={14} />
-                                        {t('common.add')}
-                                    </button>
-                                </div>
+                                )}
                             </div>
                         </div>
                     </div>
+                </div>
+
+                {/* Fallback Model Panel */}
+                <div className="bg-white dark:bg-base-100 rounded-xl p-4 border border-gray-100 dark:border-base-200 shadow-sm">
+                    <div className="flex items-center gap-3 mb-4">
+                        <div className="p-1.5 bg-amber-50 dark:bg-amber-900/20 rounded text-amber-600 dark:text-amber-400">
+                            <ShieldAlert size={20} />
+                        </div>
+                        <div className="flex-1">
+                            <h3 className="text-base font-bold text-gray-900 dark:text-gray-100 leading-none">兜底模型</h3>
+                            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">当请求的模型处于冷却状态时，自动转换到指定的兜底模型</p>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" className="sr-only peer" checked={fallbackEnabled} onChange={e => setFallbackEnabled(e.target.checked)} />
+                            <div className="w-11 h-6 bg-gray-200 dark:bg-base-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500 shadow-inner"></div>
+                        </label>
+                    </div>
+                    {fallbackEnabled && (
+                        <div className="flex flex-col sm:flex-row gap-3">
+                            <div className="flex-1">
+                                <label className="text-[10px] text-gray-400 mb-1 block">兜底模型</label>
+                                <GroupedSelect value={fallbackModel} onChange={setFallbackModel} options={customMappingOptions} placeholder="输入或选择模型" className="font-mono text-[11px] h-9 dark:bg-base-200 w-full" allowCustomInput={true} />
+                            </div>
+                            <div className="flex items-end">
+                                <button className="btn btn-sm sm:w-20 bg-amber-600 hover:bg-amber-700 text-white gap-1 h-9" onClick={handleSaveFallbackModel}><Save size={14} />保存</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Cooldown Status Panel */}
+                <div className="bg-white dark:bg-base-100 rounded-xl p-4 border border-gray-100 dark:border-base-200 shadow-sm">
+                    <div className="flex items-center gap-3 mb-4">
+                        <div className="p-1.5 bg-red-50 dark:bg-red-900/20 rounded text-red-600 dark:text-red-400">
+                            <Clock size={20} />
+                        </div>
+                        <div className="flex-1">
+                            <h3 className="text-base font-bold text-gray-900 dark:text-gray-100 leading-none">模型冷却状态</h3>
+                            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">遇到 429 错误的模型会进入冷却，冷却期间请求自动走兜底模型</p>
+                        </div>
+                        <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-gray-400">冷却时长</span>
+                            <input type="number" min={30} max={3600} value={cooldownDuration} onChange={e => setCooldownDuration(parseInt(e.target.value) || 600)} className="input input-xs input-bordered w-20 font-mono text-[11px] bg-white dark:bg-base-100 h-7" />
+                            <span className="text-[10px] text-gray-400">秒</span>
+                            <button className="btn btn-xs btn-square bg-red-600 hover:bg-red-700 text-white h-7" onClick={handleSaveCooldownConfig}><Save size={12} /></button>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" className="sr-only peer" checked={cooldownEnabled} onChange={e => handleToggleCooldown(e.target.checked)} />
+                            <div className="w-11 h-6 bg-gray-200 dark:bg-base-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-red-500 shadow-inner"></div>
+                        </label>
+                    </div>
+
+                    <div className="space-y-3">
+
+                        {cooldowns.length > 0 ? (
+                                <div className="space-y-1">
+                                    {cooldowns.map((cd, idx) => (
+                                        <div key={`${cd.model}-${cd.provider}-${idx}`} className="flex items-center justify-between px-3 py-2 bg-red-50/50 dark:bg-red-900/10 rounded-md border border-red-100 dark:border-red-900/30">
+                                            <div className="flex items-center gap-3">
+                                                <Activity size={12} className="text-red-500 animate-pulse" />
+                                                <span className="font-mono text-[11px] text-gray-700 dark:text-gray-300">{cd.model}</span>
+                                                <span className="text-[10px] text-gray-400">@{cd.provider}</span>
+                                            </div>
+                                            <span className="font-mono text-[11px] text-red-600 dark:text-red-400">{cd.remaining_secs}s</span>
+                                        </div>
+                                    ))}
+                                    <button className="btn btn-xs btn-ghost text-error gap-1 mt-2" onClick={handleClearCooldowns}><Trash2 size={12} />全部清除</button>
+                                </div>
+                                ) : (
+                                    <div className="text-center py-4 text-gray-400 dark:text-gray-600 italic text-[11px]">当前没有处于冷却状态的模型</div>
+                                )}
+                        </div>
                 </div>
 
                 {/* Advanced Thinking & Global Config */}
@@ -763,8 +983,8 @@ export default function RouteManager() {
                     </div>
                 </div>
 
-                {/* Account Scheduling & Rotation */}
-                <div className="bg-white dark:bg-base-100 rounded-xl p-4 border border-gray-100 dark:border-base-200 shadow-sm">
+                {/* Account Scheduling & Rotation — hidden until account system integration */}
+                <div className="bg-white dark:bg-base-100 rounded-xl p-4 border border-gray-100 dark:border-base-200 shadow-sm hidden">
                     <div className="flex items-center gap-3 mb-4">
                         <div className="p-1.5 bg-indigo-50 dark:bg-indigo-900/20 rounded text-indigo-600 dark:text-indigo-400">
                             <RefreshCw size={20} />

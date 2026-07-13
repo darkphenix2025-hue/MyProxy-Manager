@@ -257,6 +257,8 @@ pub async fn ensure_admin_server(
         integration.clone(),
         cloudflared_state,
         config.proxy_pool.clone(),
+        config.model_cooldown.clone(),
+        config.fallback_model.clone(),
     )
     .await
     {
@@ -508,6 +510,9 @@ pub async fn update_model_mapping(
     // 2. 无论是否运行，都保存到全局配置持久化
     let mut app_config = crate::modules::config::load_app_config().map_err(|e| e)?;
     app_config.proxy.custom_mapping = config.custom_mapping;
+    // 保存兜底模型和冷却配置
+    app_config.proxy.fallback_model = config.fallback_model;
+    app_config.proxy.model_cooldown = config.model_cooldown;
     crate::modules::config::save_app_config(&app_config).map_err(|e| e)?;
 
     Ok(())
@@ -817,7 +822,7 @@ pub async fn test_provider_models(
     request: TestProviderModelsRequest,
     proxy_state: State<'_, ProxyServiceState>,
 ) -> Result<TestProviderModelsResponse, String> {
-    use crate::proxy::config::ProviderProtocol;
+    
 
     let provider = request.provider;
 
@@ -882,8 +887,7 @@ fn build_test_provider_client(
     if upstream_proxy.enabled && !upstream_proxy.url.is_empty() {
         let url = crate::proxy::config::normalize_proxy_url(&upstream_proxy.url);
         builder = builder.proxy(
-            reqwest::Proxy::all(&url)
-                .map_err(|e| format!("Invalid upstream proxy url: {}", e))?,
+            reqwest::Proxy::all(&url).map_err(|e| format!("Invalid upstream proxy url: {}", e))?,
         );
     }
 

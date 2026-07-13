@@ -1,6 +1,4 @@
-use axum::{
-    http::{HeaderValue, StatusCode},
-};
+use axum::http::{HeaderValue, StatusCode};
 use serde_json::{json, Value};
 use tokio::time::Duration;
 
@@ -12,8 +10,7 @@ fn build_images_client(
     upstream_proxy: Option<crate::proxy::config::UpstreamProxyConfig>,
     timeout_secs: u64,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs.max(30))); // Images take longer
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs.max(30))); // Images take longer
 
     if let Some(config) = upstream_proxy {
         if config.enabled && !config.url.is_empty() {
@@ -75,10 +72,7 @@ async fn forward_single_image(
     }
 
     let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        "content-type",
-        HeaderValue::from_static("application/json"),
-    );
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", provider.api_key)) {
         headers.insert("authorization", v);
     }
@@ -91,7 +85,12 @@ async fn forward_single_image(
         .json(&body)
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Upstream request failed: {}", e)))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Upstream request failed: {}", e),
+            )
+        })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -106,10 +105,12 @@ async fn forward_single_image(
         ));
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to read response: {}", e)))?;
+    let bytes = response.bytes().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to read response: {}", e),
+        )
+    })?;
 
     let value: Value = serde_json::from_slice(&bytes).map_err(|e| {
         (
@@ -131,13 +132,10 @@ pub async fn forward_images_to_openai_compat(
     provider: &UpstreamProvider,
     body: &Value,
 ) -> Result<(String, Value), (StatusCode, String)> {
-    let prompt = body
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing 'prompt' field".to_string(),
-        ))?;
+    let prompt = body.get("prompt").and_then(|v| v.as_str()).ok_or((
+        StatusCode::BAD_REQUEST,
+        "Missing 'prompt' field".to_string(),
+    ))?;
 
     let model = body
         .get("model")
@@ -325,10 +323,7 @@ pub async fn forward_images_edits_to_openai_compat(
     });
 
     let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        "content-type",
-        HeaderValue::from_static("application/json"),
-    );
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", provider.api_key)) {
         headers.insert("authorization", v);
     }
@@ -341,21 +336,32 @@ pub async fn forward_images_edits_to_openai_compat(
         .json(&body)
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Upstream request failed: {}", e)))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Upstream request failed: {}", e),
+            )
+        })?;
 
     let status = response.status();
     if !status.is_success() {
         let error_body = response.bytes().await.unwrap_or_default();
         return Err((
             status,
-            format!("Provider error {}: {}", status, String::from_utf8_lossy(&error_body)),
+            format!(
+                "Provider error {}: {}",
+                status,
+                String::from_utf8_lossy(&error_body)
+            ),
         ));
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to read response: {}", e)))?;
+    let bytes = response.bytes().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to read response: {}", e),
+        )
+    })?;
 
     let value: Value = serde_json::from_slice(&bytes).map_err(|e| {
         (

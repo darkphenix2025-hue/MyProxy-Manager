@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::proxy::common::model_cooldown::ModelCooldownManager;
 use crate::proxy::config::{
-    is_valid_provider_id, ProviderDispatchMode, ProviderProtocol,
-    UpstreamProvider, ZaiConfig,
+    is_valid_provider_id, ProviderDispatchMode, ProviderProtocol, UpstreamProvider, ZaiConfig,
 };
 
 /// Result of provider selection, including the resolved model name
@@ -56,7 +56,8 @@ impl ProviderRouter {
                     tracing::warn!(
                         "[ProviderRouter] Invalid provider_id format: '{}' (provider: '{}'). \
                          Must be 1-10 alphanumeric chars, starting with a letter.",
-                        id, p.name
+                        id,
+                        p.name
                     );
                     continue;
                 }
@@ -64,7 +65,8 @@ impl ProviderRouter {
                     tracing::error!(
                         "[ProviderRouter] Duplicate provider_id: '{}' (provider: '{}'). \
                          This provider will not be routable by provider_id.",
-                        id, p.name
+                        id,
+                        p.name
                     );
                     provider_id_index.remove(id);
                     continue;
@@ -73,7 +75,11 @@ impl ProviderRouter {
             }
         }
 
-        tracing::info!("[ProviderRouter] Built with {} providers, provider_id_index = {:?}", enabled.len(), provider_id_index);
+        tracing::info!(
+            "[ProviderRouter] Built with {} providers, provider_id_index = {:?}",
+            enabled.len(),
+            provider_id_index
+        );
 
         Self {
             providers: enabled,
@@ -97,6 +103,7 @@ impl ProviderRouter {
             enabled: true,
             base_url: zai.base_url.clone(),
             api_key: zai.api_key.clone(),
+            api_path: None,
             protocol: ProviderProtocol::AnthropicPassthrough,
             dispatch_mode,
             priority: 0,
@@ -104,6 +111,7 @@ impl ProviderRouter {
             model_mapping: zai.model_mapping.clone(),
             available_models: None,
             request_timeout_secs: None,
+            supports_count_tokens: true,
         };
 
         Self {
@@ -129,6 +137,8 @@ impl ProviderRouter {
 
     /// Select the next provider for the given model.
     /// `prev_failed` excludes a provider that just failed, triggering fallback.
+    /// `cooldown_manager` optionally excludes providers/models in cooldown.
+    /// `current_model` is the resolved model name for cooldown key matching (used with provider_id route).
     ///
     /// Routing priority:
     /// 1. If model starts with a registered `provider_id/`, route directly to that provider.
@@ -145,23 +155,79 @@ impl ProviderRouter {
         &self,
         model: &str,
         prev_failed: Option<&str>,
+        cooldown_manager: Option<&ModelCooldownManager>,
+        current_model: Option<&str>,
     ) -> ProviderSelection<'_> {
+        // Helper: check if a provider is cooled down for the given model
+        let is_cooled = |provider_name: &str, model_name: &str| -> bool {
+            if let Some(cd) = cooldown_manager {
+                let key = crate::proxy::common::model_cooldown::CooldownKey {
+                    model: model_name.to_string(),
+                    provider: provider_name.to_string(),
+                };
+                cd.is_cooled_down(&key)
+            } else {
+                false
+            }
+        };
+
+        // [FIX] Extract stripped model upfront — used for ALL resolved_model return paths
+        // to ensure provider_id/ prefix is always removed from the model name sent upstream.
+        let stripped_model = self
+            .extract_provider_id_prefix(model)
+            .map(|(_, rest)| rest.to_string());
+
         // STEP 1: Check for provider_id/ prefix routing (highest priority)
         if let Some((pid, rest)) = self.extract_provider_id_prefix(model) {
-            tracing::info!("[ProviderRouter] provider_id match: '{}' -> provider='{}', rest='{}'", model, pid, rest);
+            tracing::info!(
+                "[ProviderRouter] provider_id match: '{}' -> provider='{}', rest='{}'",
+                model,
+                pid,
+                rest
+            );
             if let Some(&idx) = self.provider_id_index.get(pid) {
                 let provider = &self.providers[idx];
-                if prev_failed.map_or(true, |pf| provider.name != pf) {
+                let provider_name = &provider.name;
+                if !prev_failed.map_or(false, |pf| provider_name == pf) {
+                    // Check cooldown — use rest (stripped model) as the cooldown model key
+                    if !is_cooled(provider_name, rest) {
+                        return ProviderSelection {
+                            provider,
+                            resolved_model: rest.to_string(),
+                        };
+                    }
+                    tracing::warn!(
+                        "[ProviderRouter] provider_id '{}' matched '{}' but {}@{} is cooled down, falling through",
+                        pid, provider_name, rest, provider_name
+                    );
+                } else {
+                    // [FIX] provider_id matched but provider previously failed.
+                    // Don't fall through to wildcard — the model is provider-specific
+                    // (e.g. ali/qwen3.5-plus should ONLY go to BAILIAN).
+                    // Returning the same provider lets the caller handle the error
+                    // (e.g. retry, use fallback model) instead of sending to an
+                    // incompatible provider that will reject the model.
+                    tracing::warn!(
+                        "[ProviderRouter] provider_id '{}' matched '{}' but {} failed; \
+                         returning same provider to avoid routing to incompatible supplier",
+                        pid,
+                        provider_name,
+                        provider_name
+                    );
                     return ProviderSelection {
                         provider,
                         resolved_model: rest.to_string(),
                     };
                 }
-                // provider_id matched but provider failed; fall through to default selection
+                // provider_id matched but provider is cooled down; fall through to wildcard selection
             }
         } else {
             tracing::info!("[ProviderRouter] no provider_id prefix match for '{}', falling through to wildcard selection", model);
         }
+
+        // For wildcard selection paths, use stripped_model if available (from a failed
+        // provider_id match), otherwise use the original model.
+        let resolved_for_wildcard = stripped_model.clone().unwrap_or_else(|| model.to_string());
 
         // STEP 2: Model matching via model_prefixes or available_models
         let model_lower = model.to_lowercase();
@@ -172,15 +238,26 @@ impl ProviderRouter {
             if prev_failed.map_or(false, |pf| p.name == pf) {
                 continue;
             }
+            // Filter out cooled-down providers
+            let cd_model = current_model.unwrap_or(&model_lower);
+            if is_cooled(&p.name, cd_model) {
+                tracing::debug!(
+                    "[ProviderRouter] Skipping cooled-down provider '{}' for model '{}'",
+                    p.name,
+                    cd_model
+                );
+                continue;
+            }
 
             let has_match = if !p.model_prefixes.is_empty() {
                 // Check model_prefixes
-                p.model_prefixes.iter().any(|prefix| {
-                    model_lower.starts_with(prefix.to_lowercase().as_str())
-                })
+                p.model_prefixes
+                    .iter()
+                    .any(|prefix| model_lower.starts_with(prefix.to_lowercase().as_str()))
             } else if let Some(ref avail) = p.available_models {
                 // Check available_models (comma-separated list)
-                avail.split(',')
+                avail
+                    .split(',')
                     .map(|s| s.trim().to_lowercase())
                     .filter(|s| !s.is_empty())
                     .any(|m| m == model_lower)
@@ -218,7 +295,7 @@ impl ProviderRouter {
         if candidates.is_empty() {
             return ProviderSelection {
                 provider: &self.providers[0],
-                resolved_model: model.to_string(),
+                resolved_model: resolved_for_wildcard.clone(),
             };
         }
 
@@ -232,7 +309,7 @@ impl ProviderRouter {
         if let Some(p) = exclusive.first() {
             return ProviderSelection {
                 provider: p,
-                resolved_model: model.to_string(),
+                resolved_model: resolved_for_wildcard.clone(),
             };
         }
 
@@ -253,24 +330,43 @@ impl ProviderRouter {
             let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % same_priority.len();
             return ProviderSelection {
                 provider: same_priority[idx],
-                resolved_model: model.to_string(),
+                resolved_model: resolved_for_wildcard.clone(),
             };
         }
 
-        // 3. Fallback providers
+        // 3. Fallback providers — with model compatibility check
         let mut fallback: Vec<_> = candidates
             .iter()
             .filter(|p| p.dispatch_mode == ProviderDispatchMode::Fallback)
+            .filter(|p| {
+                // Skip providers that have zero model constraints and no mapping for this model.
+                // A provider with model_mapping entries or available_models can handle specific
+                // models; a completely unconstrained provider should only be selected if it
+                // actually has a mapping entry for the requested model.
+                let has_mapping = !p.model_mapping.is_empty();
+                let has_available = p.available_models.is_some();
+                let has_prefixes = !p.model_prefixes.is_empty();
+                if !has_mapping && !has_available && !has_prefixes {
+                    // No constraints at all — check if model_mapping happens to cover this model
+                    // (it doesn't, since it's empty). Skip to avoid sending an incompatible model.
+                    return false;
+                }
+                true
+            })
             .copied()
             .collect();
         fallback.sort_by_key(|p| p.priority);
         let fallback_provider = fallback.first().copied().unwrap_or_else(|| {
-            // No fallback provider, use the first available provider
-            self.providers.iter().find(|p| prev_failed.map_or(true, |pf| p.name != pf)).unwrap_or(&self.providers[0])
+            // No compatible fallback provider. Return the first available provider and let the
+            // caller handle it (fallback model or error) rather than sending to an incompatible one.
+            self.providers
+                .iter()
+                .find(|p| prev_failed.map_or(true, |pf| p.name != pf))
+                .unwrap_or(&self.providers[0])
         });
         ProviderSelection {
             provider: fallback_provider,
-            resolved_model: model.to_string(),
+            resolved_model: resolved_for_wildcard.clone(),
         }
     }
 
@@ -348,6 +444,7 @@ mod tests {
             enabled: true,
             base_url: "https://example.com".to_string(),
             api_key: "test-key".to_string(),
+            api_path: None,
             protocol: ProviderProtocol::AnthropicPassthrough,
             dispatch_mode,
             priority,
@@ -355,6 +452,7 @@ mod tests {
             model_mapping: Default::default(),
             available_models: None,
             request_timeout_secs: None,
+            supports_count_tokens: true,
         }
     }
 
@@ -379,7 +477,7 @@ mod tests {
             make_test_provider("B", ProviderDispatchMode::Pooled, 0, Some("b")),
         ]);
 
-        let sel = router.select("any-model", None);
+        let sel = router.select("any-model", None, None, None);
         assert_eq!(sel.provider.name, "A"); // Exclusive wins over Pooled
         assert_eq!(sel.resolved_model, "any-model");
     }
@@ -392,17 +490,17 @@ mod tests {
         let router = build_router_with_providers(vec![p1.clone(), p2.clone()]);
 
         // Direct provider_id routing
-        let sel = router.select("g/gemini-2.5-pro", None);
+        let sel = router.select("g/gemini-2.5-pro", None, None, None);
         assert_eq!(sel.provider.name, "google");
         assert_eq!(sel.resolved_model, "gemini-2.5-pro");
 
-        let sel = router.select("a/claude-sonnet-4-6", None);
+        let sel = router.select("a/claude-sonnet-4-6", None, None, None);
         assert_eq!(sel.provider.name, "anthropic");
         assert_eq!(sel.resolved_model, "claude-sonnet-4-6");
 
         // No prefix -> default selection (exclusive, lowest priority first)
         // Both have priority 0, so config order first -> google
-        let sel = router.select("gemini-2.5-pro", None);
+        let sel = router.select("gemini-2.5-pro", None, None, None);
         assert_eq!(sel.provider.name, "google");
         assert_eq!(sel.resolved_model, "gemini-2.5-pro");
     }
@@ -412,12 +510,12 @@ mod tests {
         let p = make_test_provider("google", ProviderDispatchMode::Pooled, 0, Some("g"));
         let router = build_router_with_providers(vec![p]);
 
-        let sel = router.select("g/gemini-2.5-flash", None);
+        let sel = router.select("g/gemini-2.5-flash", None, None, None);
         assert_eq!(sel.provider.name, "google");
         assert_eq!(sel.resolved_model, "gemini-2.5-flash");
 
         // Unknown provider_id -> default selection
-        let sel = router.select("x/unknown-model", None);
+        let sel = router.select("x/unknown-model", None, None, None);
         assert_eq!(sel.provider.name, "google");
     }
 
@@ -430,7 +528,7 @@ mod tests {
             make_test_provider("exclusive", ProviderDispatchMode::Exclusive, 0, Some("e")),
         ]);
 
-        let sel = router.select("any-model", None);
+        let sel = router.select("any-model", None, None, None);
         assert_eq!(sel.provider.name, "exclusive");
     }
 
@@ -442,7 +540,7 @@ mod tests {
             make_test_provider("high", ProviderDispatchMode::Exclusive, 1, Some("h")),
         ]);
 
-        let sel = router.select("any-model", None);
+        let sel = router.select("any-model", None, None, None);
         assert_eq!(sel.provider.name, "high");
     }
 
@@ -452,9 +550,18 @@ mod tests {
         let router = build_router_with_providers(vec![provider.clone()]);
 
         // Without explicit mapping, models pass through as-is
-        assert_eq!(router.map_model(&provider, "claude-sonnet-4-20250514"), "claude-sonnet-4-20250514");
-        assert_eq!(router.map_model(&provider, "claude-opus-4-20250514"), "claude-opus-4-20250514");
-        assert_eq!(router.map_model(&provider, "gemini-3-flash"), "gemini-3-flash");
+        assert_eq!(
+            router.map_model(&provider, "claude-sonnet-4-20250514"),
+            "claude-sonnet-4-20250514"
+        );
+        assert_eq!(
+            router.map_model(&provider, "claude-opus-4-20250514"),
+            "claude-opus-4-20250514"
+        );
+        assert_eq!(
+            router.map_model(&provider, "gemini-3-flash"),
+            "gemini-3-flash"
+        );
     }
 
     #[test]
@@ -471,7 +578,7 @@ mod tests {
         let router = ProviderRouter::new(vec![], Some(&zai));
         assert!(!router.is_empty());
 
-        let sel = router.select("claude-sonnet-4-20250514", None);
+        let sel = router.select("claude-sonnet-4-20250514", None, None, None);
         assert_eq!(sel.provider.name, "z.ai");
         assert_eq!(sel.provider.base_url, "https://api.z.ai/api/anthropic");
     }

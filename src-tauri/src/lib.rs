@@ -1,15 +1,15 @@
+mod commands;
+pub mod constants;
+pub mod error;
 mod models;
 mod modules;
-mod commands;
+mod proxy; // Proxy service module
 mod utils;
-mod proxy;  // Proxy service module
-pub mod error;
-pub mod constants;
 
-use tauri::Manager;
 use modules::logger;
-use tracing::{info, warn, error};
 use std::sync::Arc;
+use tauri::Manager;
+use tracing::{error, info, warn};
 
 #[derive(Clone, Copy)]
 struct AppRuntimeFlags {
@@ -18,7 +18,12 @@ struct AppRuntimeFlags {
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -33,16 +38,16 @@ fn is_wayland_session() -> bool {
 }
 
 fn should_enable_tray() -> bool {
-    if env_flag_enabled("ANTIGRAVITY_DISABLE_TRAY") {
-        info!("Tray disabled by ANTIGRAVITY_DISABLE_TRAY");
+    if env_flag_enabled("MYPROXY_DISABLE_TRAY") {
+        info!("Tray disabled by MYPROXY_DISABLE_TRAY");
         return false;
     }
 
     #[cfg(target_os = "linux")]
     {
-        if is_wayland_session() && !env_flag_enabled("ANTIGRAVITY_FORCE_TRAY") {
+        if is_wayland_session() && !env_flag_enabled("MYPROXY_FORCE_TRAY") {
             warn!(
-                "Linux Wayland session detected; disabling tray by default to avoid GTK/AppIndicator crashes. Set ANTIGRAVITY_FORCE_TRAY=1 to force-enable."
+                "Linux Wayland session detected; disabling tray by default to avoid GTK/AppIndicator crashes. Set MYPROXY_FORCE_TRAY=1 to force-enable."
             );
             return false;
         }
@@ -61,14 +66,14 @@ fn configure_linux_gdk_backend() {
     let has_x11_display = std::env::var("DISPLAY")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
-    let force_wayland = env_flag_enabled("ANTIGRAVITY_FORCE_WAYLAND");
-    let force_x11 = env_flag_enabled("ANTIGRAVITY_FORCE_X11");
+    let force_wayland = env_flag_enabled("MYPROXY_FORCE_WAYLAND");
+    let force_x11 = env_flag_enabled("MYPROXY_FORCE_X11");
 
     if force_x11 || (is_wayland && has_x11_display && !force_wayland) {
         // Force X11 backend under Wayland sessions to avoid a GTK Wayland shm crash.
         std::env::set_var("GDK_BACKEND", "x11");
         warn!(
-            "Forcing GDK_BACKEND=x11 for stability on Wayland. Set ANTIGRAVITY_FORCE_WAYLAND=1 to keep Wayland backend."
+            "Forcing GDK_BACKEND=x11 for stability on Wayland. Set MYPROXY_FORCE_WAYLAND=1 to keep Wayland backend."
         );
     }
 }
@@ -83,7 +88,10 @@ fn increase_nofile_limit() {
         };
 
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 {
-            info!("Current open file limit: soft={}, hard={}", rl.rlim_cur, rl.rlim_max);
+            info!(
+                "Current open file limit: soft={}, hard={}",
+                rl.rlim_cur, rl.rlim_max
+            );
 
             // Attempt to increase to 4096 or maximum hard limit
             let target = 4096.min(rl.rlim_max);
@@ -130,7 +138,7 @@ pub fn run() {
     if let Err(e) = modules::security_db::init_db() {
         error!("Failed to initialize security database: {}", e);
     }
-    
+
     // Initialize user token database
     if let Err(e) = modules::user_token_db::init_db() {
         error!("Failed to initialize user token database: {}", e);
@@ -298,17 +306,16 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            let _ = app.get_webview_window("main")
-                .map(|window| {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    #[cfg(target_os = "macos")]
-                    app.set_activation_policy(tauri::ActivationPolicy::Regular).unwrap_or(());
-                });
+            let _ = app.get_webview_window("main").map(|window| {
+                let _ = window.show();
+                let _ = window.set_focus();
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Regular)
+                    .unwrap_or(());
+            });
         }))
         .manage(commands::proxy::ProxyServiceState::new())
         .manage(commands::cloudflared::CloudflaredState::new())
@@ -358,7 +365,8 @@ pub fn run() {
                 if let Ok(config) = modules::config::load_app_config() {
                     let state = handle.state::<commands::proxy::ProxyServiceState>();
                     let cf_state = handle.state::<commands::cloudflared::CloudflaredState>();
-                    let integration = crate::modules::integration::SystemManager::Desktop(handle.clone());
+                    let integration =
+                        crate::modules::integration::SystemManager::Desktop(handle.clone());
 
                     // 1. 确保管理后台开启
                     if let Err(e) = commands::proxy::ensure_admin_server(
@@ -366,10 +374,15 @@ pub fn run() {
                         &state,
                         integration.clone(),
                         Arc::new(cf_state.inner().clone()),
-                    ).await {
+                    )
+                    .await
+                    {
                         error!("Failed to start admin server: {}", e);
                     } else {
-                        info!("Admin server (port {}) started successfully", config.proxy.port);
+                        info!(
+                            "Admin server (port {}) started successfully",
+                            config.proxy.port
+                        );
                     }
 
                     // 2. 自动启动转发逻辑
@@ -379,7 +392,9 @@ pub fn run() {
                             &state,
                             integration,
                             Arc::new(cf_state.inner().clone()),
-                        ).await {
+                        )
+                        .await
+                        {
                             error!("Failed to auto-start proxy service: {}", e);
                         } else {
                             info!("Proxy service auto-started successfully");
@@ -457,28 +472,13 @@ pub fn run() {
             commands::list_oauth_clients,
             commands::get_active_oauth_client,
             commands::set_active_oauth_client,
-            commands::import_v1_accounts,
-            commands::import_from_db,
-            commands::import_custom_db,
-            commands::sync_account_from_db,
             commands::save_text_file,
             commands::read_text_file,
             commands::clear_log_cache,
-            commands::clear_antigravity_cache,
-            commands::get_antigravity_cache_paths,
             commands::open_data_folder,
             commands::get_data_dir_path,
             commands::show_main_window,
             commands::set_window_theme,
-            commands::get_antigravity_path,
-            commands::get_antigravity_args,
-            commands::check_for_updates,
-            commands::check_homebrew_installation,
-            commands::brew_upgrade_cask,
-            commands::get_update_settings,
-            commands::save_update_settings,
-            commands::should_check_updates,
-            commands::update_last_check_time,
             commands::toggle_proxy_status,
             // Proxy service commands
             commands::proxy::start_proxy_service,
@@ -510,6 +510,9 @@ pub fn run() {
             commands::proxy::clear_all_proxy_rate_limits,
             commands::proxy::check_proxy_health,
             commands::proxy::test_provider_models,
+            // Model cooldown commands
+            commands::get_model_cooldowns,
+            commands::clear_model_cooldowns,
             // Proxy Pool Binding commands
             commands::proxy_pool::bind_account_proxy,
             commands::proxy_pool::unbind_account_proxy,
@@ -536,19 +539,9 @@ pub fn run() {
             commands::get_token_stats_model_trend_daily,
             commands::get_token_stats_account_trend_hourly,
             commands::get_token_stats_account_trend_daily,
-            proxy::cli_sync::get_cli_sync_status,
-            proxy::cli_sync::execute_cli_sync,
-            proxy::cli_sync::execute_cli_restore,
-            proxy::cli_sync::get_cli_config_content,
-            proxy::opencode_sync::get_opencode_sync_status,
-            proxy::opencode_sync::execute_opencode_sync,
-            proxy::opencode_sync::execute_opencode_restore,
-            proxy::opencode_sync::get_opencode_config_content,
-            proxy::opencode_sync::execute_opencode_clear,
-            proxy::droid_sync::get_droid_sync_status,
-            proxy::droid_sync::execute_droid_sync,
-            proxy::droid_sync::execute_droid_restore,
-            proxy::droid_sync::get_droid_config_content,
+            commands::get_llm_log_traces,
+            commands::get_llm_log_detail,
+            commands::delete_llm_log_trace,
             // Security/IP monitoring commands
             commands::security::get_ip_access_logs,
             commands::security::get_ip_stats,
@@ -594,23 +587,30 @@ pub fn run() {
                 // Handle app exit - cleanup background tasks
                 tauri::RunEvent::Exit => {
                     tracing::info!("Application exiting, cleaning up background tasks...");
-                    if let Some(state) = app_handle.try_state::<crate::commands::proxy::ProxyServiceState>() {
+                    if let Some(state) =
+                        app_handle.try_state::<crate::commands::proxy::ProxyServiceState>()
+                    {
                         tauri::async_runtime::block_on(async {
                             // Use timeout-based read() instead of try_read() to handle lock contention
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(3),
-                                state.instance.read()
-                            ).await {
+                                state.instance.read(),
+                            )
+                            .await
+                            {
                                 Ok(guard) => {
                                     if let Some(instance) = guard.as_ref() {
                                         // Use graceful_shutdown with 2s timeout for task cleanup
-                                        instance.token_manager
+                                        instance
+                                            .token_manager
                                             .graceful_shutdown(std::time::Duration::from_secs(2))
                                             .await;
                                     }
                                 }
                                 Err(_) => {
-                                    tracing::warn!("Lock acquisition timed out after 3s, forcing exit");
+                                    tracing::warn!(
+                                        "Lock acquisition timed out after 3s, forcing exit"
+                                    );
                                 }
                             }
                         });
@@ -623,7 +623,9 @@ pub fn run() {
                         let _ = window.show();
                         let _ = window.unminimize();
                         let _ = window.set_focus();
-                        app_handle.set_activation_policy(tauri::ActivationPolicy::Regular).unwrap_or(());
+                        app_handle
+                            .set_activation_policy(tauri::ActivationPolicy::Regular)
+                            .unwrap_or(());
                     }
                 }
                 _ => {}

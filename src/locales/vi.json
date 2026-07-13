@@ -324,14 +324,7 @@
             "auto_launch": "Mở khi đăng nhập",
             "auto_launch_enabled": "Đã bật",
             "auto_launch_disabled": "Đã tắt",
-            "auto_launch_desc": "Tự động mở Antigravity Tools khi bạn đăng nhập vào máy",
-            "auto_check_update": "Tự động kiểm tra cập nhật",
-            "auto_check_update_desc": "Tự động kiểm tra phiên bản mới khi mở app",
-            "auto_check_update_enabled": "Đã bật tự động kiểm tra",
-            "auto_check_update_disabled": "Đã tắt tự động kiểm tra",
-            "update_check_interval": "Chu kỳ kiểm tra (giờ)",
-            "update_check_interval_desc": "Đặt khoảng thời gian tự động kiểm tra (1-168 giờ)",
-            "update_check_interval_saved": "Đã lưu cài đặt chu kỳ kiểm tra"
+            "auto_launch_desc": "Tự động mở Antigravity Tools khi bạn đăng nhập vào máy"
         },
         "account": {
             "title": "Cài đặt Tài khoản",
@@ -488,12 +481,6 @@
             "github": "GitHub",
             "view_code": "Xem Mã nguồn",
             "copyright": "Bản quyền © 2025-2026 Antigravity. Đã đăng ký bản quyền.",
-            "check_update": "Kiểm tra Cập nhật",
-            "checking_update": "Đang kiểm tra...",
-            "latest_version": "Bạn đang dùng bản mới nhất",
-            "new_version_available": "Có phiên bản mới {{version}}",
-            "download_update": "Tải xuống",
-            "update_check_failed": "Kiểm tra cập nhật thất bại",
             "support_btn": "Hỗ trợ tác giả",
             "support_title": "Quyên góp & Hỗ trợ",
             "support_desc": "Nếu bạn thấy dự án này hữu ích, hãy mời tác giả một ly cà phê! Sự hỗ trợ của bạn là động lực lớn nhất để tôi duy trì dự án này.",

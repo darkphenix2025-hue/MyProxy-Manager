@@ -16,7 +16,14 @@ where
     use bytes::BytesMut;
 
     let uuid_str = Uuid::new_v4().to_string();
-    let message_id = format!("msg_{}", uuid_str.replace('-', "").chars().take(24).collect::<String>());
+    let message_id = format!(
+        "msg_{}",
+        uuid_str
+            .replace('-', "")
+            .chars()
+            .take(24)
+            .collect::<String>()
+    );
     let _created_ts = chrono::Utc::now().timestamp() as u64;
 
     let stream = async_stream::stream! {
@@ -25,7 +32,6 @@ where
         let mut emitted_message_start = false;
         let mut final_input_tokens: u32 = 0;
         let mut final_output_tokens: u32 = 0;
-        let mut error_occurred = false;
         let mut tool_call_index: u32 = 0;
 
         let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(15));
@@ -282,7 +288,6 @@ where
                             }
                         }
                         Some(Err(e)) => {
-                            error_occurred = true;
                             let err_event = json!({
                                 "type": "error",
                                 "error": {
@@ -306,7 +311,7 @@ where
                                 let delta_event = json!({
                                     "type": "message_delta",
                                     "delta": {
-                                        "stop_reason": if error_occurred { "stop_sequence" } else { "end_turn" },
+                                        "stop_reason": "end_turn",
                                         "stop_sequence": null,
                                     },
                                     "usage": usage_json,
@@ -337,7 +342,14 @@ where
 /// This returns a JSON Value that matches the Claude Messages API non-streaming response shape.
 pub fn openai_to_claude_response(openai_response: &Value, model: &str) -> Result<Value, String> {
     let uuid_str = Uuid::new_v4().to_string();
-    let message_id = format!("msg_{}", uuid_str.replace('-', "").chars().take(24).collect::<String>());
+    let message_id = format!(
+        "msg_{}",
+        uuid_str
+            .replace('-', "")
+            .chars()
+            .take(24)
+            .collect::<String>()
+    );
 
     let choices = openai_response
         .get("choices")
@@ -374,15 +386,18 @@ pub fn openai_to_claude_response(openai_response: &Value, model: &str) -> Result
             if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in tool_calls {
                     if let Some(function) = tc.get("function") {
-                        let id = tc.get("id")
+                        let id = tc
+                            .get("id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("toolu_unknown")
                             .to_string();
-                        let name = function.get("name")
+                        let name = function
+                            .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string();
-                        let input = function.get("arguments")
+                        let input = function
+                            .get("arguments")
                             .and_then(|v| v.as_str())
                             .and_then(|s| serde_json::from_str::<Value>(s).ok())
                             .unwrap_or(json!({}));
@@ -410,15 +425,18 @@ pub fn openai_to_claude_response(openai_response: &Value, model: &str) -> Result
     }
 
     // Extract usage
-    let usage = openai_response.get("usage").map(|u| {
-        json!({
-            "input_tokens": u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            "output_tokens": u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    let usage = openai_response
+        .get("usage")
+        .map(|u| {
+            json!({
+                "input_tokens": u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                "output_tokens": u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            })
         })
-    }).unwrap_or(json!({
-        "input_tokens": 0,
-        "output_tokens": 0,
-    }));
+        .unwrap_or(json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }));
 
     let claude_resp = json!({
         "id": message_id,

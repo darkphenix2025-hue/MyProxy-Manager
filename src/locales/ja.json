@@ -337,14 +337,7 @@
             "auto_launch": "起動時に実行",
             "auto_launch_enabled": "有効",
             "auto_launch_disabled": "無効",
-            "auto_launch_desc": "システム起動時にAntigravity Toolsを自動的に起動する",
-            "auto_check_update": "更新を自動確認",
-            "auto_check_update_desc": "起動時に新しいバージョンを自動的に確認します",
-            "auto_check_update_disabled": "自動確認は無効です",
-            "auto_check_update_enabled": "自動確認は有効です",
-            "update_check_interval": "確認間隔（時間）",
-            "update_check_interval_desc": "自動確認の間隔を設定します（1-168時間）",
-            "update_check_interval_saved": "確認間隔の設定を保存しました"
+            "auto_launch_desc": "システム起動時にAntigravity Toolsを自動的に起動する"
         },
         "account": {
             "title": "アカウント設定",
@@ -498,12 +491,6 @@
             "github": "GitHub",
             "view_code": "コードを表示",
             "copyright": "Copyright © 2025-2026 Antigravity. All rights reserved.",
-            "check_update": "アップデートを確認",
-            "checking_update": "確認中...",
-            "latest_version": "最新バージョンです",
-            "new_version_available": "新バージョン {{version}} が利用可能です",
-            "download_update": "ダウンロード",
-            "update_check_failed": "アップデートの確認に失敗しました",
             "support_btn": "作者をサポート",
             "support_title": "寄付とサポート",
             "support_desc": "このプロジェクトがお役に立てば、コーヒーを一杯ご馳走してください！皆様のサポートが、プロジェクトを継続する最大の動機です。",

@@ -9,10 +9,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::proxy::{
-    audio::AudioProcessor,
-    config::ProviderProtocol,
-    providers::zai_audio::forward_audio_to_openai_compat,
-    server::AppState,
+    audio::AudioProcessor, config::ProviderProtocol,
+    providers::zai_audio::forward_audio_to_openai_compat, server::AppState,
 };
 
 /// 处理音频转录请求 (OpenAI Whisper API 兼容)
@@ -89,8 +87,17 @@ pub async fn handle_audio_transcription(
     );
     let router = state.provider_router.read().await;
     let selection = if !router.is_empty() {
-        let sel = router.select(&audio_mapped_model, None);
-        Some((sel.resolved_model.clone(), sel.provider.clone()))
+        let sel = router.select(
+            &audio_mapped_model,
+            None,
+            state.cooldown_manager.as_ref().map(|a| a.as_ref()),
+            Some(&audio_mapped_model),
+        );
+        if router.is_empty() || sel.provider.name.is_empty() {
+            None
+        } else {
+            Some((sel.resolved_model.clone(), sel.provider.clone()))
+        }
     } else {
         None
     };
@@ -113,7 +120,14 @@ pub async fn handle_audio_transcription(
                     )
                     .await
                     {
-                        resp if resp.status().as_u16() < 400 => return Ok(resp),
+                        r if r.status().as_u16() < 400 => {
+                            let mut resp = r;
+                            resp.headers_mut().insert(
+                                "X-Upstream-Protocol",
+                                axum::http::HeaderValue::from_static("openai"),
+                            );
+                            return Ok(resp);
+                        }
                         resp => {
                             last_error = format!(
                                 "Provider {} attempt {} failed with status {}",

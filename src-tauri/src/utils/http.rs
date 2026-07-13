@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::modules::config::load_app_config;
 use once_cell::sync::Lazy;
 use rquest::{Client, Proxy};

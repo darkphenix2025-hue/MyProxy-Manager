@@ -1,5 +1,5 @@
 [package]
-name = "antigravity_tools"
+name = "myproxy_manager"
 version = "4.1.31"
 description = "A Tauri App"
 authors = ["you"]
@@ -12,21 +12,21 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "antigravity_tools_lib"
+name = "myproxy_manager_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "^2.2.5", features = [] }
 
 [dependencies]
-tauri = { version = "^2.2.5", features = ["tray-icon", "image-png"] }
+tauri = { version = "^2.2.5", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = "0.4"
 dirs = "5.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "blocking", "rustls-tls", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "blocking", "rustls-tls", "multipart", "gzip", "brotli", "deflate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -62,7 +62,6 @@ libc = "0.2"
 tracing-appender = "0.2.4"
 tracing-log = "0.2.0"
 tauri-plugin-autostart = "2.5.1"
-tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 sha2 = "0.10"
 toml = "0.8"

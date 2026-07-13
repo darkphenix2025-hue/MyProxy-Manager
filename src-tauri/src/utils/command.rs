@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::process::Command as StdCommand;
 use tokio::process::Command as TokioCommand;
 

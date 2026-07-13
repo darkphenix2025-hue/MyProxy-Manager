@@ -592,7 +592,7 @@ function ProviderManager() {
         setTestResults(null);
         try {
             const data = await request<{ results: ModelTestResult[] }>('test_provider_models', {
-                provider,
+                request: { provider },
             });
             setTestResults({ providerName: provider.name, results: data.results });
         } catch (e: any) {

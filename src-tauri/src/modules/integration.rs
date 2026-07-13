@@ -1,19 +1,19 @@
-use crate::modules::{process, db, device};
+use crate::modules::{db, device};
 use crate::models::Account;
 use std::fs;
 
 pub trait SystemIntegration: Send + Sync {
-    /// 当切换账号时执行的系统层操作（如杀进程、写入文件、注入数据库）
+    /// 当切换账号时执行的系统层操作（如写入文件、注入数据库）
     async fn on_account_switch(&self, account: &crate::models::Account) -> Result<(), String>;
-    
+
     /// 更新系统托盘（如果适用）
     fn update_tray(&self);
-    
+
     /// 发送系统通知
     fn show_notification(&self, title: &str, body: &str);
 }
 
-/// 桌面版实现：包含完整的进程控制和 UI 同步
+/// 桌面版实现：包含完整的 UI 同步
 pub struct DesktopIntegration {
     pub app_handle: tauri::AppHandle,
 }
@@ -21,27 +21,22 @@ pub struct DesktopIntegration {
 impl SystemIntegration for DesktopIntegration {
     async fn on_account_switch(&self, account: &crate::models::Account) -> Result<(), String> {
         crate::modules::logger::log_info(&format!("[Desktop] Executing system switch for: {}", account.email));
-        
+
         // 1. 获取存储路径
         let storage_path = device::get_storage_path()?;
 
-        // 2. 关闭外部进程
-        if process::is_antigravity_running() {
-            process::close_antigravity(20)?;
-        }
-
-        // 3. 写入设备 Profile
+        // 2. 写入设备 Profile
         if let Some(ref profile) = account.device_profile {
             device::write_profile(&storage_path, profile)?;
         }
 
-        // 4. 数据库处理与 Token 注入
+        // 3. 数据库处理与 Token 注入
         let db_path = db::get_db_path()?;
         if db_path.exists() {
             let backup_path = db_path.with_extension("vscdb.backup");
             let _ = fs::copy(&db_path, &backup_path);
         }
-        
+
         db::inject_token(
             &db_path,
             &account.token.access_token,
@@ -52,12 +47,9 @@ impl SystemIntegration for DesktopIntegration {
             account.token.project_id.as_deref(),
         )?;
 
-        // 5. 重启外部进程
-        process::start_antigravity()?;
-        
-        // 6. 更新托盘
+        // 4. 更新托盘
         let _ = crate::modules::tray::update_tray_menus(&self.app_handle);
-        
+
         Ok(())
     }
 

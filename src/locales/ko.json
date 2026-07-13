@@ -328,14 +328,7 @@
             "auto_launch": "시작 시 실행",
             "auto_launch_enabled": "활성화됨",
             "auto_launch_disabled": "비활성화됨",
-            "auto_launch_desc": "시스템 시작 시 Antigravity Tools 자동 실행",
-            "auto_check_update": "자동 업데이트 확인",
-            "auto_check_update_desc": "시작 시 새 버전을 자동으로 확인",
-            "auto_check_update_enabled": "자동 확인 활성화됨",
-            "auto_check_update_disabled": "자동 확인 비활성화됨",
-            "update_check_interval": "확인 간격 (시간)",
-            "update_check_interval_desc": "자동 확인 간격 설정 (1-168 시간)",
-            "update_check_interval_saved": "확인 간격 설정 저장됨"
+            "auto_launch_desc": "시스템 시작 시 Antigravity Tools 자동 실행"
         },
         "account": {
             "title": "계정 설정",
@@ -492,12 +485,6 @@
             "github": "GitHub",
             "view_code": "코드 보기",
             "copyright": "Copyright © 2025-2026 Antigravity. All rights reserved.",
-            "check_update": "업데이트 확인",
-            "checking_update": "확인 중...",
-            "latest_version": "최신 버전입니다",
-            "new_version_available": "새 버전 {{version}} 사용 가능",
-            "download_update": "다운로드",
-            "update_check_failed": "업데이트 확인 실패",
             "support_btn": "저자 후원",
             "support_title": "기부 및 후원",
             "support_desc": "이 프로젝트가 도움이 되었다면 커피 한 잔 사주세요! 여러분의 후원은 프로젝트를 유지하는 데 큰 힘이 됩니다.",

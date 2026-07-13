@@ -2,6 +2,7 @@ use super::models::{ContentBlock, Message, MessageContent};
 use crate::proxy::SignatureCache;
 use tracing::{debug, info, warn};
 
+#[allow(dead_code)]
 pub const MIN_SIGNATURE_LENGTH: usize = 50;
 
 #[derive(Debug, Default)]
@@ -92,6 +93,11 @@ pub fn analyze_conversation_state(messages: &[Message]) -> ConversationState {
 }
 
 /// Recover from broken tool loops or interrupted tool calls by injecting synthetic messages
+///
+/// Only triggers when the last assistant message has **no thinking blocks at all**
+/// (not even empty ones). If the assistant message originally had a thinking block that
+/// was later stripped by the sanitizer (because it was empty or invalid), this function
+/// should NOT inject synthetic messages — the remaining tool_use blocks are valid on their own.
 pub fn close_tool_loop_for_thinking(messages: &mut Vec<Message>) {
     let state = analyze_conversation_state(messages);
 
@@ -99,34 +105,27 @@ pub fn close_tool_loop_for_thinking(messages: &mut Vec<Message>) {
         return;
     }
 
-    // Check if the last assistant message has a valid thinking block
-    let mut has_valid_thinking = false;
+    // Check if the last assistant message has ANY thinking block (even empty ones).
+    // If it originally had a thinking block (now stripped by sanitizer), don't trigger recovery —
+    // the remaining content blocks (tool_use, text) are valid without thinking.
+    // We only recover when the assistant message NEVER had a thinking block to begin with.
+    let mut has_any_thinking = false;
     if let Some(idx) = state.last_assistant_idx {
         if let Some(msg) = messages.get(idx) {
             if let MessageContent::Array(blocks) = &msg.content {
                 for block in blocks {
-                    if let ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                        ..
-                    } = block
-                    {
-                        if !thinking.is_empty()
-                            && signature
-                                .as_ref()
-                                .map(|s| s.len() >= MIN_SIGNATURE_LENGTH)
-                                .unwrap_or(false)
-                        {
-                            has_valid_thinking = true;
-                            break;
-                        }
+                    if matches!(block, ContentBlock::Thinking { .. }) {
+                        has_any_thinking = true;
+                        break;
                     }
                 }
             }
         }
     }
 
-    if !has_valid_thinking {
+    // If the assistant message still has thinking blocks, check if they're valid.
+    // If it has NO thinking blocks at all (wasn't stripped, just never had one), recover.
+    if !has_any_thinking {
         if state.in_tool_loop {
             info!("[Thinking-Recovery] Broken tool loop (ToolResult without preceding Thinking). Recovery triggered.");
 
@@ -173,6 +172,12 @@ pub fn get_signature_family(signature: &str) -> Option<String> {
 }
 
 /// [CRITICAL] Sanitize thinking blocks and check cross-model compatibility
+///
+/// Strategy: Pass through any thinking block that has a signature (even short ones
+/// from third-party providers like DeepSeek). Only strip blocks that explicitly have
+/// a signature we KNOW is from a different model family.
+/// Also strips thinking blocks with empty content — some providers (DeepSeek) reject
+/// requests with `"thinking": ""` even when thinking mode is enabled.
 pub fn filter_invalid_thinking_blocks_with_family(
     messages: &mut [Message],
     target_family: Option<&str>,
@@ -187,18 +192,25 @@ pub fn filter_invalid_thinking_blocks_with_family(
         if let MessageContent::Array(blocks) = &mut msg.content {
             let original_len = blocks.len();
             blocks.retain(|block| {
-                if let ContentBlock::Thinking { signature, .. } = block {
-                    // 1. Basic length check - allow empty signatures to pass through for compatibility
+                if let ContentBlock::Thinking { thinking, signature, .. } = block {
+                    // Strip thinking blocks with empty content — providers like DeepSeek
+                    // reject `"thinking": ""` when thinking mode is enabled.
+                    if thinking.is_empty() {
+                        warn!("[Thinking-Sanitizer] Stripping empty thinking block (sig={:?})", signature);
+                        stripped_count += 1;
+                        return false;
+                    }
+
+                    // If signature is None, allow through (upstream will regenerate)
                     let sig = match signature {
-                        Some(s) if s.len() >= MIN_SIGNATURE_LENGTH || s.is_empty() => s,
-                        None => return true, // Allow None signatures to pass through
-                        _ => {
-                            stripped_count += 1;
-                            return false;
-                        }
+                        Some(s) => s,
+                        None => return true,
                     };
-                    
-                    // 2. Family compatibility check (Prevents SONNET-Thinking sig being sent to OPUS-Thinking)
+
+                    // Only strip if we KNOW this signature is from a different model family.
+                    // If the signature is not in our cache (e.g. third-party provider signatures
+                    // like DeepSeek's UUID format), PASS IT THROUGH — we cannot verify what we
+                    // don't know, and stripping breaks the upstream provider's contract.
                     if let Some(target) = target_family {
                         if let Some(origin_family) = get_signature_family(sig) {
                             if origin_family != target {
@@ -206,21 +218,8 @@ pub fn filter_invalid_thinking_blocks_with_family(
                                 stripped_count += 1;
                                 return false;
                             }
-                        } else {
-                            // [CRITICAL] Signature family not found in cache. 
-                            // This happens after a server restart when memory is cleared.
-                            // If we pass this unverified signature to the upstream, it will likely return 400 "Invalid signature".
-                            // It is safer to strip the signature and let the upstream regenerate it.
-                            info!("[Thinking-Sanitizer] Dropping unverified signature (cache miss after restart)");
-                            stripped_count += 1;
-                            return false;
                         }
-                    } else if get_signature_family(sig).is_none() && !sig.is_empty() {
-                        // Even if no target family is specified, we still want to filter out signatures
-                        // that we can't verify (unless they are empty, which indicates a fresh start).
-                        info!("[Thinking-Sanitizer] Dropping unverified signature (no target family)");
-                        stripped_count += 1;
-                        return false;
+                        // Signature not in cache → pass through (could be third-party provider)
                     }
                 }
                 true
