@@ -246,10 +246,17 @@ pub async fn handle_chat_completions(
 
     if let Some((resolved_model, protocol, provider)) = selection {
         // Map model name to provider's native model ID before forwarding
-        let mapped_model = crate::proxy::providers::router::map_model_for_provider(
+        let mapped_model = if crate::proxy::providers::router::preserve_explicit_route_model(
+            Some(&provider_mapped_model),
             &resolved_model,
-            &provider.model_mapping,
-        );
+        ) {
+            resolved_model.clone()
+        } else {
+            crate::proxy::providers::router::map_model_for_provider(
+                &resolved_model,
+                &provider.model_mapping,
+            )
+        };
         let openai_req = crate::proxy::mappers::openai::models::OpenAIRequest {
             model: mapped_model,
             ..openai_req
@@ -1557,10 +1564,17 @@ pub async fn handle_completions(
         match protocol {
             crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
                 // Map model name to provider's native model ID before forwarding
-                let mapped_model = crate::proxy::providers::router::map_model_for_provider(
+                let mapped_model = if crate::proxy::providers::router::preserve_explicit_route_model(
+                    Some(&provider_mapped_model),
                     &openai_req.model,
-                    &provider.model_mapping,
-                );
+                ) {
+                    openai_req.model.clone()
+                } else {
+                    crate::proxy::providers::router::map_model_for_provider(
+                        &openai_req.model,
+                        &provider.model_mapping,
+                    )
+                };
                 let openai_req = crate::proxy::mappers::openai::models::OpenAIRequest {
                     model: mapped_model,
                     ..openai_req

@@ -428,6 +428,14 @@ pub fn map_model_for_provider(
     original.to_string()
 }
 
+/// Explicit route targets already contain the provider-native model. Do not
+/// apply the provider's model_mapping to them a second time.
+pub fn preserve_explicit_route_model(route_target: Option<&str>, model: &str) -> bool {
+    route_target
+        .and_then(|target| target.split_once('/'))
+        .is_some_and(|(_, routed_model)| routed_model == model)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +570,19 @@ mod tests {
             router.map_model(&provider, "gemini-3-flash"),
             "gemini-3-flash"
         );
+    }
+
+    #[test]
+    fn explicit_provider_route_preserves_native_model() {
+        assert!(preserve_explicit_route_model(
+            Some("cdx/gpt-5.6-sol(low)"),
+            "gpt-5.6-sol(low)"
+        ));
+        assert!(!preserve_explicit_route_model(
+            Some("cdx/gpt-5.6-sol(low)"),
+            "claude-opus-4-6"
+        ));
+        assert!(!preserve_explicit_route_model(None, "gpt-5.6-sol(low)"));
     }
 
     #[test]

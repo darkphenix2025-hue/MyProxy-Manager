@@ -387,7 +387,16 @@ pub async fn forward_anthropic_with_provider(
     // Model mapping — track the mapped model name for logging
     let mut mapped_model_name: Option<String> = None;
     if let Some(model) = body.get("model").and_then(|v| v.as_str()) {
-        let mapped = super::router::map_model_for_provider(model, model_mapping);
+        // `route_mapped_model` is the result of the first routing phase. When
+        // it is `provider_id/model`, the router has already selected the
+        // provider and the model is provider-native; applying model_mapping
+        // here would incorrectly perform a third-party rewrite (e.g. to
+        // qwen) and violate the explicit route selected by the user.
+        let mapped = if super::router::preserve_explicit_route_model(route_mapped_model, model) {
+            model.to_string()
+        } else {
+            super::router::map_model_for_provider(model, model_mapping)
+        };
         mapped_model_name = Some(mapped.clone());
         body["model"] = Value::String(mapped);
 

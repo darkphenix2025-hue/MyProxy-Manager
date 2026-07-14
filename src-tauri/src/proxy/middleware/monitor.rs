@@ -10,6 +10,9 @@ use serde_json::Value;
 use std::time::Instant;
 use tauri::Emitter;
 
+const MAX_REQUEST_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_REQUEST_DURATION_MS: u64 = 30_000;
+
 /// Extension type for propagating trace_id across the request lifecycle.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LlmTraceId(pub String);
@@ -199,6 +202,50 @@ pub async fn monitor_middleware(
         request
     };
 
+    // Resolve route metadata before entering the handler. This makes the
+    // in-flight record useful immediately instead of waiting for the upstream
+    // response (which may be a long-lived stream).
+    let protocol = if uri.contains("/v1/messages") {
+        Some("anthropic".to_string())
+    } else if uri.contains("/v1beta/models") {
+        Some("gemini".to_string())
+    } else if uri.starts_with("/v1/") {
+        Some("openai".to_string())
+    } else {
+        None
+    };
+    let route_metadata = if let Some(ref requested_model) = model {
+        let mapped = crate::proxy::common::model_mapping::resolve_model_route(
+            requested_model,
+            &*state.custom_mapping.read().await,
+        );
+        let router = state.provider_router.read().await;
+        if !router.is_empty() {
+            let selection = router.select(&mapped, None, None, Some(&mapped));
+            let provider = selection.provider;
+            let upstream_url = if provider.base_url.is_empty() {
+                None
+            } else {
+                Some(provider.base_url.clone())
+            };
+            Some((
+                mapped,
+                Some(provider.name.clone()),
+                Some(selection.resolved_model),
+                upstream_url,
+                Some(match provider.protocol {
+                    crate::proxy::config::ProviderProtocol::AnthropicPassthrough => "anthropic",
+                    crate::proxy::config::ProviderProtocol::OpenAICompatible => "openai",
+                    crate::proxy::config::ProviderProtocol::GeminiV1Internal => "gemini",
+                }.to_string()),
+            ))
+        } else {
+            Some((mapped, None, None, None, None))
+        }
+    } else {
+        None
+    };
+
     // Emit initial in_flight event for segmented log display
     {
         let app_handle = state.monitor.app_handle.clone();
@@ -206,6 +253,8 @@ pub async fn monitor_middleware(
         let method_clone = method.clone();
         let uri_clone = uri.clone();
         let model_clone = model.clone();
+        let route_metadata_clone = route_metadata.clone();
+        let protocol_clone = protocol.clone();
         let username_clone = user_token_identity.as_ref().map(|i| i.username.clone());
         let trace_id_clone = llm_trace_id.clone();
 
@@ -218,19 +267,19 @@ pub async fn monitor_middleware(
                 status: 0, // In-flight marker
                 duration: 0,
                 model: model_clone,
-                mapped_model: None,
+                mapped_model: route_metadata_clone.as_ref().map(|m| m.0.clone()),
                 account_email: None,
-                provider_name: None,
+                provider_name: route_metadata_clone.as_ref().and_then(|m| m.1.clone()),
                 client_ip: client_ip_clone,
                 error: None,
                 request_body: None,
                 response_body: None,
                 input_tokens: None,
                 output_tokens: None,
-                protocol: None,
-                upstream_protocol: None,
-                upstream_model: None,
-                upstream_url: None,
+                protocol: protocol_clone,
+                upstream_protocol: route_metadata_clone.as_ref().and_then(|m| m.4.clone()),
+                upstream_model: route_metadata_clone.as_ref().and_then(|m| m.2.clone()),
+                upstream_url: route_metadata_clone.as_ref().and_then(|m| m.3.clone()),
                 upstream_request_body: None,
                 upstream_response_body: None,
                 username: username_clone,
@@ -243,11 +292,18 @@ pub async fn monitor_middleware(
         });
     }
 
-    let response = next.run(request).await;
+    let response = match tokio::time::timeout(MAX_REQUEST_DURATION, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => Response::builder()
+            .status(axum::http::StatusCode::GATEWAY_TIMEOUT)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"error":{"type":"timeout","message":"Request timed out after 30 seconds"}}"#))
+            .unwrap_or_else(|_| Response::new(Body::empty())),
+    };
 
     // user_token_identity 已在上面从请求 extensions 中提取
 
-    let duration = start.elapsed().as_millis() as u64;
+    let duration = start.elapsed().as_millis().min(MAX_REQUEST_DURATION_MS as u128) as u64;
     let status = response.status().as_u16();
 
     let content_type = response
@@ -321,17 +377,6 @@ pub async fn monitor_middleware(
                 })
         });
 
-    // Determine protocol from URL path
-    let protocol = if uri.contains("/v1/messages") {
-        Some("anthropic".to_string())
-    } else if uri.contains("/v1beta/models") {
-        Some("gemini".to_string())
-    } else if uri.starts_with("/v1/") {
-        Some("openai".to_string())
-    } else {
-        None
-    };
-
     // Client IP has been extracted at the beginning of the function
 
     // Extract username from UserTokenIdentity if present
@@ -380,8 +425,18 @@ pub async fn monitor_middleware(
         tokio::spawn(async move {
             let mut all_stream_data = Vec::new();
             let mut last_few_bytes = Vec::new();
+            let mut stream_timed_out = false;
 
-            while let Some(chunk_res) = stream.next().await {
+            loop {
+                let remaining = MAX_REQUEST_DURATION.saturating_sub(start.elapsed());
+                let chunk_res = match tokio::time::timeout(remaining, stream.next()).await {
+                    Ok(Some(chunk_res)) => chunk_res,
+                    Ok(None) => break,
+                    Err(_) => {
+                        stream_timed_out = true;
+                        break;
+                    }
+                };
                 if let Ok(chunk) = chunk_res {
                     all_stream_data.extend_from_slice(&chunk);
 
@@ -397,6 +452,10 @@ pub async fn monitor_middleware(
                 } else if let Err(e) = chunk_res {
                     let _ = tx.send(Err(axum::Error::new(e))).await;
                 }
+            }
+
+            if stream_timed_out {
+                log.error = Some("Request timed out after 30 seconds".to_string());
             }
 
             // Parse and consolidate stream data into readable format

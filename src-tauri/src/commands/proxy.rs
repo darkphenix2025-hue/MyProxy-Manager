@@ -822,11 +822,14 @@ pub async fn test_provider_models(
     request: TestProviderModelsRequest,
     proxy_state: State<'_, ProxyServiceState>,
 ) -> Result<TestProviderModelsResponse, String> {
-    
-
     let provider = request.provider;
 
-    if provider.api_key.trim().is_empty() {
+    if provider.api_key.trim().is_empty()
+        && !matches!(
+            provider.protocol,
+            crate::proxy::config::ProviderProtocol::OpenAICompatible
+        )
+    {
         return Err("Provider API key is empty".into());
     }
 
@@ -904,18 +907,42 @@ async fn test_single_model(
     use crate::proxy::config::ProviderProtocol;
 
     let base = provider.base_url.trim_end_matches('/');
-    let has_v1 = base.contains("/v1/");
+
+    fn has_api_version_suffix(base: &str) -> bool {
+        let Some((_, last_segment)) = base.rsplit_once('/') else {
+            return false;
+        };
+        last_segment.len() >= 2
+            && last_segment.starts_with('v')
+            && last_segment[1..].chars().all(|c| c.is_ascii_digit())
+    }
+
+    fn openai_chat_url(base: &str) -> String {
+        if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else if has_api_version_suffix(base) {
+            format!("{}/chat/completions", base)
+        } else {
+            format!("{}/v1/chat/completions", base)
+        }
+    }
+
+    fn anthropic_messages_url(base: &str) -> String {
+        if base.ends_with("/messages") {
+            base.to_string()
+        } else if has_api_version_suffix(base) {
+            format!("{}/messages", base)
+        } else {
+            format!("{}/v1/messages", base)
+        }
+    }
 
     let resp = match provider.protocol {
         ProviderProtocol::AnthropicPassthrough => {
             // Anthropic-compatible endpoint: join base_url with /v1/messages path.
             // e.g. BAILIAN: https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages
             // e.g. BIGMODEL: https://open.bigmodel.cn/api/anthropic/v1/messages
-            let url = if has_v1 {
-                base.to_string()
-            } else {
-                format!("{}/v1/messages", base)
-            };
+            let url = anthropic_messages_url(base);
             let body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
@@ -932,22 +959,22 @@ async fn test_single_model(
                 .await
         }
         ProviderProtocol::OpenAICompatible => {
-            let url = if has_v1 {
-                base.to_string()
-            } else {
-                format!("{}/v1/chat/completions", base)
-            };
+            let url = openai_chat_url(base);
             let body = serde_json::json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "hi"}]
             });
-            client
+            let request = client
                 .post(&url)
                 .header("content-type", "application/json")
-                .bearer_auth(&provider.api_key)
-                .json(&body)
-                .send()
-                .await
+                // BAILIAN Coding Plan identifies coding-agent requests by User-Agent.
+                .header("user-agent", "claude-code/1.0.0")
+                .json(&body);
+            if provider.api_key.trim().is_empty() {
+                request.send().await
+            } else {
+                request.bearer_auth(&provider.api_key).send().await
+            }
         }
         ProviderProtocol::GeminiV1Internal => {
             let url = format!("{}:generateContent", base);
