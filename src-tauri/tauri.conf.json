@@ -49,7 +49,7 @@
     "opener": null,
     "single-instance": null,
     "updater": {
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFOTgwMkUyQ0IxN0QzRDAKUldUUTB4Zkw0Z0tZL2xzc1pXbDBXL0kzMmw0STVFbzF6aHU1UzVRdldyTFhWSVJCV0xZb3RobEgK",
       "endpoints": [
         "https://github.com/darkphenix2025-hue/MyProxy-Manager/releases/latest/download/latest.json"
       ]
