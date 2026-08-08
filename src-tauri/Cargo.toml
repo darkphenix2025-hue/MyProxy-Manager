@@ -15,6 +15,10 @@ edition = "2021"
 name = "myproxy_manager_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "antigravity-proxy"
+path = "src/main_headless.rs"
+
 [build-dependencies]
 tauri-build = { version = "^2.2.5", features = [] }
 

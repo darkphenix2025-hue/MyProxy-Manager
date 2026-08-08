@@ -40,6 +40,10 @@ pub struct OpenAIRequest {
     // [NEW] Thinking/Extended Thinking 支持 (兼容 Anthropic/Claude 协议)
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
+    /// OpenAI standard reasoning control (low, medium, high, xhigh).
+    /// Internally normalized to the project's thinking budget model.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     // [NEW] Direct imageSize support (for Gemini native parameter)
     #[serde(default, rename = "imageSize")]
     pub image_size: Option<String>,

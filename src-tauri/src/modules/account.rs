@@ -1424,7 +1424,6 @@ pub fn get_current_account() -> Result<Option<Account>, String> {
 }
 
 /// Set current active account ID
-#[allow(dead_code)]
 pub fn set_current_account_id(account_id: &str) -> Result<(), String> {
     let _lock = ACCOUNT_INDEX_LOCK
         .lock()
@@ -2005,7 +2004,7 @@ pub async fn refresh_all_quotas_logic() -> Result<RefreshStats, String> {
 
 /// Check and trigger warmup for models that have recovered to 100%
 /// Called automatically after quota refresh to enable immediate warmup
-#[allow(dead_code)]
+#[allow(dead_code)] // Retained for the GUI recovery workflow; headless proxy does not call it.
 pub async fn check_and_trigger_warmup_for_recovered_models() {
     let accounts = match list_accounts() {
         Ok(acc) => acc,

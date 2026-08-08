@@ -10,6 +10,7 @@ use rquest_util::Emulation;
 pub static SHARED_CLIENT: Lazy<Client> = Lazy::new(|| create_base_client(15));
 
 /// Global shared HTTP client (Long timeout: 60s, for warmup etc.)
+#[allow(dead_code)]
 pub static SHARED_CLIENT_LONG: Lazy<Client> = Lazy::new(|| create_base_client(60));
 
 /// Global shared standard HTTP client (15s timeout, NO JA3 Emulation)
@@ -52,6 +53,7 @@ pub fn get_client() -> Client {
 }
 
 /// Get long timeout HTTP client (60s timeout)
+#[allow(dead_code)] // Long-timeout helper is retained for optional warmup workflows.
 pub fn get_long_client() -> Client {
     SHARED_CLIENT_LONG.clone()
 }

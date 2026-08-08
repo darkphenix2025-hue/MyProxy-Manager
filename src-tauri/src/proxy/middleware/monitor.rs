@@ -28,6 +28,37 @@ use futures::StreamExt;
 const MAX_REQUEST_LOG_SIZE: usize = 100 * 1024 * 1024; // 100MB
 const MAX_RESPONSE_LOG_SIZE: usize = 100 * 1024 * 1024; // 100MB for image responses
 
+fn mapped_model_for_log(route_model: Option<&str>, response_model: Option<&str>) -> Option<String> {
+    match (route_model, response_model) {
+        (Some(route), Some(model)) => {
+            if let Some((route_id, _)) = route.split_once('/') {
+                Some(format!("{}/{}", route_id, model))
+            } else {
+                Some(model.to_string())
+            }
+        }
+        (Some(route), None) => Some(route.to_string()),
+        (None, Some(model)) => Some(model.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn complete_upstream_response(log: &mut ProxyRequestLog, response: String) {
+    if log.upstream_request_body.is_some() && log.upstream_response_body.is_none() {
+        log.upstream_response_body = Some(response);
+    }
+}
+
+fn mark_unobserved_provider_call(log: &mut ProxyRequestLog) {
+    if log.provider_name.is_some() && log.upstream_request_body.is_none() {
+        log.upstream_request_body =
+            Some("[Upstream request not sent or not captured before handler completion]".into());
+        log.upstream_response_body = Some(
+            "[No upstream response: provider call did not reach the recorded send stage]".into(),
+        );
+    }
+}
+
 /// Helper function to record User Token usage
 fn record_user_token_usage(
     user_token_identity: &Option<UserTokenIdentity>,
@@ -221,23 +252,31 @@ pub async fn monitor_middleware(
         );
         let router = state.provider_router.read().await;
         if !router.is_empty() {
-            let selection = router.select(&mapped, None, None, Some(&mapped));
+            let selection = router.select(&mapped, None);
             let provider = selection.provider;
             let upstream_url = if provider.base_url.is_empty() {
                 None
             } else {
                 Some(provider.base_url.clone())
             };
+            let route_model = provider
+                .provider_id
+                .as_deref()
+                .map(|id| format!("{}/{}", id, selection.resolved_model))
+                .unwrap_or_else(|| mapped.clone());
             Some((
-                mapped,
+                route_model,
                 Some(provider.name.clone()),
                 Some(selection.resolved_model),
                 upstream_url,
-                Some(match provider.protocol {
-                    crate::proxy::config::ProviderProtocol::AnthropicPassthrough => "anthropic",
-                    crate::proxy::config::ProviderProtocol::OpenAICompatible => "openai",
-                    crate::proxy::config::ProviderProtocol::GeminiV1Internal => "gemini",
-                }.to_string()),
+                Some(
+                    match provider.protocol {
+                        crate::proxy::config::ProviderProtocol::AnthropicPassthrough => "anthropic",
+                        crate::proxy::config::ProviderProtocol::OpenAICompatible => "openai",
+                        crate::proxy::config::ProviderProtocol::GeminiV1Internal => "gemini",
+                    }
+                    .to_string(),
+                ),
             ))
         } else {
             Some((mapped, None, None, None, None))
@@ -297,13 +336,18 @@ pub async fn monitor_middleware(
         Err(_) => Response::builder()
             .status(axum::http::StatusCode::GATEWAY_TIMEOUT)
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"error":{"type":"timeout","message":"Request timed out after 30 seconds"}}"#))
+            .body(Body::from(
+                r#"{"error":{"type":"timeout","message":"Request timed out after 30 seconds"}}"#,
+            ))
             .unwrap_or_else(|_| Response::new(Body::empty())),
     };
 
     // user_token_identity 已在上面从请求 extensions 中提取
 
-    let duration = start.elapsed().as_millis().min(MAX_REQUEST_DURATION_MS as u128) as u64;
+    let duration = start
+        .elapsed()
+        .as_millis()
+        .min(MAX_REQUEST_DURATION_MS as u128) as u64;
     let status = response.status().as_u16();
 
     let content_type = response
@@ -328,11 +372,15 @@ pub async fn monitor_middleware(
         .map(|s| s.to_string());
 
     // Extract mapped model from X-Mapped-Model header if present
-    let mapped_model = response
+    let response_mapped_model = response
         .headers()
         .get("X-Mapped-Model")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    let mapped_model = mapped_model_for_log(
+        route_metadata.as_ref().map(|m| m.0.as_str()),
+        response_mapped_model.as_deref(),
+    );
 
     // Extract upstream protocol from X-Upstream-Protocol header if present
     let upstream_protocol = response
@@ -416,6 +464,7 @@ pub async fn monitor_middleware(
         username,
         in_flight: false,
     };
+    mark_unobserved_provider_call(&mut log);
 
     if content_type.contains("text/event-stream") {
         let (parts, body) = response.into_parts();
@@ -456,6 +505,15 @@ pub async fn monitor_middleware(
 
             if stream_timed_out {
                 log.error = Some("Request timed out after 30 seconds".to_string());
+            }
+
+            if let Some(final_trace) = state.upstream_trace_cache.take(&llm_trace_id).await {
+                if final_trace.request_body.is_some() {
+                    log.upstream_request_body = final_trace.request_body;
+                }
+                if final_trace.response_body.is_some() {
+                    log.upstream_response_body = final_trace.response_body;
+                }
             }
 
             // Parse and consolidate stream data into readable format
@@ -839,8 +897,13 @@ pub async fn monitor_middleware(
                         }
                     }
                     log.response_body = Some(s.to_string());
+                    complete_upstream_response(&mut log, s.to_string());
                 } else {
                     log.response_body = Some("[Binary Response Data]".to_string());
+                    complete_upstream_response(
+                        &mut log,
+                        format!("[Binary Response Data: {} bytes]", bytes.len()),
+                    );
                 }
 
                 if log.status >= 400 {
@@ -880,5 +943,51 @@ pub async fn monitor_middleware(
 
         monitor.log_request(log).await;
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{complete_upstream_response, mapped_model_for_log, mark_unobserved_provider_call};
+    use crate::proxy::monitor::ProxyRequestLog;
+
+    #[test]
+    fn mapped_model_keeps_route_id_and_uses_final_upstream_model() {
+        assert_eq!(
+            mapped_model_for_log(Some("ali/qwen3.7-plus"), Some("qwen-plus")),
+            Some("ali/qwen-plus".to_string())
+        );
+        assert_eq!(
+            mapped_model_for_log(Some("gpt-5.6-sol(low)"), None),
+            Some("gpt-5.6-sol(low)".to_string())
+        );
+    }
+
+    #[test]
+    fn upstream_response_is_completed_once_request_was_recorded() {
+        let mut log = ProxyRequestLog {
+            upstream_request_body: Some(r#"{"model":"qwen3.7-plus"}"#.to_string()),
+            ..Default::default()
+        };
+        complete_upstream_response(&mut log, "data: response".to_string());
+        assert_eq!(
+            log.upstream_response_body.as_deref(),
+            Some("data: response")
+        );
+    }
+
+    #[test]
+    fn selected_provider_without_send_is_explicitly_diagnosable() {
+        let mut log = ProxyRequestLog {
+            provider_name: Some("configured-provider".to_string()),
+            ..Default::default()
+        };
+        mark_unobserved_provider_call(&mut log);
+        assert!(log
+            .upstream_request_body
+            .as_deref()
+            .unwrap()
+            .contains("not sent or not captured"));
+        assert!(log.upstream_response_body.is_some());
     }
 }

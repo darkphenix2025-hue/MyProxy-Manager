@@ -552,7 +552,7 @@
             "title": "Konfigurasi Perkhidmatan",
             "port": "Port Dengar",
             "port_tooltip": "Port TCP yang didengari Proksi API tempatan. Hentikan perkhidmatan untuk menukarnya, kemudian mulakan semula untuk digunakan.",
-            "port_hint": "Lalai 8045, mulakan semula diperlukan untuk menggunakan perubahan",
+            "port_hint": "Lalai 8150, mulakan semula diperlukan untuk menggunakan perubahan",
             "auto_start": "Mula Automatik dengan Aplikasi",
             "auto_start_tooltip": "Mulakan perkhidmatan Proksi API tempatan secara automatik apabila aplikasi dilancarkan.",
             "allow_lan_access": "Benarkan Akses LAN",

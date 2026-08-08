@@ -63,12 +63,16 @@ export function useProxyConfig(): UseProxyConfigReturn {
     };
 
     const saveConfig = async (newConfig: AppConfig) => {
-        setAppConfig(newConfig);
         try {
             await invoke('save_config', { config: newConfig });
+            // Only reflect the change locally after the backend has persisted
+            // and hot-reloaded it. Otherwise the UI can show a route that the
+            // running proxy never received.
+            setAppConfig(newConfig);
         } catch (error) {
             console.error('保存配置失败:', error);
             showToast(`保存失败: ${error}`, 'error');
+            throw error;
         }
     };
 

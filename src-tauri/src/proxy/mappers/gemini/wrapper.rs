@@ -685,11 +685,12 @@ mod tests {
         let result = wrap_request(&body, "test-proj", "gemini-pro", None, None, None);
 
         // 验证 systemInstruction
-        let _sys = result
+        let sys = result
             .get("request")
             .unwrap()
             .get("systemInstruction")
             .unwrap();
+        assert!(sys.is_object());
     }
 
     #[test]
@@ -960,13 +961,13 @@ mod tests {
                 .get("thinkingConfig")
                 .expect("thinkingConfig should be injected");
 
-            // 3. 验证 Claude 默认预算为 24576（统一默认值）
+            // 3. 验证 Claude 默认预算为 16000
             let budget = thinking_config["thinkingBudget"]
                 .as_u64()
                 .expect("thinkingBudget should be a number");
             assert_eq!(
-                budget, 24576,
-                "Claude default thinking budget should be 24576"
+                budget, 16000,
+                "Claude default thinking budget should be 16000"
             );
         }
 
@@ -1083,13 +1084,25 @@ mod tests {
 
     #[test]
     fn test_mixed_tools_injection_gemini_native() {
-        // 验证 Gemini Native 协议下，当已有 functionDeclarations 时
-        // 不再注入 googleSearch（v1internal 协议不兼容混合工具）
+        // 验证 Gemini Native 协议在 Gemini 2.0+ 下支持混合工具
         let body = json!({
             "contents": [{"parts": [{"text": "Hello"}]}],
             "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {"type": "OBJECT", "properties": {"location": {"type": "STRING"}}}}]}],
             "generationConfig": {}
         });
+
+        // 模拟 -online 触发的 RequestConfig
+        use crate::proxy::mappers::common_utils::resolve_request_config;
+        let _config =
+            resolve_request_config("-online", "gemini-2.0-flash", &None, None, None, None, None);
+
+        // 实际上 wrap_request 内部会根据 config.inject_google_search 调用 inject_google_search_tool
+        // 但 wrap_request 的签名不直接接受 RequestConfig，它内部逻辑如下：
+        // if config.inject_google_search { ... }
+
+        // 我们改为直接测试涉及的 wrap_request 逻辑片段。
+        // 由于测试 wrap_request 比较复杂（涉及外部 config），
+        // 我们可以直接验证 inject_google_search_tool 在 native 格式下的表现。
 
         let mut inner_request = body.clone();
         crate::proxy::mappers::common_utils::inject_google_search_tool(
@@ -1107,8 +1120,8 @@ mod tests {
 
         assert!(has_functions, "Should contain functionDeclarations");
         assert!(
-            !has_google_search,
-            "Should NOT contain googleSearch when functionDeclarations are present (v1internal incompatible)"
+            has_google_search,
+            "Should contain googleSearch (Gemini 2.0+ supports mixed tools)"
         );
     }
 }

@@ -117,7 +117,8 @@ fn greet(name: &str) -> String {
 pub fn run() {
     // Check for headless mode
     let args: Vec<String> = std::env::args().collect();
-    let is_headless = args.iter().any(|arg| arg == "--headless");
+    let is_headless =
+        args.iter().any(|arg| arg == "--headless") || std::env::var("__HEADLESS_PROXY").is_ok();
 
     // Increase file descriptor limit (macOS only)
     #[cfg(target_os = "macos")]
@@ -171,6 +172,15 @@ pub fn run() {
             match modules::config::load_app_config() {
                 Ok(mut config) => {
                     let mut modified = false;
+                    // [NEW] Support ABV_PROXY_PORT env var for headless/Docker port override
+                    if let Ok(port_str) = std::env::var("ABV_PROXY_PORT") {
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            info!("Overriding proxy port from ABV_PROXY_PORT: {}", port);
+                            config.proxy.port = port;
+                            modified = true;
+                        }
+                    }
+
                     // Headless/docker 默认允许 LAN 访问（绑定 0.0.0.0）
                     // 若设置 ABV_BIND_LOCAL_ONLY，则仅绑定 127.0.0.1
                     let bind_local_only = std::env::var("ABV_BIND_LOCAL_ONLY")
@@ -358,7 +368,7 @@ pub fn run() {
                 info!("Tray disabled for this session");
             }
 
-            // 立即启动管理服务器 (8045)，以便 Web 端能访问
+            // 立即启动管理服务器 (8150)，以便 Web 端能访问
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 // Load config
@@ -408,8 +418,8 @@ pub fn run() {
             // modules::scheduler::start_scheduler(Some(app.handle().clone()), scheduler_state.inner().clone());
             info!("Smart scheduler (Automatic Warmup) is DISABLED.");
 
-            // [PHASE 1] 已整合至 Axum 端口 (8045)，不再单独启动 19527 端口
-            info!("Management API integrated into main proxy server (port 8045)");
+            // [PHASE 1] 已整合至 Axum 端口 (8150)，不再单独启动 19527 端口
+            info!("Management API integrated into main proxy server (port 8150)");
 
             Ok(())
         })

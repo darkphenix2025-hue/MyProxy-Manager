@@ -189,7 +189,7 @@ pub fn transform_openai_request(
         .map(|msg| {
             let role = match msg.role.as_str() {
                 "assistant" => "model",
-                "tool" | "function" => "user",
+                "tool" | "function" => "user", 
                 _ => &msg.role,
             };
 
@@ -199,7 +199,7 @@ pub fn transform_openai_request(
             if let Some(reasoning) = &msg.reasoning_content {
                 // [FIX #1506] 增强对占位符 [undefined] 的识别
                 let is_invalid_placeholder = reasoning == "[undefined]" || reasoning.is_empty();
-
+                
                 if !is_invalid_placeholder {
                     let thought_part = json!({
                         "text": reasoning,
@@ -216,13 +216,13 @@ pub fn transform_openai_request(
                     "text": "Applying tool decisions and generating response...",
                     "thought": true,
                 });
-
+                
                 // [FIX #1575] 占位符永远不能使用真实签名（签名与真实思考内容绑定）
                 // 仅 Gemini 支持哨兵值跳过验证
                 if is_gemini_3_thinking {
                     thought_part["thoughtSignature"] = json!("skip_thought_signature_validator");
                 }
-
+                
                 parts.push(thought_part);
             }
 
@@ -249,7 +249,7 @@ pub fn transform_openai_request(
                                             let mime_part = &image_url.url[5..pos];
                                             let mime_type = mime_part.split(';').next().unwrap_or("image/jpeg");
                                             let data = &image_url.url[pos + 1..];
-
+                                            
                                             parts.push(json!({
                                                 "inlineData": { "mimeType": mime_type, "data": data }
                                             }));
@@ -269,14 +269,14 @@ pub fn transform_openai_request(
                                         } else {
                                             image_url.url.clone()
                                         };
-
+                                        
                                         tracing::debug!("[OpenAI-Request] Reading local image: {}", file_path);
-
+                                        
                                         // 读取文件并转换为 base64
                                         if let Ok(file_bytes) = std::fs::read(&file_path) {
                                             use base64::Engine as _;
                                             let b64 = base64::engine::general_purpose::STANDARD.encode(&file_bytes);
-
+                                            
                                             // 根据文件扩展名推断 MIME 类型
                                             let mime_type = if file_path.to_lowercase().ends_with(".png") {
                                                 "image/png"
@@ -287,7 +287,7 @@ pub fn transform_openai_request(
                                             } else {
                                                 "image/jpeg"
                                             };
-
+                                            
                                             parts.push(json!({
                                                 "inlineData": { "mimeType": mime_type, "data": b64 }
                                             }));
@@ -322,7 +322,7 @@ pub fn transform_openai_request(
 
 
                     let mut args = serde_json::from_str::<Value>(&tc.function.arguments).unwrap_or(json!({}));
-
+                    
                     // [New] 利用通用引擎修正参数类型 (替代以前硬编码的 shell 工具修复逻辑)
                     if let Some(original_schema) = tool_name_to_schema.get(&tc.function.name) {
                         crate::proxy::common::json_schema::fix_tool_call_args(&mut args, original_schema);
@@ -356,7 +356,7 @@ pub fn transform_openai_request(
             // Handle tool response
             if msg.role == "tool" || msg.role == "function" {
                 let name = msg.name.as_deref().unwrap_or("unknown");
-                let final_name = if name == "local_shell_call" { "shell" }
+                let final_name = if name == "local_shell_call" { "shell" } 
                                 else if let Some(id) = &msg.tool_call_id { tool_id_to_name.get(id).map(|s| s.as_str()).unwrap_or(name) }
                                 else { name };
 
@@ -375,7 +375,7 @@ pub fn transform_openai_request(
                                             let mime_part = &image_url.url[5..pos];
                                             let mime_type = mime_part.split(';').next().unwrap_or("image/jpeg");
                                             let data = &image_url.url[pos + 1..];
-
+                                            
                                             extra_parts.push(json!({
                                                 "inlineData": { "mimeType": mime_type, "data": data }
                                             }));
@@ -787,7 +787,6 @@ fn enforce_uppercase_types(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_issue_1592_gemini_3_pro_budget_capping() {
@@ -888,9 +887,9 @@ mod tests {
                 role: "user".to_string(),
                 content: Some(OpenAIContent::Array(vec![
                     OpenAIContentBlock::Text { text: "What is in this image?".to_string() },
-                    OpenAIContentBlock::ImageUrl { image_url: OpenAIImageUrl {
+                    OpenAIContentBlock::ImageUrl { image_url: OpenAIImageUrl { 
                         url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".to_string(),
-                        detail: None
+                        detail: None 
                     } }
                 ])),
                 reasoning_content: None,
@@ -1122,7 +1121,7 @@ mod tests {
             transform_openai_request(&req, "test-v", mapped_model, None);
 
         // Extract the tool call part from contents
-        let contents = result["request"]["contents"].as_array().unwrap();
+        let contents = result["contents"].as_array().unwrap();
         // Identify the part with functionCall
         let parts = contents[0]["parts"].as_array().unwrap();
         let tool_part = parts
@@ -1266,8 +1265,8 @@ mod tests {
 
         assert!(has_functions, "Should contain functionDeclarations");
         assert!(
-            !has_google_search,
-            "Should NOT contain googleSearch when functionDeclarations are present (v1internal incompatible)"
+            has_google_search,
+            "Should contain googleSearch (Gemini 2.0+ supports mixed tools)"
         );
     }
 }

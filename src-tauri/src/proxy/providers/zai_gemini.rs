@@ -49,6 +49,7 @@ pub async fn forward_gemini_v1internal_with_provider(
     provider: &UpstreamProvider,
     openai_req: &OpenAIRequest,
     headers: &axum::http::HeaderMap,
+    llm_trace_id: Option<&str>,
 ) -> Response {
     use crate::proxy::mappers::openai::{
         streaming::create_openai_sse_stream, transform_openai_request, transform_openai_response,
@@ -128,6 +129,21 @@ pub async fn forward_gemini_v1internal_with_provider(
         }
     }
 
+    // Write request body to upstream trace cache for traffic logging
+    if let Some(trace_id) = llm_trace_id {
+        let request_body_str = String::from_utf8(body_bytes.clone()).ok();
+        state
+            .upstream_trace_cache
+            .put(
+                trace_id,
+                crate::proxy::upstream_trace::UpstreamTrace {
+                    request_body: request_body_str,
+                    response_body: None, // Will be filled for non-stream below
+                },
+            )
+            .await;
+    }
+
     let response = match client
         .post(&url)
         .headers(req_headers)
@@ -148,13 +164,7 @@ pub async fn forward_gemini_v1internal_with_provider(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.bytes().await.unwrap_or_default();
-        return Response::builder()
-            .status(status)
-            .header("x-provider-name", &provider.name)
-            .header("x-mapped-model", &mapped_model)
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(String::from_utf8_lossy(&error_body).to_string()))
-            .unwrap_or_else(|_| (status, "Failed to build response").into_response());
+        return (status, String::from_utf8_lossy(&error_body).to_string()).into_response();
     }
 
     // Stream the response
@@ -175,6 +185,10 @@ pub async fn forward_gemini_v1internal_with_provider(
             .header("connection", "keep-alive")
             .header("x-mapped-model", &mapped_model)
             .header("x-provider-name", &provider.name)
+            // Add upstream protocol, model and URL headers for monitor middleware
+            .header("X-Upstream-Protocol", "gemini")
+            .header("X-Upstream-Model", &mapped_model)
+            .header("X-Upstream-URL", &provider.base_url)
             .body(Body::from_stream(openai_stream))
             .unwrap()
     } else {
@@ -209,12 +223,32 @@ pub async fn forward_gemini_v1internal_with_provider(
         };
 
         let openai_resp = transform_openai_response(&inner, None, message_count);
+
+        // Write response body to upstream trace cache for non-streaming requests
+        if let Some(trace_id) = llm_trace_id {
+            let response_body_str = serde_json::to_string(&openai_resp).ok();
+            state
+                .upstream_trace_cache
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None, // Already written above
+                        response_body: response_body_str,
+                    },
+                )
+                .await;
+        }
+
         match serde_json::to_string(&openai_resp) {
             Ok(json) => Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/json")
                 .header("x-mapped-model", &mapped_model)
                 .header("x-provider-name", &provider.name)
+                // Add upstream protocol, model and URL headers for monitor middleware
+                .header("X-Upstream-Protocol", "gemini")
+                .header("X-Upstream-Model", &mapped_model)
+                .header("X-Upstream-URL", &provider.base_url)
                 .body(Body::from(json))
                 .unwrap(),
             Err(e) => (
@@ -239,6 +273,7 @@ pub async fn forward_gemini_via_anthropic(
     body: &Value,
     headers: &axum::http::HeaderMap,
     client_wants_stream: bool,
+    llm_trace_id: Option<&str>,
 ) -> Response {
     use crate::proxy::mappers::gemini::anthropic_bridge::{
         claude_to_gemini_response, gemini_to_claude_body,
@@ -264,8 +299,8 @@ pub async fn forward_gemini_via_anthropic(
         claude_body,
         0, // message_count not available in Gemini native format
         &provider.name,
-        None,
-        None,
+        "anthropic",
+        llm_trace_id,
     )
     .await;
 
@@ -339,6 +374,7 @@ pub async fn forward_gemini_via_openai_compat(
     body: &Value,
     _headers: &axum::http::HeaderMap,
     client_wants_stream: bool,
+    llm_trace_id: Option<&str>,
 ) -> Response {
     use crate::proxy::mappers::gemini::openai_bridge::{
         gemini_to_openai_body, openai_to_gemini_response,
@@ -402,6 +438,21 @@ pub async fn forward_gemini_via_openai_compat(
         req_headers.insert("authorization", v);
     }
 
+    // Write request body to upstream trace cache for traffic logging
+    if let Some(trace_id) = llm_trace_id {
+        let request_body_str = String::from_utf8(body_bytes.clone()).ok();
+        state
+            .upstream_trace_cache
+            .put(
+                trace_id,
+                crate::proxy::upstream_trace::UpstreamTrace {
+                    request_body: request_body_str,
+                    response_body: None, // Will be filled for non-stream below
+                },
+            )
+            .await;
+    }
+
     let response = match client
         .post(&url)
         .headers(req_headers)
@@ -422,22 +473,14 @@ pub async fn forward_gemini_via_openai_compat(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.bytes().await.unwrap_or_default();
-        return Response::builder()
-            .status(status)
-            .header("x-provider-name", &provider.name)
-            .header("x-mapped-model", &mapped_model)
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(String::from_utf8_lossy(&error_body).to_string()))
-            .unwrap_or_else(|_| (status, "Failed to build response").into_response());
+        return (status, String::from_utf8_lossy(&error_body).to_string()).into_response();
     }
 
     if client_wants_stream {
         // Stream: convert OpenAI SSE to Gemini SSE
         let openai_stream = response.bytes_stream();
         let gemini_stream = async_stream::stream! {
-            use bytes::BytesMut;
             use futures::StreamExt;
-            let _buffer = BytesMut::new();
             let mut pinned = Box::pin(openai_stream);
             loop {
                 match pinned.next().await {
@@ -488,6 +531,21 @@ pub async fn forward_gemini_via_openai_compat(
                     .into_response();
             }
         };
+
+        // Write response body to upstream trace cache for non-streaming requests
+        if let Some(trace_id) = llm_trace_id {
+            let response_body_str = serde_json::to_string(&openai_value).ok();
+            state
+                .upstream_trace_cache
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None, // Already written above
+                        response_body: response_body_str,
+                    },
+                )
+                .await;
+        }
 
         let gemini_resp = openai_to_gemini_response(&openai_value);
         match serde_json::to_string(&gemini_resp) {

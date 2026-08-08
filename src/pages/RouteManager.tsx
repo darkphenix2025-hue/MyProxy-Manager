@@ -268,7 +268,7 @@ export default function RouteManager() {
     };
 
     const handleMappingUpdate = async (_type: 'custom', key: string, value: string) => {
-        if (!appConfig) return;
+        if (!appConfig) return false;
         const newConfig = { ...appConfig.proxy };
         newConfig.custom_mapping = { ...(newConfig.custom_mapping || {}), [key]: value };
 
@@ -276,9 +276,11 @@ export default function RouteManager() {
             await saveConfig({ ...appConfig, proxy: newConfig });
             setAppConfig({ ...appConfig, proxy: newConfig });
             showToast(t('common.saved'), 'success');
+            return true;
         } catch (error) {
             console.error('Failed to update mapping:', error);
             showToast(`${t('common.error')}: ${error}`, 'error');
+            return false;
         }
     };
 
@@ -707,9 +709,9 @@ export default function RouteManager() {
                                                             <div className="flex items-center gap-1 bg-white dark:bg-gray-800 rounded-md border border-blue-200 dark:border-blue-800 p-0.5 shadow-sm">
                                                                 <button
                                                                     className="btn btn-ghost btn-xs text-primary hover:bg-blue-50 dark:hover:bg-blue-900/30 p-0 h-6 w-6 min-h-0"
-                                                                    onClick={() => {
-                                                                        handleMappingUpdate('custom', key, editingValue);
-                                                                        setEditingKey(null);
+                                                                    onClick={async () => {
+                                                                        const saved = await handleMappingUpdate('custom', key, editingValue);
+                                                                        if (saved) setEditingKey(null);
                                                                     }}
                                                                     title={t('common.save') || 'Save'}
                                                                 >

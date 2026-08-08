@@ -429,10 +429,6 @@ pub fn transform_claude_request_in(
         build_system_instruction(&claude_req.system, &claude_req.model, has_mcp_tools);
 
     //  Map model name (Use standard mapping)
-    // [IMPROVED] 提取 web search 模型为常量，便于维护
-    #[allow(dead_code)]
-    const WEB_SEARCH_FALLBACK_MODEL: &str = "gemini-2.5-flash";
-
     let mapped_model =
         crate::proxy::common::model_mapping::map_claude_model_to_gemini(&claude_req.model);
 
@@ -2991,16 +2987,15 @@ mod tests {
         let gen_config = result["request"]["generationConfig"].as_object().unwrap();
         let thinking_config = gen_config["thinkingConfig"].as_object().unwrap();
 
-        // Check injection - Claude models use thinkingLevel, not thinkingBudget
+        // Check injection
         assert_eq!(thinking_config["includeThoughts"], true);
-        assert_eq!(thinking_config["thinkingLevel"], "high");
-        assert!(thinking_config.get("thinkingBudget").is_none());
+        assert_eq!(thinking_config["thinkingBudget"], -1);
         assert!(thinking_config.get("thinkingType").is_none());
         assert!(thinking_config.get("effort").is_none());
 
         // Check maxOutputTokens default for adaptive
         let max_output_tokens = gen_config["maxOutputTokens"].as_i64().unwrap();
-        assert_eq!(max_output_tokens, 64000);
+        assert_eq!(max_output_tokens, 131072);
 
         // Reset global config
         crate::proxy::config::update_thinking_budget_config(ThinkingBudgetConfig::default());

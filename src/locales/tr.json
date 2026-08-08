@@ -530,7 +530,7 @@
             },
             "port": "Dinleme Portu",
             "port_tooltip": "Yerel API Proxy'nin dinlediği TCP portu. Değiştirmek için hizmeti durdurun, ardından uygulamak için yeniden başlatın.",
-            "port_hint": "Varsayılan 8045, değişiklikleri uygulamak için yeniden başlatma gerekir",
+            "port_hint": "Varsayılan 8150, değişiklikleri uygulamak için yeniden başlatma gerekir",
             "auto_start": "Uygulama ile Otomatik Başlat",
             "auto_start_tooltip": "Uygulama başladığında yerel API Proxy hizmetini otomatik olarak başlatır.",
             "allow_lan_access": "LAN Erişimine İzin Ver",

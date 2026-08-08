@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProxyRequestLog {
     pub id: String,
     pub timestamp: i64,
@@ -44,7 +44,7 @@ pub struct ProxyMonitor {
     pub stats: RwLock<ProxyStats>,
     pub max_logs: usize,
     pub enabled: AtomicBool,
-    pub(crate) app_handle: Option<tauri::AppHandle>,
+    pub app_handle: Option<tauri::AppHandle>,
 }
 
 impl ProxyMonitor {
@@ -72,7 +72,7 @@ impl ProxyMonitor {
             logs: RwLock::new(VecDeque::with_capacity(max_logs)),
             stats: RwLock::new(ProxyStats::default()),
             max_logs,
-            enabled: AtomicBool::new(true), // Default to enabled
+            enabled: AtomicBool::new(false), // Default to disabled
             app_handle,
         }
     }

@@ -43,6 +43,12 @@ pub async fn handle_generate(
     let trace_id = format!("req_{}", chrono::Utc::now().timestamp_subsec_millis());
     let debug_cfg = state.debug_logging.read().await.clone();
 
+    // [FIX #1707] Extract llm_trace_id from middleware for upstream trace cache
+    let llm_trace_id = headers
+        .get("x-llm-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // [NEW] Detect Client Adapter
     let client_adapter = CLIENT_ADAPTERS
         .iter()
@@ -93,12 +99,7 @@ pub async fn handle_generate(
     );
     let router = state.provider_router.read().await;
     let selection = if !router.is_empty() {
-        let sel = router.select(
-            &gemini_mapped_model,
-            None,
-            state.cooldown_manager.as_ref().map(|a| a.as_ref()),
-            Some(&gemini_mapped_model),
-        );
+        let sel = router.select(&gemini_mapped_model, None);
         if router.is_empty() || sel.provider.name.is_empty() {
             None
         } else {
@@ -119,21 +120,10 @@ pub async fn handle_generate(
                     &body,
                     &headers,
                     client_wants_stream,
+                    llm_trace_id.as_deref(),
                 )
                 .await;
 
-                let status = resp.status();
-                if status == 401 || status == 429 {
-                    if let Some(ref cd) = state.cooldown_manager {
-                        cd.mark_cooldown(
-                            crate::proxy::common::model_cooldown::CooldownKey {
-                                model: resolved_model.clone(),
-                                provider: provider.name.clone(),
-                            },
-                            &status.as_u16().to_string(),
-                        );
-                    }
-                }
                 resp.headers_mut().insert(
                     "X-Upstream-Protocol",
                     axum::http::HeaderValue::from_static("anthropic"),
@@ -149,21 +139,10 @@ pub async fn handle_generate(
                         &body,
                         &headers,
                         client_wants_stream,
+                        llm_trace_id.as_deref(),
                     )
                     .await;
 
-                let status = resp.status();
-                if status == 401 || status == 429 {
-                    if let Some(ref cd) = state.cooldown_manager {
-                        cd.mark_cooldown(
-                            crate::proxy::common::model_cooldown::CooldownKey {
-                                model: resolved_model.clone(),
-                                provider: provider.name.clone(),
-                            },
-                            &status.as_u16().to_string(),
-                        );
-                    }
-                }
                 resp.headers_mut().insert(
                     "X-Upstream-Protocol",
                     axum::http::HeaderValue::from_static("openai"),
@@ -329,6 +308,7 @@ pub async fn handle_generate(
                 query_string,
                 extra_headers.clone(),
                 Some(account_id.as_str()),
+                llm_trace_id.as_deref(),
             )
             .await
         {
@@ -601,6 +581,22 @@ pub async fn handle_generate(
                     use crate::proxy::mappers::gemini::collector::collect_stream_to_json;
                     match collect_stream_to_json(Box::pin(stream), &s_id).await {
                         Ok(gemini_resp) => {
+                            // [FIX #1707] Write response body to upstream trace cache
+                            if let Some(ref trace_id) = llm_trace_id {
+                                state
+                                    .upstream_trace_cache
+                                    .put(
+                                        trace_id,
+                                        crate::proxy::upstream_trace::UpstreamTrace {
+                                            request_body: None,
+                                            response_body: Some(
+                                                serde_json::to_string(&gemini_resp)
+                                                    .unwrap_or_default(),
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                            }
                             // [LLM Logging] Log upstream response (stream collected)
                             {
                                 let entry = crate::proxy::llm_logger::LlmLogEntry {
@@ -656,6 +652,22 @@ pub async fn handle_generate(
                 .json()
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
+
+            // [FIX #1707] Write response body to upstream trace cache
+            if let Some(ref trace_id) = llm_trace_id {
+                state
+                    .upstream_trace_cache
+                    .put(
+                        trace_id,
+                        crate::proxy::upstream_trace::UpstreamTrace {
+                            request_body: None,
+                            response_body: Some(
+                                serde_json::to_string(&gemini_resp).unwrap_or_default(),
+                            ),
+                        },
+                    )
+                    .await;
+            }
 
             // [LLM Logging] Log upstream response (non-stream)
             // Note: response was already consumed by .json() above, so we log from the parsed value
@@ -756,127 +768,80 @@ pub async fn handle_generate(
             .await;
         }
 
-        // 429/401 触发模型冷却
+        // 429/401 → 尝试 ProviderRouter 重新路由到非 google 供应商
         if status_code == 429 || status_code == 401 {
-            if let Some(ref cd) = state.cooldown_manager {
-                cd.mark_cooldown(
-                    crate::proxy::common::model_cooldown::CooldownKey {
-                        model: mapped_model.clone(),
-                        provider: "google".to_string(),
-                    },
-                    &status_code.to_string(),
+            let router = state.provider_router.read().await;
+            let new_selection = router.select(&mapped_model, Some("google"));
+            if new_selection.provider.name != "google" && !new_selection.provider.name.is_empty() {
+                let sel_name = new_selection.provider.name.clone();
+                let sel_resolved = new_selection.resolved_model.clone();
+                let sel_protocol = new_selection.provider.protocol.clone();
+                let sel_provider = (*new_selection.provider).clone();
+                drop(router);
+
+                let mapped_via_provider = crate::proxy::providers::router::map_model_for_provider(
+                    &sel_resolved,
+                    &sel_provider.model_mapping,
                 );
-            }
-        }
+                tracing::info!(
+                    "[gemini_{}] Provider reroute: {} -> provider='{}', model='{}'",
+                    session_id,
+                    mapped_model,
+                    sel_name,
+                    mapped_via_provider
+                );
 
-        // 4b. 冷却容错：检查是否已触发冷却，尝试 ProviderRouter 兜底或 fallback model
-        if status_code == 429 || status_code == 401 {
-            if let Some(ref cd) = state.cooldown_manager {
-                let cd_key = crate::proxy::common::model_cooldown::CooldownKey {
-                    model: mapped_model.clone(),
-                    provider: "google".to_string(),
-                };
-                if cd.is_cooled_down(&cd_key) {
-                    let remaining = cd.remaining_secs(&cd_key);
-                    let cool_trace_id = format!("gemini_{}", session_id);
-                    tracing::warn!(
-                        "[{}] Model {}@google in cooldown after error {} ({}s remaining), \
-                         trying provider reroute / fallback model",
-                        cool_trace_id,
-                        mapped_model,
-                        status_code,
-                        remaining
-                    );
-
-                    // Step 1: 尝试 ProviderRouter 重新路由到非 google 供应商
-                    let router = state.provider_router.read().await;
-                    let new_selection = router.select(
-                        &mapped_model,
-                        Some("google"),
-                        state.cooldown_manager.as_ref().map(|a| a.as_ref()),
-                        Some(&mapped_model),
-                    );
-                    if new_selection.provider.name == "google" {
-                        // Router returned the same (failed) provider → no alternative available
-                    } else {
-                        // Clone all selection data before dropping the router
-                        let sel_name = new_selection.provider.name.clone();
-                        let sel_resolved = new_selection.resolved_model.clone();
-                        let sel_protocol = new_selection.provider.protocol.clone();
-                        let sel_provider = (*new_selection.provider).clone();
-                        drop(router);
-
-                        let mapped_via_provider =
-                            crate::proxy::providers::router::map_model_for_provider(
-                                &sel_resolved,
-                                &sel_provider.model_mapping,
-                            );
-                        tracing::info!(
-                            "[{}] Provider reroute: {} -> provider='{}', model='{}'",
-                            cool_trace_id,
-                            mapped_model,
-                            sel_name,
-                            mapped_via_provider
+                let result = match sel_protocol {
+                    crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
+                        let mut r =
+                            crate::proxy::providers::zai_gemini::forward_gemini_via_anthropic(
+                                &state,
+                                &sel_provider,
+                                &mapped_via_provider,
+                                &body,
+                                &headers,
+                                client_wants_stream,
+                                llm_trace_id.as_deref(),
+                            )
+                            .await;
+                        r.headers_mut().insert(
+                            "X-Upstream-Protocol",
+                            axum::http::HeaderValue::from_static("anthropic"),
                         );
-
-                        let result = match sel_protocol {
-                            crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
-                                let mut r = crate::proxy::providers::zai_gemini::forward_gemini_via_anthropic(
-                                    &state, &sel_provider, &mapped_via_provider, &body, &headers,
-                                    client_wants_stream,
-                                ).await;
-                                r.headers_mut().insert(
-                                    "X-Upstream-Protocol",
-                                    axum::http::HeaderValue::from_static("anthropic"),
-                                );
-                                Some(r)
-                            }
-                            crate::proxy::config::ProviderProtocol::OpenAICompatible => {
-                                let mut r = crate::proxy::providers::zai_gemini::forward_gemini_via_openai_compat(
-                                    &state, &sel_provider, &mapped_via_provider, &body, &headers,
-                                    client_wants_stream,
-                                ).await;
-                                r.headers_mut().insert(
-                                    "X-Upstream-Protocol",
-                                    axum::http::HeaderValue::from_static("openai"),
-                                );
-                                Some(r)
-                            }
-                            crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
-                                tracing::warn!(
-                                    "[{}] Provider '{}' uses GeminiV1Internal protocol, \
-                                     would create loop — skipping",
-                                    cool_trace_id,
-                                    sel_name
-                                );
-                                None
-                            }
-                        };
-                        if let Some(resp) = result {
-                            return Ok(resp);
-                        }
+                        Some(r)
                     }
-
-                    // Step 2: Provider 兜底失败 → 尝试 fallback model
-                    let fb = state.fallback_model.read().await;
-                    if fb.enabled && !fb.model.is_empty() {
-                        let fallback_mapped =
-                            crate::proxy::common::model_mapping::resolve_model_route(
-                                &fb.model,
-                                &*state.custom_mapping.read().await,
-                            );
+                    crate::proxy::config::ProviderProtocol::OpenAICompatible => {
+                        let mut r =
+                            crate::proxy::providers::zai_gemini::forward_gemini_via_openai_compat(
+                                &state,
+                                &sel_provider,
+                                &mapped_via_provider,
+                                &body,
+                                &headers,
+                                client_wants_stream,
+                                llm_trace_id.as_deref(),
+                            )
+                            .await;
+                        r.headers_mut().insert(
+                            "X-Upstream-Protocol",
+                            axum::http::HeaderValue::from_static("openai"),
+                        );
+                        Some(r)
+                    }
+                    crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
                         tracing::warn!(
-                            "[{}] All providers cooled down, switching to fallback model: {} -> {}",
-                            cool_trace_id,
-                            model_name,
-                            fallback_mapped
+                            "[gemini_{}] Provider '{}' uses GeminiV1Internal protocol, skipping",
+                            session_id,
+                            sel_name
                         );
-                        drop(fb);
-                        body["model"] = serde_json::Value::String(fallback_mapped);
-                        continue;
+                        None
                     }
-                    drop(fb);
+                };
+                if let Some(resp) = result {
+                    return Ok(resp);
                 }
+            } else {
+                drop(router);
             }
         }
 

@@ -1,12 +1,8 @@
-[shell_environment_policy]
-inherit = "core"
-
-[shell_environment_policy.set]
-ANTHROPIC_AUTH_TOKEN = "sk-sp-8d209cef742e453f902d792046469141"
-ANTHROPIC_BASE_URL = "https://coding.dashscope.aliyuncs.com/apps/anthropic"
-ANTHROPIC_DEFAULT_HAIKU_MODEL = "qwen3.5-plus"
-ANTHROPIC_DEFAULT_OPUS_MODEL = "qwen3.7-plus"
-ANTHROPIC_DEFAULT_SONNET_MODEL = "qwen3.6-plus"
-ANTHROPIC_MODEL = "qwen3.6-plus"
-CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
-SHELL = "/bin/zsh"
+[mcp_servers.chrome-devtools]
+command = "npx"
+args = [
+  "-y",
+  "chrome-devtools-mcp@latest",
+  "--browserUrl",
+  "http://192.168.65.254:9222",
+]

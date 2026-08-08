@@ -402,9 +402,8 @@ Please read the file locally."#;
             }),
         ];
 
-        // 确认工具结果受 MAX_TOOL_RESULT_CHARS (200K) 限制
-        // 前两个 text block 耗尽配额，后续 block 被截断
+        // 确认工具结果不再剔除图片
         sanitize_tool_result_blocks(&mut blocks);
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks.len(), 4);
     }
 }

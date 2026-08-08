@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 // Google OAuth configuration
-// Client credentials must be provided via environment variables.
-// Set ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET at startup.
-const CLIENT_SECRET_ENV: &str = "ANTIGRAVITY_OAUTH_CLIENT_SECRET";
-const CLIENT_ID_ENV: &str = "ANTIGRAVITY_OAUTH_CLIENT_ID";
+const CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const CLIENT_SECRET: &str = "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";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 const TOKEN_REFRESH_SKEW_SECONDS: i64 = 900;
@@ -88,58 +86,13 @@ fn normalize_client_key(key: &str) -> String {
 }
 
 fn build_registry() -> OAuthClientRegistry {
-    let mut clients: Vec<OAuthClientConfig> = Vec::new();
-
-    // Load builtin client credentials with priority:
-    // 1. AppConfig (gui_config.json) - user-facing config
-    // 2. Environment variables - fallback for Docker/headless deployments
-    let config_client_id = crate::modules::config::load_app_config()
-        .ok()
-        .and_then(|c| c.oauth_client_id)
-        .filter(|v| !v.trim().is_empty());
-    let config_client_secret = crate::modules::config::load_app_config()
-        .ok()
-        .and_then(|c| c.oauth_client_secret)
-        .filter(|v| !v.trim().is_empty());
-
-    let client_id = config_client_id.or_else(|| {
-        std::env::var(CLIENT_ID_ENV)
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-    });
-    let client_secret = config_client_secret.or_else(|| {
-        std::env::var(CLIENT_SECRET_ENV)
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-    });
-
-    match (client_id, client_secret) {
-        (Some(id), Some(secret)) => {
-            clients.push(OAuthClientConfig {
-                key: normalize_client_key(DEFAULT_OAUTH_CLIENT_KEY),
-                label: "Antigravity Enterprise".to_string(),
-                client_id: id,
-                client_secret: secret,
-                is_builtin: true,
-            });
-        }
-        (None, None) => {
-            crate::modules::logger::log_warn(&format!(
-                "No builtin OAuth client configured. Set oauth_client_id/oauth_client_secret in gui_config.json, or set {} and {} environment variables, or use {} for custom clients.",
-                CLIENT_ID_ENV, CLIENT_SECRET_ENV, OAUTH_CLIENTS_ENV
-            ));
-        }
-        (None, Some(_)) => {
-            crate::modules::logger::log_error(&format!(
-                "OAuth client_secret is set but client_id is missing. Builtin OAuth client will NOT be available.",
-            ));
-        }
-        (Some(_), None) => {
-            crate::modules::logger::log_error(&format!(
-                "OAuth client_id is set but client_secret is missing. Builtin OAuth client will NOT be available.",
-            ));
-        }
-    }
+    let mut clients: Vec<OAuthClientConfig> = vec![OAuthClientConfig {
+        key: normalize_client_key(DEFAULT_OAUTH_CLIENT_KEY),
+        label: "Antigravity Enterprise".to_string(),
+        client_id: CLIENT_ID.to_string(),
+        client_secret: CLIENT_SECRET.to_string(),
+        is_builtin: true,
+    }];
 
     if let Ok(raw_extra_clients) = std::env::var(OAUTH_CLIENTS_ENV) {
         for entry in raw_extra_clients.split(';') {
@@ -765,26 +718,10 @@ mod tests {
 
     #[test]
     fn test_get_auth_url_contains_state() {
-        // Env vars must be set before the registry initializes.
-        // Set them via test runner or environment. Here we test get_auth_url_with_client
-        // which requires a configured registry.
-        std::env::set_var(CLIENT_ID_ENV, "test-client-id.apps.googleusercontent.com");
-        std::env::set_var(CLIENT_SECRET_ENV, "test-client-secret");
-
         let redirect_uri = "http://localhost:8080/callback";
         let state = "test-state-123456";
-        // Note: OnceLock means this only works if env vars are set before first registry access.
-        // For CI, set these env vars before running tests.
-        let result = get_auth_url_with_client(redirect_uri, state, None);
+        let url = get_auth_url(redirect_uri, state);
 
-        // If registry is not initialized (no env vars), this is expected to fail gracefully
-        assert!(
-            result.is_ok(),
-            "OAuth client must be configured. Set {} and {} env vars.",
-            CLIENT_ID_ENV,
-            CLIENT_SECRET_ENV
-        );
-        let (url, _client_key) = result.unwrap();
         assert!(url.contains("state=test-state-123456"));
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fcallback"));
         assert!(url.contains("response_type=code"));

@@ -56,17 +56,21 @@ const V1_INTERNAL_BASE_URL_FALLBACKS: [&str; 3] = [
     V1_INTERNAL_BASE_URL_PROD,    // 优先级 3: Prod (仅作为兜底)
 ];
 
+use crate::proxy::upstream_trace::UpstreamTraceCache;
+
 pub struct UpstreamClient {
     default_client: Client,
     proxy_pool: Option<Arc<crate::proxy::proxy_pool::ProxyPoolManager>>,
     client_cache: DashMap<String, Client>, // proxy_id -> Client
     user_agent_override: RwLock<Option<String>>,
+    trace_cache: Option<UpstreamTraceCache>, // [NEW] Upstream request/response trace cache
 }
 
 impl UpstreamClient {
     pub fn new(
         proxy_config: Option<crate::proxy::config::UpstreamProxyConfig>,
         proxy_pool: Option<Arc<crate::proxy::proxy_pool::ProxyPoolManager>>,
+        trace_cache: Option<UpstreamTraceCache>,
     ) -> Self {
         let default_client = match Self::build_client_internal(proxy_config.clone()) {
             Ok(client) => client,
@@ -93,6 +97,7 @@ impl UpstreamClient {
             proxy_pool,
             client_cache: DashMap::new(),
             user_agent_override: RwLock::new(None),
+            trace_cache,
         }
     }
 
@@ -252,12 +257,14 @@ impl UpstreamClient {
             query_string,
             std::collections::HashMap::new(),
             account_id,
+            None, // trace_id not available from this entry point
         )
         .await
     }
 
     /// [FIX #765] 调用 v1internal API，支持透传额外的 Headers
     /// [ENHANCED] 返回 UpstreamCallResult，包含降级尝试记录，用于 debug 日志
+    /// [NEW] 支持写入 upstream trace cache 供监控中间件使用
     pub async fn call_v1_internal_with_headers(
         &self,
         method: &str,
@@ -266,6 +273,7 @@ impl UpstreamClient {
         query_string: Option<&str>,
         extra_headers: std::collections::HashMap<String, String>,
         account_id: Option<&str>, // [NEW] Account ID
+        trace_id: Option<&str>,   // [NEW] LLM trace ID for upstream trace cache
     ) -> Result<UpstreamCallResult, String> {
         // [NEW] Get client based on account (cached in proxy pool manager)
         let client = self.get_client(account_id).await;
@@ -362,6 +370,15 @@ impl UpstreamClient {
                                 status
                             );
                         }
+                        let trace = crate::proxy::upstream_trace::UpstreamTrace {
+                            request_body: Some(serde_json::to_string(&body).unwrap_or_default()),
+                            response_body: None, // Will be filled by handler for non-streaming
+                        };
+                        if let Some(ref cache) = self.trace_cache {
+                            if let Some(tid) = trace_id {
+                                cache.put(tid, trace).await;
+                            }
+                        }
                         return Ok(UpstreamCallResult {
                             response: resp,
                             fallback_attempts,
@@ -388,6 +405,15 @@ impl UpstreamClient {
                     }
 
                     // 不可重试的错误或已是最后一个端点，直接返回
+                    let trace = crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: Some(serde_json::to_string(&body).unwrap_or_default()),
+                        response_body: None,
+                    };
+                    if let Some(ref cache) = self.trace_cache {
+                        if let Some(tid) = trace_id {
+                            cache.put(tid, trace).await;
+                        }
+                    }
                     return Ok(UpstreamCallResult {
                         response: resp,
                         fallback_attempts,

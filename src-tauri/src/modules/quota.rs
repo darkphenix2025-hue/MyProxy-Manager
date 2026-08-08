@@ -448,7 +448,7 @@ pub async fn warmup_model_directly(
     // Get currently configured proxy port
     let port = config::load_app_config()
         .map(|c| c.proxy.port)
-        .unwrap_or(8045);
+        .unwrap_or(8150);
 
     let warmup_url = format!("http://127.0.0.1:{}/internal/warmup", port);
     let body = json!({

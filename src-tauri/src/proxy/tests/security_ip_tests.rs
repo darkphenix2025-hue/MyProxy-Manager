@@ -712,7 +712,6 @@ mod ip_filter_middleware_tests {
 
 #[cfg(test)]
 mod performance_benchmarks {
-    
     use crate::modules::security_db::{
         add_to_blacklist, get_blacklist, init_db, is_ip_in_blacklist,
     };

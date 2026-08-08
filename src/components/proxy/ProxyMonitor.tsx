@@ -658,7 +658,7 @@ const LogTable: React.FC<LogTableProps> = ({
                                 )}
                             </td>
                             <td className="text-right text-[10px]" style={{ width: '76px' }}>
-                                {new Date(log.timestamp).toLocaleTimeString()}
+                                {new Date(log.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                             </td>
                             <td style={{ width: '36px' }}>
                                 <button
@@ -1222,7 +1222,7 @@ const VisualView: React.FC<{ log: ProxyRequestLog }> = ({ log }) => {
                         <Server size={14} className="text-orange-500" />
                         <div>
                             <div className="text-[10px] font-bold text-gray-700 dark:text-gray-300">Proxy</div>
-                            <div className="text-[9px] text-gray-400">port 8045</div>
+                            <div className="text-[9px] text-gray-400">port 8150</div>
                         </div>
                     </div>
                     <ArrowRight size={14} className="text-gray-300 dark:text-gray-600 rotate-90 sm:rotate-0" />
@@ -1607,12 +1607,12 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
     };
 
     const getProxyBaseUrl = (): string => {
-        // Use Vite proxy env if set (e.g. http://host.docker.internal:8045 for Docker)
+        // Use Vite proxy env if set (e.g. http://host.docker.internal:8150 for Docker)
         if (import.meta.env.VITE_API_PROXY_URL) {
             return import.meta.env.VITE_API_PROXY_URL as string;
         }
         // Default to the proxy port — matches vite.config.ts proxy target
-        return 'http://127.0.0.1:8045';
+        return 'http://127.0.0.1:8150';
     };
 
     const handleResend = async (log: ProxyRequestLog) => {
@@ -1877,7 +1877,7 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-y-5 gap-x-10">
                                     <div className="space-y-1.5">
                                         <span className="block text-gray-500 dark:text-gray-400 uppercase font-black text-[10px] tracking-widest">{t('monitor.details.time')}</span>
-                                        <span className="font-mono font-semibold text-gray-900 dark:text-base-content text-xs">{new Date(selectedLog.timestamp).toLocaleString()}</span>
+                                        <span className="font-mono font-semibold text-gray-900 dark:text-base-content text-xs">{new Date(selectedLog.timestamp).toLocaleString('en-GB', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</span>
                                     </div>
                                     <div className="space-y-1.5">
                                         <span className="block text-gray-500 dark:text-gray-400 uppercase font-black text-[10px] tracking-widest">{t('monitor.details.duration')}</span>
@@ -1996,7 +1996,7 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                     </button>
                                 </div>
 
-                                {/* Tab 1: 原始报文 (8045 交互) */}
+                                {/* Tab 1: 原始报文 (8150 交互) */}
                                 {detailViewMode === 'raw' && (
                                     <div className="space-y-4">
                                         <div>
@@ -2159,8 +2159,8 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                             <DiffView
                                                 left={selectedLog.request_body ?? ''}
                                                 right={selectedLog.upstream_request_body ?? ''}
-                                                leftLabel="原始请求（客户端 → 8045）"
-                                                rightLabel="供应商请求（8045 → 供应商）"
+                                                leftLabel="原始请求（客户端 → 8150）"
+                                                rightLabel="供应商请求（8150 → 供应商）"
                                             />
                                         </div>
                                         {/* Response diff */}
@@ -2168,14 +2168,14 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                             <DiffView
                                                 left={selectedLog.response_body ?? ''}
                                                 right={selectedLog.upstream_response_body ?? ''}
-                                                leftLabel="原始响应（8045 → 客户端）"
-                                                rightLabel="供应商响应（供应商 → 8045）"
+                                                leftLabel="原始响应（8150 → 客户端）"
+                                                rightLabel="供应商响应（供应商 → 8150）"
                                             />
                                         </div>
                                     </div>
                                 )}
 
-                                {/* Tab 4: 可视化 (8045 原始) */}
+                                {/* Tab 4: 可视化 (8150 原始) */}
                                 {detailViewMode === 'visual' && (
                                     <VisualView log={selectedLog} />
                                 )}

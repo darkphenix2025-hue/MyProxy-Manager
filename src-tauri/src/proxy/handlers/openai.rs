@@ -21,75 +21,15 @@ use super::common::{
 };
 use crate::modules::account;
 use crate::proxy::common::client_adapter::CLIENT_ADAPTERS; // [NEW] Adapter Registry
-use crate::proxy::common::model_cooldown;
 use crate::proxy::session_manager::SessionManager;
-use axum::extract::Extension;
 use axum::http::HeaderMap;
 use tokio::time::Duration;
-
-/// Check if a base URL already ends with an API version segment like /v1, /v2, /v3, /v4, etc.
-/// Returns true if the URL ends with a version segment, meaning the default /v1 prefix
-/// should not be applied — the api_path should be empty instead.
-fn base_url_has_version_suffix(base_url: &str) -> bool {
-    let tail = base_url.trim_end_matches('/');
-    if let Some(pos) = tail.rfind('/') {
-        let last_segment = &tail[pos + 1..];
-        if last_segment.len() >= 2
-            && last_segment.starts_with('v')
-            && last_segment[1..].chars().all(|c| c.is_ascii_digit())
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Build upstream URL for OpenAI-compatible providers.
-/// Uses provider.api_path if configured, otherwise defaults to /v1.
-/// If base_url already ends with a version segment (e.g. /v4), uses empty string as default api_path.
-fn build_openai_provider_url(provider: &crate::proxy::config::UpstreamProvider, endpoint: &str) -> String {
-    let base = provider.base_url.trim_end_matches('/');
-
-    // Determine the default API path prefix based on whether base_url already has a version
-    let default_api_path = if base_url_has_version_suffix(&provider.base_url) {
-        ""
-    } else {
-        "/v1"
-    };
-
-    // Use configured api_path or default, then append the endpoint
-    let api_path = provider
-        .api_path
-        .as_deref()
-        .unwrap_or(default_api_path)
-        .trim_end_matches('/');
-
-    // Build full path: {api_path}/{endpoint}
-    let full_path = if api_path.is_empty() {
-        format!("/{}", endpoint.trim_start_matches('/'))
-    } else {
-        format!("{}/{}", api_path, endpoint.trim_start_matches('/'))
-    };
-
-    format!("{}{}", base, full_path)
-}
 
 pub async fn handle_chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap, // [CHANGED] Extract headers
-    trace_ext: Option<Extension<crate::proxy::middleware::monitor::LlmTraceId>>,
     Json(mut body): Json<Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let trace_id = trace_ext
-        .as_ref()
-        .map(|e| e.0 .0.clone())
-        .or_else(|| {
-            headers
-                .get("x-llm-trace-id")
-                .and_then(|h| h.to_str().ok())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| format!("req_{}", chrono::Utc::now().timestamp_millis()));
     // [NEW] Check for Image Model Redirection
     let model_name = body
         .get("model")
@@ -107,9 +47,18 @@ pub async fn handle_chat_completions(
         return intercept_chat_to_image(state, body, &model_name).await;
     }
 
+    // [NEW] 协议转换单元灰度检查
+    let translator_enabled = state
+        .translator_config
+        .read()
+        .await
+        .is_format_enabled("openai");
+    if translator_enabled {
+        debug!("[Translator] New translator path enabled for OpenAI requests");
+    }
+
     // [FIX] 保存原始请求体的完整副本，用于日志记录
     // 这确保了即使结构体定义遗漏字段，日志也能完整记录所有参数
-    let original_body = body.clone();
 
     // [NEW] 自动检测并转换 Responses 格式
     // 如果请求包含 instructions 或 input 但没有 messages，则认为是 Responses 格式
@@ -160,6 +109,9 @@ pub async fn handle_chat_completions(
         }
     }
 
+    // Save original body for translator path (before it's consumed by from_value)
+    let original_body = body.clone();
+
     let mut openai_req: OpenAIRequest = serde_json::from_value(body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request: {}", e)))?;
 
@@ -180,6 +132,12 @@ pub async fn handle_chat_completions(
             });
     }
 
+    let trace_id = format!("req_{}", chrono::Utc::now().timestamp_subsec_millis());
+    // [NEW] Extract LLM trace ID from header for upstream trace cache
+    let llm_trace_id = headers
+        .get("x-llm-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     info!(
         "[{}] OpenAI Chat Request: {} | {} messages | stream: {}",
         trace_id,
@@ -224,21 +182,12 @@ pub async fn handle_chat_completions(
     );
     let router = state.provider_router.read().await;
     let selection = if !router.is_empty() {
-        let sel = router.select(
-            &provider_mapped_model,
-            None,
-            state.cooldown_manager.as_ref().map(|a| a.as_ref()),
-            Some(&provider_mapped_model),
-        );
-        if router.is_empty() || sel.provider.name.is_empty() {
-            None
-        } else {
-            Some((
-                sel.resolved_model.clone(),
-                sel.provider.protocol.clone(),
-                sel.provider.clone(),
-            ))
-        }
+        let sel = router.select(&provider_mapped_model, None);
+        Some((
+            sel.resolved_model.clone(),
+            sel.provider.protocol.clone(),
+            sel.provider.clone(),
+        ))
     } else {
         None
     };
@@ -246,17 +195,12 @@ pub async fn handle_chat_completions(
 
     if let Some((resolved_model, protocol, provider)) = selection {
         // Map model name to provider's native model ID before forwarding
-        let mapped_model = if crate::proxy::providers::router::preserve_explicit_route_model(
-            Some(&provider_mapped_model),
+        let mapped_model = crate::proxy::providers::router::map_model_for_provider(
             &resolved_model,
-        ) {
-            resolved_model.clone()
-        } else {
-            crate::proxy::providers::router::map_model_for_provider(
-                &resolved_model,
-                &provider.model_mapping,
-            )
-        };
+            &provider.model_mapping,
+        );
+        // Save clones for translator path before moves
+        let mapped_model_for_translator = mapped_model.clone();
         let openai_req = crate::proxy::mappers::openai::models::OpenAIRequest {
             model: mapped_model,
             ..openai_req
@@ -265,102 +209,68 @@ pub async fn handle_chat_completions(
         match protocol {
             crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
                 // Transform OpenAI → Claude format, then forward to provider
-                let claude_body =
-                    crate::proxy::mappers::openai::request::to_claude_body(&openai_req);
-                // Build complete URL using provider's configured api_path
-                let messages_url = build_openai_provider_url(&provider, "messages");
-                let mut resp =
+                let claude_body = if translator_enabled {
+                    // 使用 translator 框架做协议转换
+                    let raw_bytes = serde_json::to_vec(&original_body).unwrap_or_default();
+                    let converted = crate::proxy::translator::translate_request(
+                        crate::proxy::translator::format::Format::OpenAI,
+                        crate::proxy::translator::format::Format::Claude,
+                        &mapped_model_for_translator,
+                        &raw_bytes,
+                        openai_req.stream,
+                    );
+                    serde_json::from_slice(&converted).unwrap_or(original_body.clone())
+                } else {
+                    // 使用现有 mapper 路径
+                    crate::proxy::mappers::openai::request::to_claude_body(&openai_req)
+                };
+                return Ok(
                     crate::proxy::providers::zai_anthropic::forward_anthropic_with_provider(
                         &state,
-                        &messages_url,
+                        &provider.base_url,
                         &provider.api_key,
                         &provider.model_mapping,
                         axum::http::Method::POST,
-                        "", // path is already included in base_url
+                        "/v1/messages",
                         &headers,
                         claude_body,
                         openai_req.messages.len(),
                         &provider.name,
-                        Some(&trace_id),
-                        Some(&provider_mapped_model),
+                        "anthropic",
+                        llm_trace_id.as_deref(),
                     )
-                    .await;
-
-                let status = resp.status();
-                if status == 401 || status == 429 {
-                    if let Some(ref cd) = state.cooldown_manager {
-                        cd.mark_cooldown(
-                            model_cooldown::CooldownKey {
-                                model: openai_req.model.clone(),
-                                provider: provider.name.clone(),
-                            },
-                            &status.as_u16().to_string(),
-                        );
-                    }
-                }
-                resp.headers_mut().insert(
-                    "X-Upstream-Protocol",
-                    axum::http::HeaderValue::from_static("anthropic"),
+                    .await,
                 );
-                return Ok(resp);
             }
             crate::proxy::config::ProviderProtocol::OpenAICompatible => {
                 // Forward directly to provider's OpenAI-compatible endpoint
-                let mut resp =
-                    forward_openai_compatible(&state, &provider, &openai_req, &headers, &trace_id, &provider_mapped_model).await;
-
-                let status = resp.status();
-                if status == 401 || status == 429 {
-                    if let Some(ref cd) = state.cooldown_manager {
-                        cd.mark_cooldown(
-                            model_cooldown::CooldownKey {
-                                model: openai_req.model.clone(),
-                                provider: provider.name.clone(),
-                            },
-                            &status.as_u16().to_string(),
-                        );
-                    }
-                }
-                resp.headers_mut().insert(
-                    "X-Upstream-Protocol",
-                    axum::http::HeaderValue::from_static("openai"),
-                );
-                return Ok(resp);
+                return Ok(forward_openai_compatible(
+                    &state,
+                    &provider,
+                    &openai_req,
+                    &headers,
+                    llm_trace_id.as_deref(),
+                )
+                .await);
             }
             crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
-                let mut resp =
+                return Ok(
                     crate::proxy::providers::zai_gemini::forward_gemini_v1internal_with_provider(
                         &state,
                         &provider,
                         &openai_req,
                         &headers,
+                        llm_trace_id.as_deref(),
                     )
-                    .await;
-
-                let status = resp.status();
-                if status == 401 || status == 429 {
-                    if let Some(ref cd) = state.cooldown_manager {
-                        cd.mark_cooldown(
-                            model_cooldown::CooldownKey {
-                                model: openai_req.model.clone(),
-                                provider: provider.name.clone(),
-                            },
-                            &status.as_u16().to_string(),
-                        );
-                    }
-                }
-                resp.headers_mut().insert(
-                    "X-Upstream-Protocol",
-                    axum::http::HeaderValue::from_static("gemini"),
+                    .await,
                 );
-                return Ok(resp);
             }
         }
     }
 
     // 1. 获取 UpstreamClient (Clone handle)
     let upstream = state.upstream.clone();
-    let token_manager = state.token_manager.clone();
+    let token_manager = state.token_manager;
     let pool_size = token_manager.len();
     // [FIX] Ensure max_attempts is at least 2 to allow for internal retries
     let max_attempts = MAX_RETRY_ATTEMPTS.min(pool_size.saturating_add(1)).max(2);
@@ -407,7 +317,12 @@ pub async fn handle_chat_completions(
             Ok(t) => t,
             Err(e) => {
                 // [FIX] Attach headers to error response for logging visibility
-                let headers = [("X-Mapped-Model", mapped_model.as_str())];
+                let headers = [
+                    ("X-Mapped-Model", mapped_model.as_str()),
+                    ("X-Upstream-Protocol", "gemini"),
+                    ("X-Upstream-Model", mapped_model.as_str()),
+                    ("X-Upstream-URL", "token_manager"),
+                ];
                 return Ok((
                     StatusCode::SERVICE_UNAVAILABLE,
                     headers,
@@ -499,6 +414,7 @@ pub async fn handle_chat_completions(
                 query_string,
                 extra_headers.clone(),
                 Some(account_id.as_str()),
+                llm_trace_id.as_deref(),
             )
             .await
         {
@@ -659,6 +575,9 @@ pub async fn handle_chat_completions(
 
                 if client_wants_stream {
                     // 客户端请求流式，返回 SSE
+                    // [NEW] For streaming, we can't capture the full response body here
+                    // because the stream is returned directly to the client.
+                    // The response will be captured by the monitor middleware's stream wrapper.
                     let body = Body::from_stream(combined_stream);
                     return Ok(Response::builder()
                         .header("Content-Type", "text/event-stream")
@@ -667,7 +586,10 @@ pub async fn handle_chat_completions(
                         .header("X-Accel-Buffering", "no")
                         .header("X-Account-Email", &email)
                         .header("X-Mapped-Model", &mapped_model)
+                        // Add upstream headers for monitor middleware
                         .header("X-Upstream-Protocol", "gemini")
+                        .header("X-Upstream-Model", &mapped_model)
+                        .header("X-Upstream-URL", &upstream_url)
                         .body(body)
                         .unwrap()
                         .into_response());
@@ -678,12 +600,32 @@ pub async fn handle_chat_completions(
 
                     match collect_stream_to_json(Box::pin(combined_stream)).await {
                         Ok(full_response) => {
+                            // [NEW] Write response body to upstream trace cache
+                            if let Some(ref trace_id) = llm_trace_id {
+                                state
+                                    .upstream_trace_cache
+                                    .put(
+                                        trace_id,
+                                        crate::proxy::upstream_trace::UpstreamTrace {
+                                            request_body: None,
+                                            response_body: Some(
+                                                serde_json::to_string(&full_response)
+                                                    .unwrap_or_default(),
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                            }
                             info!("[{}] ✓ Stream collected and converted to JSON", trace_id);
                             return Ok((
                                 StatusCode::OK,
                                 [
                                     ("X-Account-Email", email.as_str()),
                                     ("X-Mapped-Model", mapped_model.as_str()),
+                                    // Add upstream headers for monitor middleware
+                                    ("X-Upstream-Protocol", "gemini"),
+                                    ("X-Upstream-Model", mapped_model.as_str()),
+                                    ("X-Upstream-URL", upstream_url.as_str()),
                                 ],
                                 Json(full_response),
                             )
@@ -693,10 +635,7 @@ pub async fn handle_chat_completions(
                             error!("[{}] Stream collection error: {}", trace_id, e);
                             return Ok((
                                 StatusCode::INTERNAL_SERVER_ERROR,
-                                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                                axum::Json(serde_json::json!({
-                                    "error": { "message": format!("Stream collection error: {}", e) }
-                                }))
+                                format!("Stream collection error: {}", e),
                             )
                                 .into_response());
                         }
@@ -704,9 +643,27 @@ pub async fn handle_chat_completions(
                 }
             }
 
-            let gemini_resp: Value = response
-                .json()
+            // [NEW] Capture response body for upstream trace cache
+            let response_text = response
+                .text()
                 .await
+                .unwrap_or_else(|_| "[Failed to read response]".to_string());
+
+            // Write response body to upstream trace cache
+            if let Some(ref trace_id) = llm_trace_id {
+                state
+                    .upstream_trace_cache
+                    .put(
+                        trace_id,
+                        crate::proxy::upstream_trace::UpstreamTrace {
+                            request_body: None, // Already written by upstream client
+                            response_body: Some(response_text.clone()),
+                        },
+                    )
+                    .await;
+            }
+
+            let gemini_resp: Value = serde_json::from_str(&response_text)
                 .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
 
             let openai_response =
@@ -716,6 +673,10 @@ pub async fn handle_chat_completions(
                 [
                     ("X-Account-Email", email.as_str()),
                     ("X-Mapped-Model", mapped_model.as_str()),
+                    // Add upstream headers for monitor middleware
+                    ("X-Upstream-Protocol", "gemini"),
+                    ("X-Upstream-Model", mapped_model.as_str()),
+                    ("X-Upstream-URL", upstream_url.as_str()),
                 ],
                 Json(openai_response),
             )
@@ -779,177 +740,6 @@ pub async fn handle_chat_completions(
                     Some(&mapped_model),
                 )
                 .await;
-        }
-
-        // 429/401 触发模型冷却
-        if status_code == 429 || status_code == 401 {
-            if let Some(ref cd) = state.cooldown_manager {
-                cd.mark_cooldown(
-                    model_cooldown::CooldownKey {
-                        model: mapped_model.clone(),
-                        provider: "google".to_string(),
-                    },
-                    &status_code.to_string(),
-                );
-            }
-        }
-
-        // 4b. 冷却容错：检查是否已触发冷却，尝试 ProviderRouter 兜底或 fallback model
-        if status_code == 429 || status_code == 401 {
-            if let Some(ref cd) = state.cooldown_manager {
-                let cd_key = model_cooldown::CooldownKey {
-                    model: mapped_model.clone(),
-                    provider: "google".to_string(),
-                };
-                if cd.is_cooled_down(&cd_key) {
-                    let remaining = cd.remaining_secs(&cd_key);
-                    tracing::warn!(
-                        "[{}] Model {}@google in cooldown after error {} ({}s remaining), \
-                         trying provider reroute / fallback model",
-                        trace_id,
-                        mapped_model,
-                        status_code,
-                        remaining
-                    );
-
-                    // Step 1: 尝试 ProviderRouter 重新路由到非 google 供应商
-                    let router = state.provider_router.read().await;
-                    let new_selection = router.select(
-                        &mapped_model,
-                        Some("google"),
-                        state.cooldown_manager.as_ref().map(|a| a.as_ref()),
-                        Some(&mapped_model),
-                    );
-                    if new_selection.provider.name == "google" {
-                        // Router returned the same (failed) provider → no alternative available
-                    } else {
-                        // Clone all selection data before dropping the router
-                        let sel_name = new_selection.provider.name.clone();
-                        let sel_resolved = new_selection.resolved_model.clone();
-                        let sel_protocol = new_selection.provider.protocol.clone();
-                        let sel_provider = (*new_selection.provider).clone();
-                        drop(router);
-
-                        let mapped_via_provider =
-                            crate::proxy::providers::router::map_model_for_provider(
-                                &sel_resolved,
-                                &sel_provider.model_mapping,
-                            );
-                        tracing::info!(
-                            "[{}] Provider reroute: {} -> provider='{}', model='{}'",
-                            trace_id,
-                            mapped_model,
-                            sel_name,
-                            mapped_via_provider
-                        );
-
-                        let rerouted_req = crate::proxy::mappers::openai::models::OpenAIRequest {
-                            model: mapped_via_provider,
-                            ..openai_req.clone()
-                        };
-
-                        let result = match sel_protocol {
-                            crate::proxy::config::ProviderProtocol::OpenAICompatible => {
-                                // Build route-mapped model identifier for logging
-                                let route_model = if sel_resolved.contains('/') {
-                                    sel_resolved.clone()
-                                } else if let Some(ref pid) = sel_provider.provider_id {
-                                    if !pid.is_empty() {
-                                        format!("{}/{}", pid, sel_resolved)
-                                    } else {
-                                        sel_resolved.clone()
-                                    }
-                                } else {
-                                    sel_resolved.clone()
-                                };
-                                let mut r = forward_openai_compatible(
-                                    &state,
-                                    &sel_provider,
-                                    &rerouted_req,
-                                    &headers,
-                                    &trace_id,
-                                    &route_model,
-                                )
-                                .await;
-                                r.headers_mut().insert(
-                                    "X-Upstream-Protocol",
-                                    axum::http::HeaderValue::from_static("openai"),
-                                );
-                                Some(r)
-                            }
-                            crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
-                                let claude_body =
-                                    crate::proxy::mappers::openai::to_claude_body(&rerouted_req);
-                                // [FIX] sel_resolved may already include provider_id/ prefix from custom mapping.
-                                // Don't double-prefix by prepending provider_id again.
-                                let re_route_mapped = if sel_resolved.contains('/') {
-                                    sel_resolved.clone()
-                                } else if let Some(ref pid) = sel_provider.provider_id {
-                                    if !pid.is_empty() {
-                                        format!("{}/{}", pid, sel_resolved)
-                                    } else {
-                                        sel_resolved.clone()
-                                    }
-                                } else {
-                                    sel_resolved.clone()
-                                };
-                                // Build complete URL using provider's configured api_path
-                                let messages_url = build_openai_provider_url(&sel_provider, "messages");
-                                let mut r = crate::proxy::providers::zai_anthropic::forward_anthropic_with_provider(
-                                    &state, &messages_url, &sel_provider.api_key,
-                                    &sel_provider.model_mapping,
-                                    axum::http::Method::POST,
-                                    "", // path is already included in base_url
-                                    &headers,
-                                    claude_body,
-                                    rerouted_req.messages.len(),
-                                    &sel_name,
-                                    Some(&trace_id),
-                                    Some(&re_route_mapped),
-                                ).await;
-                                r.headers_mut().insert(
-                                    "X-Upstream-Protocol",
-                                    axum::http::HeaderValue::from_static("anthropic"),
-                                );
-                                Some(r)
-                            }
-                            crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
-                                let mut r = crate::proxy::providers::zai_gemini::forward_gemini_v1internal_with_provider(
-                                    &state, &sel_provider, &rerouted_req, &headers,
-                                ).await;
-                                r.headers_mut().insert(
-                                    "X-Upstream-Protocol",
-                                    axum::http::HeaderValue::from_static("gemini"),
-                                );
-                                Some(r)
-                            }
-                        };
-                        if let Some(resp) = result {
-                            return Ok(resp);
-                        }
-                    }
-
-                    // Step 2: Provider 兜底失败 → 尝试 fallback model
-                    let fb = state.fallback_model.read().await;
-                    if fb.enabled && !fb.model.is_empty() {
-                        let fallback_mapped =
-                            crate::proxy::common::model_mapping::resolve_model_route(
-                                &fb.model,
-                                &*state.custom_mapping.read().await,
-                            );
-                        tracing::warn!(
-                            "[{}] All providers cooled down, switching to fallback model: {} -> {}",
-                            trace_id,
-                            openai_req.model,
-                            fallback_mapped
-                        );
-                        drop(fb);
-                        openai_req.model = fallback_mapped;
-                        continue;
-                    }
-                    drop(fb);
-                }
-            }
         }
 
         // 执行退避
@@ -1130,18 +920,14 @@ pub async fn handle_chat_completions(
         Ok((
             StatusCode::TOO_MANY_REQUESTS,
             [("X-Account-Email", email), ("X-Mapped-Model", mapped_model)],
-            axum::Json(serde_json::json!({
-                "error": { "message": format!("All accounts exhausted. Last error: {}", last_error) }
-            })),
+            format!("All accounts exhausted. Last error: {}", last_error),
         )
             .into_response())
     } else {
         Ok((
             StatusCode::TOO_MANY_REQUESTS,
             [("X-Mapped-Model", mapped_model)],
-            axum::Json(serde_json::json!({
-                "error": { "message": format!("All accounts exhausted. Last error: {}", last_error) }
-            })),
+            format!("All accounts exhausted. Last error: {}", last_error),
         )
             .into_response())
     }
@@ -1158,6 +944,12 @@ pub async fn handle_completions(
         "Received /v1/completions or /v1/responses payload: {:?}",
         body
     );
+
+    // [FIX #1707] Extract llm_trace_id from middleware for upstream trace cache
+    let llm_trace_id = headers
+        .get("x-llm-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let is_codex_style = body.get("input").is_some() || body.get("instructions").is_some();
 
@@ -1535,21 +1327,12 @@ pub async fn handle_completions(
     );
     let router = state.provider_router.read().await;
     let selection = if !router.is_empty() {
-        let sel = router.select(
-            &provider_mapped_model,
-            None,
-            state.cooldown_manager.as_ref().map(|a| a.as_ref()),
-            Some(&provider_mapped_model),
-        );
-        if router.is_empty() || sel.provider.name.is_empty() {
-            None
-        } else {
-            Some((
-                sel.resolved_model.clone(),
-                sel.provider.protocol.clone(),
-                sel.provider.clone(),
-            ))
-        }
+        let sel = router.select(&provider_mapped_model, None);
+        Some((
+            sel.resolved_model.clone(),
+            sel.provider.protocol.clone(),
+            sel.provider.clone(),
+        ))
     } else {
         None
     };
@@ -1564,17 +1347,10 @@ pub async fn handle_completions(
         match protocol {
             crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
                 // Map model name to provider's native model ID before forwarding
-                let mapped_model = if crate::proxy::providers::router::preserve_explicit_route_model(
-                    Some(&provider_mapped_model),
+                let mapped_model = crate::proxy::providers::router::map_model_for_provider(
                     &openai_req.model,
-                ) {
-                    openai_req.model.clone()
-                } else {
-                    crate::proxy::providers::router::map_model_for_provider(
-                        &openai_req.model,
-                        &provider.model_mapping,
-                    )
-                };
+                    &provider.model_mapping,
+                );
                 let openai_req = crate::proxy::mappers::openai::models::OpenAIRequest {
                     model: mapped_model,
                     ..openai_req
@@ -1592,21 +1368,19 @@ pub async fn handle_completions(
                 }
                 let claude_body =
                     crate::proxy::mappers::openai::request::to_claude_body(&openai_req);
-                // Build complete URL using provider's configured api_path
-                let messages_url = build_openai_provider_url(&provider, "messages");
                 return crate::proxy::providers::zai_anthropic::forward_anthropic_with_provider(
                     &state,
-                    &messages_url,
+                    &provider.base_url,
                     &provider.api_key,
                     &provider.model_mapping,
                     axum::http::Method::POST,
-                    "", // path is already included in base_url
+                    "/v1/messages",
                     &headers,
                     claude_body,
                     openai_req.messages.len(),
                     &provider.name,
-                    None,
-                    Some(&provider_mapped_model),
+                    "anthropic",
+                    llm_trace_id.as_deref(),
                 )
                 .await;
             }
@@ -1618,11 +1392,18 @@ pub async fn handle_completions(
                         &provider,
                         &openai_req,
                         &headers,
+                        llm_trace_id.as_deref(),
                     )
                     .await;
                 }
-                let completion_trace_id = format!("req_{}", chrono::Utc::now().timestamp_subsec_millis());
-                return forward_openai_compatible(&state, &provider, &openai_req, &headers, &completion_trace_id, &provider_mapped_model).await;
+                return forward_openai_compatible(
+                    &state,
+                    &provider,
+                    &openai_req,
+                    &headers,
+                    llm_trace_id.as_deref(),
+                )
+                .await;
             }
             crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
                 // For Codex-style requests, convert Gemini SSE to Codex SSE format
@@ -1631,14 +1412,14 @@ pub async fn handle_completions(
                         .await;
                 }
                 return crate::proxy::providers::zai_gemini::forward_gemini_v1internal_with_provider(
-                    &state, &provider, &openai_req, &headers,
+                    &state, &provider, &openai_req, &headers, llm_trace_id.as_deref(),
                 ).await;
             }
         }
     }
 
     let upstream = state.upstream.clone();
-    let token_manager = state.token_manager.clone();
+    let token_manager = state.token_manager;
     let pool_size = token_manager.len();
     // [FIX] Ensure max_attempts is at least 2 to allow for internal retries
     let max_attempts = MAX_RETRY_ATTEMPTS.min(pool_size.saturating_add(1)).max(2);
@@ -1857,6 +1638,8 @@ pub async fn handle_completions(
                         .header("Connection", "keep-alive")
                         .header("X-Account-Email", &email)
                         .header("X-Mapped-Model", &mapped_model)
+                        .header("X-Upstream-Protocol", "gemini")
+                        .header("X-Upstream-Model", &mapped_model)
                         .body(Body::from_stream(combined_stream))
                         .unwrap()
                         .into_response();
@@ -1958,6 +1741,8 @@ pub async fn handle_completions(
                                 [
                                     ("X-Account-Email", email.as_str()),
                                     ("X-Mapped-Model", mapped_model.as_str()),
+                                    ("X-Upstream-Protocol", "gemini"),
+                                    ("X-Upstream-Model", mapped_model.as_str()),
                                 ],
                                 Json(legacy_resp),
                             )
@@ -2015,6 +1800,8 @@ pub async fn handle_completions(
                 [
                     ("X-Account-Email", email.as_str()),
                     ("X-Mapped-Model", mapped_model.as_str()),
+                    ("X-Upstream-Protocol", "gemini"),
+                    ("X-Upstream-Model", mapped_model.as_str()),
                 ],
                 Json(legacy_resp),
             )
@@ -2116,13 +1903,13 @@ pub async fn handle_list_models(State(state): State<AppState>) -> impl IntoRespo
 
 /// OpenAI Images API: POST /v1/images/generations
 /// 处理图像生成请求，转换为 Gemini API 格式
-#[allow(dead_code)]
+#[allow(dead_code)] // Legacy endpoint retained for clients that still enable chat redirection.
 pub async fn handle_chat_redirection(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    handle_chat_completions(State(state), headers, None, Json(body)).await
+    handle_chat_completions(State(state), headers, Json(body)).await
 }
 
 async fn intercept_chat_to_image(
@@ -2330,17 +2117,8 @@ pub async fn handle_images_generations_internal(
     );
     let router = state.provider_router.read().await;
     let selection = if !router.is_empty() {
-        let sel = router.select(
-            &images_mapped_model,
-            None,
-            state.cooldown_manager.as_ref().map(|a| a.as_ref()),
-            Some(&images_mapped_model),
-        );
-        if router.is_empty() || sel.provider.name.is_empty() {
-            None
-        } else {
-            Some((sel.resolved_model.clone(), sel.provider.clone()))
-        }
+        let sel = router.select(&images_mapped_model, None);
+        Some((sel.resolved_model.clone(), sel.provider.clone()))
     } else {
         None
     };
@@ -2721,17 +2499,8 @@ pub async fn handle_images_edits(
     );
     let router = state.provider_router.read().await;
     let selection = if !router.is_empty() {
-        let sel = router.select(
-            &edits_mapped_model,
-            None,
-            state.cooldown_manager.as_ref().map(|a| a.as_ref()),
-            Some(&edits_mapped_model),
-        );
-        if router.is_empty() || sel.provider.name.is_empty() {
-            None
-        } else {
-            Some((sel.resolved_model.clone(), sel.provider.clone()))
-        }
+        let sel = router.select(&edits_mapped_model, None);
+        Some((sel.resolved_model.clone(), sel.provider.clone()))
     } else {
         None
     };
@@ -3071,12 +2840,11 @@ async fn forward_openai_compatible(
     provider: &crate::proxy::config::UpstreamProvider,
     openai_req: &crate::proxy::mappers::openai::models::OpenAIRequest,
     headers: &axum::http::HeaderMap,
-    trace_id: &str,
-    route_mapped_model: &str, // [FIX] Route-mapped model with provider_id prefix (e.g. "bigop/glm-5.1")
+    llm_trace_id: Option<&str>,
 ) -> Response {
     use axum::body::Body;
     use axum::http::{header, HeaderValue};
-    
+    use bytes::Bytes;
     use futures::StreamExt;
 
     let body_val = match serde_json::to_value(openai_req) {
@@ -3086,20 +2854,14 @@ async fn forward_openai_compatible(
         }
     };
 
-    // Build URL using provider's configured api_path (or default)
-    let url = build_openai_provider_url(provider, "chat/completions");
-    tracing::info!(
-        "[OpenAI Compatible] Provider: {} | model: {} | url: {}",
-        provider.name,
-        openai_req.model,
-        url
+    let url = format!(
+        "{}/v1/chat/completions",
+        provider.base_url.trim_end_matches('/')
     );
-
     let timeout_secs = provider
         .request_timeout_secs
         .unwrap_or(state.request_timeout)
         .max(5);
-    let _upstream_proxy = state.upstream_proxy.read().await.clone();
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -3136,43 +2898,20 @@ async fn forward_openai_compatible(
 
     let body_bytes = serde_json::to_vec(&body_val).unwrap_or_default();
 
-    // [FIX] Log upstream request and cache for traffic log detail modal
-    let state_for_trace = state.clone();
-    let trace_id_for_req = trace_id.to_string();
-    let url_for_req = url.clone();
-    let model_for_req = route_mapped_model.to_string();
-    let body_bytes_for_log = body_bytes.clone();
-    tokio::spawn(async move {
-        // Cache upstream request body
-        state_for_trace
+    // Write request body to upstream trace cache for traffic logging
+    if let Some(trace_id) = llm_trace_id {
+        let request_body_str = String::from_utf8(body_bytes.clone()).ok();
+        state
             .upstream_trace_cache
             .put(
-                &trace_id_for_req,
+                trace_id,
                 crate::proxy::upstream_trace::UpstreamTrace {
-                    request_body: Some(
-                        String::from_utf8_lossy(&body_bytes_for_log).to_string(),
-                    ),
-                    response_body: None,
+                    request_body: request_body_str,
+                    response_body: None, // Stream — cannot collect full response
                 },
             )
             .await;
-        // Log upstream request
-        let entry = crate::proxy::llm_logger::LlmLogEntry {
-            trace_id: trace_id_for_req.clone(),
-            timestamp: crate::proxy::llm_logger::now_timestamp(),
-            stage: "upstream_request",
-            method: "POST".to_string(),
-            url: url_for_req.clone(),
-            model: Some(model_for_req.clone()),
-            status: None,
-            content_type: Some("application/json".to_string()),
-            body_size_bytes: body_bytes_for_log.len(),
-            body: crate::proxy::llm_logger::LlmBody::Text(
-                String::from_utf8_lossy(&body_bytes_for_log).to_string(),
-            ),
-        };
-        crate::proxy::llm_logger::log_entry(&entry);
-    });
+    }
 
     let req = client.post(&url).headers(req_headers).body(body_bytes);
 
@@ -3192,62 +2931,37 @@ async fn forward_openai_compatible(
 
     let mut out = Response::builder().status(status);
     out = out.header("x-provider-name", &provider.name);
-    // [FIX] Set mapped model (with route ID) and upstream info for traffic logging
-    out = out.header("x-mapped-model", route_mapped_model);
-    out = out.header("x-upstream-model", &openai_req.model);
-    out = out.header("x-upstream-url", &url);
-    // Extract path from full URL for X-Upstream-Path
-    if let Some(pos) = url.find("://") {
-        let after_scheme = &url[pos + 3..];
-        if let Some(slash_pos) = after_scheme.find('/') {
-            out = out.header("x-upstream-path", &after_scheme[slash_pos..]);
+
+    // Add upstream protocol, model and URL headers for monitor middleware
+    let upstream_protocol_str = match provider.protocol {
+        crate::proxy::config::ProviderProtocol::AnthropicPassthrough => "anthropic",
+        crate::proxy::config::ProviderProtocol::OpenAICompatible => "openai",
+        crate::proxy::config::ProviderProtocol::GeminiV1Internal => "gemini",
+    };
+    out = out.header("X-Upstream-Protocol", upstream_protocol_str);
+    if let Some(model) = openai_req.model.split('/').last() {
+        out = out.header("X-Upstream-Model", model);
+    }
+    // Extract just the path from the full URL
+    if let Some(path) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    {
+        if let Some(slash_pos) = path.find('/') {
+            out = out.header("X-Upstream-URL", &path[slash_pos..]);
         }
     }
+
     if let Some(ct) = resp.headers().get(header::CONTENT_TYPE) {
         out = out.header(header::CONTENT_TYPE, ct.clone());
     }
 
-    let stream = resp.bytes_stream();
+    let stream = resp.bytes_stream().map(|chunk| match chunk {
+        Ok(b) => Ok::<Bytes, std::io::Error>(b),
+        Err(e) => Ok(Bytes::from(format!("Upstream stream error: {}", e))),
+    });
 
-    // [FIX] Wrap stream to collect upstream response for traffic log detail modal
-    let trace_id_for_resp = trace_id.to_string();
-    let state_for_resp = state.clone();
-    let url_for_resp = url.clone();
-    let model_for_resp = openai_req.model.clone();
-    let status_for_resp = status.as_u16();
-    let wrapped_stream = async_stream::stream! {
-        let mut collected: Vec<u8> = Vec::new();
-        let mut pinned = Box::pin(stream);
-        while let Some(chunk) = pinned.next().await {
-            if let Ok(ref b) = chunk {
-                collected.extend_from_slice(b);
-            }
-            yield chunk;
-        }
-        let raw_text = String::from_utf8_lossy(&collected).to_string();
-        // Cache upstream response body
-        state_for_resp.upstream_trace_cache.put(&trace_id_for_resp, crate::proxy::upstream_trace::UpstreamTrace {
-            request_body: None,
-            response_body: Some(raw_text.clone()),
-        }).await;
-        // Log upstream response
-        let body = crate::proxy::llm_logger::LlmBody::Text(raw_text);
-        let entry = crate::proxy::llm_logger::LlmLogEntry {
-            trace_id: trace_id_for_resp.clone(),
-            timestamp: crate::proxy::llm_logger::now_timestamp(),
-            stage: "upstream_response",
-            method: "POST".to_string(),
-            url: url_for_resp.clone(),
-            model: Some(model_for_resp.clone()),
-            status: Some(status_for_resp),
-            content_type: Some("text/event-stream".to_string()),
-            body_size_bytes: collected.len(),
-            body,
-        };
-        crate::proxy::llm_logger::log_entry(&entry);
-    };
-
-    out.body(Body::from_stream(wrapped_stream)).unwrap_or_else(|_| {
+    out.body(Body::from_stream(stream)).unwrap_or_else(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to build response",
@@ -3668,6 +3382,7 @@ async fn forward_openai_compat_as_codex_sse(
     provider: &crate::proxy::config::UpstreamProvider,
     openai_req: &crate::proxy::mappers::openai::OpenAIRequest,
     headers: &axum::http::HeaderMap,
+    llm_trace_id: Option<&str>,
 ) -> Response {
     use crate::proxy::providers::zai_anthropic::build_client;
     use axum::body::Body;
@@ -3675,8 +3390,13 @@ async fn forward_openai_compat_as_codex_sse(
     use futures::StreamExt;
     use rand::Rng;
 
-    // Build URL using provider's configured api_path (or default)
-    let url = build_openai_provider_url(provider, "chat/completions");
+    // Build URL: {base_url}/v1/chat/completions
+    let base = provider.base_url.trim_end_matches('/');
+    let url = if base.ends_with("/v1") {
+        format!("{}/chat/completions", base)
+    } else {
+        format!("{}/v1/chat/completions", base)
+    };
 
     let timeout_secs = state.request_timeout.max(5);
     let upstream_proxy = state.upstream_proxy.read().await.clone();
@@ -3687,7 +3407,7 @@ async fn forward_openai_compat_as_codex_sse(
 
     // Build request body — strip Codex-specific fields that upstream may not understand
     let mut body = serde_json::to_value(openai_req).unwrap_or_default();
-    body["stream"] = serde_json::Value::Bool(true);
+    body["stream"] = serde_json::Value::Bool(openai_req.stream);
 
     // Clean up null fields that most OpenAI-compatible providers don't accept
     if let Some(obj) = body.as_object_mut() {
@@ -3716,6 +3436,18 @@ async fn forward_openai_compat_as_codex_sse(
     }
 
     let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+    if let Some(trace_id) = llm_trace_id {
+        state
+            .upstream_trace_cache
+            .put(
+                trace_id,
+                crate::proxy::upstream_trace::UpstreamTrace {
+                    request_body: String::from_utf8(body_bytes.clone()).ok(),
+                    response_body: None,
+                },
+            )
+            .await;
+    }
 
     tracing::info!(
         "[Codex→OpenAI] Forwarding to provider: {} (model: {}, url: {})",
@@ -3780,6 +3512,50 @@ async fn forward_openai_compat_as_codex_sse(
         content_type
     );
 
+    if status.is_success() && !openai_req.stream {
+        let full_body = resp.bytes().await.unwrap_or_default();
+        let body_str = String::from_utf8_lossy(&full_body).into_owned();
+        if let Some(trace_id) = llm_trace_id {
+            state
+                .upstream_trace_cache
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None,
+                        response_body: Some(body_str),
+                    },
+                )
+                .await;
+        }
+        let upstream_json: Value = match serde_json::from_slice(&full_body) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Invalid upstream JSON response: {}", error),
+                )
+                    .into_response();
+            }
+        };
+        let response_json = openai_chat_to_responses_json(&upstream_json, &model_name);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .header("X-Provider-Name", &provider_name)
+            .header("X-Mapped-Model", &model_name)
+            .header("X-Upstream-Protocol", "openai")
+            .header("X-Upstream-Model", &model_name)
+            .header("X-Upstream-URL", "/v1/chat/completions")
+            .body(Body::from(response_json.to_string()))
+            .unwrap_or_else(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build response",
+                )
+                    .into_response()
+            });
+    }
+
     // Detect non-streaming response (error or non-SSE)
     if !status.is_success()
         || (!content_type.contains("text/event-stream") && !content_type.contains("stream"))
@@ -3787,6 +3563,18 @@ async fn forward_openai_compat_as_codex_sse(
         // Try to read the full response as JSON error
         let full_body = resp.bytes().await.unwrap_or_default();
         let body_str = String::from_utf8_lossy(&full_body).to_string();
+        if let Some(trace_id) = llm_trace_id {
+            state
+                .upstream_trace_cache
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None,
+                        response_body: Some(body_str.clone()),
+                    },
+                )
+                .await;
+        }
         tracing::error!(
             "[Codex→OpenAI] Non-SSE response (status={}): {}",
             status,
@@ -3916,7 +3704,8 @@ async fn forward_openai_compat_as_codex_sse(
     let item_id = format!("item-{}", &random_str[..16]);
 
     let provider_name_for_stream = provider_name.clone();
-    let _model_name_for_stream = model_name.clone();
+    let trace_cache_for_stream = state.upstream_trace_cache.clone();
+    let trace_id_for_stream = llm_trace_id.map(str::to_owned);
 
     let codex_stream = async_stream::stream! {
         // 1. response.created
@@ -3941,13 +3730,19 @@ async fn forward_openai_compat_as_codex_sse(
         yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&content_part_added).unwrap())));
 
         let mut accumulated_text = String::new();
+        let mut upstream_raw = Vec::new();
+        let mut pending_sse = String::new();
         let mut stream = resp.bytes_stream();
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(bytes) => {
+                    upstream_raw.extend_from_slice(&bytes);
                     let text = String::from_utf8_lossy(&bytes);
-                    for line in text.lines() {
+                    pending_sse.push_str(&text);
+                    while let Some(newline) = pending_sse.find('\n') {
+                        let line = pending_sse[..newline].trim().to_string();
+                        pending_sse.drain(..=newline);
                         let line = line.trim();
                         if !line.starts_with("data: ") { continue; }
                         let json_str = line.trim_start_matches("data: ").trim();
@@ -4002,6 +3797,24 @@ async fn forward_openai_compat_as_codex_sse(
             }
         }
 
+        if !pending_sse.trim().is_empty() {
+            tracing::warn!(
+                "[Codex→OpenAI] Incomplete trailing SSE frame ({} bytes)",
+                pending_sse.len()
+            );
+        }
+        if let Some(trace_id) = trace_id_for_stream.as_deref() {
+            trace_cache_for_stream
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None,
+                        response_body: Some(String::from_utf8_lossy(&upstream_raw).into_owned()),
+                    },
+                )
+                .await;
+        }
+
         tracing::info!("[Codex→OpenAI] Streaming complete. Total chars: {}, provider: {}", accumulated_text.len(), provider_name_for_stream);
 
         // Final events
@@ -4045,6 +3858,9 @@ async fn forward_openai_compat_as_codex_sse(
         .header("Connection", "keep-alive")
         .header("X-Provider-Name", &provider_name)
         .header("X-Mapped-Model", &model_name)
+        .header("X-Upstream-Protocol", "openai")
+        .header("X-Upstream-Model", &model_name)
+        .header("X-Upstream-URL", "/v1/chat/completions")
         .body(Body::from_stream(codex_stream))
         .unwrap_or_else(|_| {
             (
@@ -4053,6 +3869,92 @@ async fn forward_openai_compat_as_codex_sse(
             )
                 .into_response()
         })
+}
+
+fn openai_chat_to_responses_json(upstream: &Value, fallback_model: &str) -> Value {
+    let response_id = upstream
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("resp-proxy");
+    let model = upstream
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_model);
+    let message = upstream
+        .pointer("/choices/0/message")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+    let mut output = vec![json!({
+        "id": format!("msg_{}", response_id),
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": content, "annotations": [] }]
+    })];
+
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for call in tool_calls {
+            output.push(json!({
+                "id": call.get("id").cloned().unwrap_or(Value::Null),
+                "type": "function_call",
+                "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                "name": call.pointer("/function/name").cloned().unwrap_or(Value::Null),
+                "arguments": call.pointer("/function/arguments").cloned().unwrap_or_else(|| Value::String(String::new())),
+                "status": "completed"
+            }));
+        }
+    }
+
+    let usage = upstream.get("usage").cloned().unwrap_or_else(|| json!({}));
+    json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": upstream.get("created").cloned().unwrap_or_else(|| json!(chrono::Utc::now().timestamp())),
+        "status": "completed",
+        "model": model,
+        "output": output,
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens").cloned().unwrap_or_else(|| json!(0)),
+            "output_tokens": usage.get("completion_tokens").cloned().unwrap_or_else(|| json!(0)),
+            "total_tokens": usage.get("total_tokens").cloned().unwrap_or_else(|| json!(0))
+        }
+    })
+}
+
+#[cfg(test)]
+mod provider_responses_tests {
+    use super::openai_chat_to_responses_json;
+    use serde_json::json;
+
+    #[test]
+    fn converts_non_stream_chat_response_without_losing_usage_or_tools() {
+        let upstream = json!({
+            "id": "chatcmpl-1",
+            "created": 123,
+            "model": "gpt-5.6-sol",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{\"id\":1}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+
+        let converted = openai_chat_to_responses_json(&upstream, "fallback");
+        assert_eq!(converted["object"], "response");
+        assert_eq!(converted["model"], "gpt-5.6-sol");
+        assert_eq!(converted["output"][0]["content"][0]["text"], "done");
+        assert_eq!(converted["output"][1]["name"], "lookup");
+        assert_eq!(converted["usage"]["total_tokens"], 15);
+    }
 }
 
 /// Forward request to a Gemini-compatible provider and convert the response

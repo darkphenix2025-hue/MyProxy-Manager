@@ -621,7 +621,7 @@
             },
             "port": "Listen Port",
             "port_tooltip": "TCP port the local API Proxy listens on. Stop the service to change it, then restart to apply.",
-            "port_hint": "Default 8045, restart required to apply changes",
+            "port_hint": "Default 8150, restart required to apply changes",
             "auto_start": "Auto Start with App",
             "auto_start_tooltip": "Automatically starts the local API Proxy service when the app launches.",
             "allow_lan_access": "Allow LAN Access",
@@ -1357,8 +1357,8 @@
         },
         "protocols": {
             "anthropic_passthrough": "Anthropic",
-            "openai_compatible": "OpenAI",
-            "gemini_v1internal": "Gemini"
+            "open_a_i_compatible": "OpenAI",
+            "gemini_v1_internal": "Gemini"
         },
         "dispatch_modes": {
             "exclusive": "Exclusive",

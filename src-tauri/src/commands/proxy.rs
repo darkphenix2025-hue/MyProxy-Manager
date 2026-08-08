@@ -257,8 +257,7 @@ pub async fn ensure_admin_server(
         integration.clone(),
         cloudflared_state,
         config.proxy_pool.clone(),
-        config.model_cooldown.clone(),
-        config.fallback_model.clone(),
+        config.translator.clone(),
     )
     .await
     {
@@ -510,9 +509,6 @@ pub async fn update_model_mapping(
     // 2. 无论是否运行，都保存到全局配置持久化
     let mut app_config = crate::modules::config::load_app_config().map_err(|e| e)?;
     app_config.proxy.custom_mapping = config.custom_mapping;
-    // 保存兜底模型和冷却配置
-    app_config.proxy.fallback_model = config.fallback_model;
-    app_config.proxy.model_cooldown = config.model_cooldown;
     crate::modules::config::save_app_config(&app_config).map_err(|e| e)?;
 
     Ok(())
@@ -822,14 +818,10 @@ pub async fn test_provider_models(
     request: TestProviderModelsRequest,
     proxy_state: State<'_, ProxyServiceState>,
 ) -> Result<TestProviderModelsResponse, String> {
+
     let provider = request.provider;
 
-    if provider.api_key.trim().is_empty()
-        && !matches!(
-            provider.protocol,
-            crate::proxy::config::ProviderProtocol::OpenAICompatible
-        )
-    {
+    if provider.api_key.trim().is_empty() {
         return Err("Provider API key is empty".into());
     }
 
@@ -907,42 +899,18 @@ async fn test_single_model(
     use crate::proxy::config::ProviderProtocol;
 
     let base = provider.base_url.trim_end_matches('/');
-
-    fn has_api_version_suffix(base: &str) -> bool {
-        let Some((_, last_segment)) = base.rsplit_once('/') else {
-            return false;
-        };
-        last_segment.len() >= 2
-            && last_segment.starts_with('v')
-            && last_segment[1..].chars().all(|c| c.is_ascii_digit())
-    }
-
-    fn openai_chat_url(base: &str) -> String {
-        if base.ends_with("/chat/completions") {
-            base.to_string()
-        } else if has_api_version_suffix(base) {
-            format!("{}/chat/completions", base)
-        } else {
-            format!("{}/v1/chat/completions", base)
-        }
-    }
-
-    fn anthropic_messages_url(base: &str) -> String {
-        if base.ends_with("/messages") {
-            base.to_string()
-        } else if has_api_version_suffix(base) {
-            format!("{}/messages", base)
-        } else {
-            format!("{}/v1/messages", base)
-        }
-    }
+    let has_v1 = base.contains("/v1/");
 
     let resp = match provider.protocol {
         ProviderProtocol::AnthropicPassthrough => {
             // Anthropic-compatible endpoint: join base_url with /v1/messages path.
             // e.g. BAILIAN: https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages
             // e.g. BIGMODEL: https://open.bigmodel.cn/api/anthropic/v1/messages
-            let url = anthropic_messages_url(base);
+            let url = if has_v1 {
+                base.to_string()
+            } else {
+                format!("{}/v1/messages", base)
+            };
             let body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
@@ -959,22 +927,22 @@ async fn test_single_model(
                 .await
         }
         ProviderProtocol::OpenAICompatible => {
-            let url = openai_chat_url(base);
+            let url = if has_v1 {
+                base.to_string()
+            } else {
+                format!("{}/v1/chat/completions", base)
+            };
             let body = serde_json::json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "hi"}]
             });
-            let request = client
+            client
                 .post(&url)
                 .header("content-type", "application/json")
-                // BAILIAN Coding Plan identifies coding-agent requests by User-Agent.
-                .header("user-agent", "claude-code/1.0.0")
-                .json(&body);
-            if provider.api_key.trim().is_empty() {
-                request.send().await
-            } else {
-                request.bearer_auth(&provider.api_key).send().await
-            }
+                .bearer_auth(&provider.api_key)
+                .json(&body)
+                .send()
+                .await
         }
         ProviderProtocol::GeminiV1Internal => {
             let url = format!("{}:generateContent", base);

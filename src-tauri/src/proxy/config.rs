@@ -231,16 +231,15 @@ impl Default for ZaiConfig {
 
 /// Generic upstream provider protocol type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderProtocol {
     /// Provider speaks Anthropic Messages API. Requests forwarded as-is.
-    #[serde(rename = "anthropic_passthrough")]
     AnthropicPassthrough,
     /// Provider speaks OpenAI Chat Completions API.
-    #[serde(rename = "openai_compatible", alias = "open_a_i_compatible")]
+    #[serde(alias = "openai_compatible")]
     OpenAICompatible,
     /// Provider speaks Google v1internal (Gemini) API.
     /// Requests are transformed from OpenAI/Claude to Gemini format.
-    #[serde(rename = "gemini_v1internal", alias = "gemini_v1_internal")]
     GeminiV1Internal,
 }
 
@@ -279,10 +278,6 @@ pub struct UpstreamProvider {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub base_url: String,
-    /// API path prefix for OpenAI-compatible providers. Defaults to `/v1` if None.
-    /// Use for providers whose base_url already contains a version path (e.g. `/api/coding/paas/v4`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_path: Option<String>,
     #[serde(default)]
     pub api_key: String,
     #[serde(default)]
@@ -303,10 +298,6 @@ pub struct UpstreamProvider {
     /// Optional HTTP request timeout in seconds.
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
-    /// Whether this provider supports the `/v1/messages/count_tokens` endpoint.
-    /// When false, the proxy returns a default response (0 tokens) instead of forwarding.
-    #[serde(default = "default_true")]
-    pub supports_count_tokens: bool,
 }
 
 /// Validate that a provider_id matches the allowed format:
@@ -553,9 +544,9 @@ pub struct ProxyConfig {
     /// 是否自动启动
     pub auto_start: bool,
 
-    /// 自定义精确模型映射表 (key: 原始模型名, value: 目标模型名或权重列表)
+    /// 自定义精确模型映射表 (key: 原始模型名, value: 目标模型名)
     #[serde(default)]
-    pub custom_mapping: std::collections::HashMap<String, ModelRouteTarget>,
+    pub custom_mapping: std::collections::HashMap<String, String>,
 
     /// API 请求超时时间(秒)
     #[serde(default = "default_request_timeout")]
@@ -572,14 +563,6 @@ pub struct ProxyConfig {
     /// 上游代理配置
     #[serde(default)]
     pub upstream_proxy: UpstreamProxyConfig,
-
-    /// 模型冷却配置
-    #[serde(default)]
-    pub model_cooldown: ModelCooldownConfig,
-
-    /// 兜底模型配置
-    #[serde(default)]
-    pub fallback_model: FallbackModelConfig,
 
     /// Multi-provider API gateway configuration.
     /// When non-empty, the legacy `zai` field is ignored.
@@ -636,6 +619,10 @@ pub struct ProxyConfig {
     /// 代理池配置
     #[serde(default)]
     pub proxy_pool: ProxyPoolConfig,
+
+    /// 协议转换注册表配置 (灰度发布)
+    #[serde(default)]
+    pub translator: super::translator::config::TranslatorConfig,
 }
 
 /// 上游代理配置
@@ -653,7 +640,7 @@ impl Default for ProxyConfig {
             enabled: false,
             allow_lan_access: false, // 默认仅本机访问，隐私优先
             auth_mode: ProxyAuthMode::default(),
-            port: 8045,
+            port: 8150,
             api_key: format!("sk-{}", uuid::Uuid::new_v4().simple()),
             admin_password: None,
             auto_start: false,
@@ -674,8 +661,7 @@ impl Default for ProxyConfig {
             global_system_prompt: GlobalSystemPromptConfig::default(),
             proxy_pool: ProxyPoolConfig::default(),
             image_thinking_mode: None,
-            model_cooldown: ModelCooldownConfig::default(),
-            fallback_model: FallbackModelConfig::default(),
+            translator: super::translator::config::TranslatorConfig::default(),
         }
     }
 }
@@ -686,66 +672,6 @@ fn default_request_timeout() -> u64 {
 
 fn default_zai_base_url() -> String {
     "https://api.z.ai/api/anthropic".to_string()
-}
-
-fn default_cooldown_duration() -> u64 {
-    600 // 默认 10 分钟
-}
-
-fn default_weight() -> u32 {
-    1
-}
-
-/// 模型路由目标（支持单目标或多目标权重分配）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ModelRouteTarget {
-    /// 单目标（向后兼容旧格式 "ali/qwen3.5-plus"）
-    Single(String),
-    /// 多目标带权重
-    Weighted(Vec<WeightedTarget>),
-}
-
-/// 带权重的路由目标
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WeightedTarget {
-    pub target: String,
-    #[serde(default = "default_weight")]
-    pub weight: u32,
-}
-
-/// 模型冷却配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelCooldownConfig {
-    /// 是否启用模型冷却
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// 冷却时长（秒），默认 600（10 分钟）
-    #[serde(default = "default_cooldown_duration")]
-    pub duration_secs: u64,
-}
-
-impl Default for ModelCooldownConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            duration_secs: 600,
-        }
-    }
-}
-
-/// 兜底模型配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FallbackModelConfig {
-    /// 是否启用兜底模型
-    #[serde(default)]
-    pub enabled: bool,
-    /// 兜底模型名称
-    #[serde(default)]
-    pub model: String,
-    /// 兜底 Provider ID（可选，留空则自动匹配）
-    #[serde(default)]
-    pub provider_id: String,
 }
 
 impl ProxyConfig {

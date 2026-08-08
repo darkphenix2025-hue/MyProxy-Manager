@@ -93,7 +93,7 @@ const NetworkMonitor: React.FC = () => {
                                         {req.cmd}
                                     </td>
                                     <td className="text-right text-xs opacity-70">
-                                        {new Date(req.startTime).toLocaleTimeString()}
+                                        {new Date(req.startTime).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                                     </td>
                                     <td className="text-right text-xs opacity-70">
                                         {req.duration ? `${req.duration}ms` : '-'}

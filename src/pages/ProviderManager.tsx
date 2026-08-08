@@ -37,8 +37,8 @@ interface ModelTestResult {
 
 const PROTOCOL_OPTIONS: { value: ProviderProtocol; label: string }[] = [
     { value: 'anthropic_passthrough', label: 'Anthropic' },
-    { value: 'openai_compatible', label: 'OpenAI' },
-    { value: 'gemini_v1internal', label: 'Gemini' },
+    { value: 'open_a_i_compatible' as ProviderProtocol, label: 'OpenAI' },
+    { value: 'gemini_v1_internal' as ProviderProtocol, label: 'Gemini' },
 ];
 
 const DISPATCH_OPTIONS: { value: ProviderDispatchMode; label: string }[] = [
@@ -49,8 +49,8 @@ const DISPATCH_OPTIONS: { value: ProviderDispatchMode; label: string }[] = [
 
 const PROTOCOL_COLORS: Record<ProviderProtocol, string> = {
     anthropic_passthrough: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800',
-    openai_compatible: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800',
-    gemini_v1internal: 'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800',
+    open_a_i_compatible: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800',
+    gemini_v1_internal: 'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800',
 };
 
 function createEmptyProvider(): UpstreamProvider {

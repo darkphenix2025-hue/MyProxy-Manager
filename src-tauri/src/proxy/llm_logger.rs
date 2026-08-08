@@ -49,11 +49,13 @@ pub struct LlmLogEntry {
 }
 
 /// Initialize the logger: create the details directory if needed.
+#[allow(dead_code)]
 pub fn init() {
     let _ = std::fs::create_dir_all(DETAILS_DIR);
 }
 
 /// Enable or disable LLM traffic logging.
+#[allow(dead_code)]
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
     if enabled {

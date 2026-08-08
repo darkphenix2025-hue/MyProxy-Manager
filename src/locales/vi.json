@@ -557,7 +557,7 @@
             },
             "port": "Cổng lắng nghe (Port)",
             "port_tooltip": "Cổng TCP mà API Proxy cục bộ sẽ lắng nghe. Dừng dịch vụ để thay đổi, sau đó khởi động lại để áp dụng.",
-            "port_hint": "Mặc định 8045, cần khởi động lại để áp dụng",
+            "port_hint": "Mặc định 8150, cần khởi động lại để áp dụng",
             "auto_start": "Tự động chạy cùng App",
             "auto_start_tooltip": "Tự động bắt đầu dịch vụ API Proxy cục bộ khi mở ứng dụng.",
             "allow_lan_access": "Cho phép truy cập qua LAN",

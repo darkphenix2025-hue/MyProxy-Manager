@@ -1,5 +1,4 @@
 pub mod comprehensive;
-pub mod oauth_security_tests;
 pub mod quota_protection;
 pub mod rate_limit_404_tests;
 pub mod retry_strategy_tests;

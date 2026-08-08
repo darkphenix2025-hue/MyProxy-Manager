@@ -14,23 +14,23 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 1420,
+    port: 1450,
     strictPort: true,
-    host: host || '127.0.0.1',
+    host: host || "0.0.0.0",
     hmr: host
       ? {
         protocol: "ws",
         host,
-        port: 1421,
+        port: 1451,
       }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
+      // tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
     proxy: {
       "/api/": {
-        target: process.env.VITE_API_PROXY_URL || "http://127.0.0.1:8045",
+        target: process.env.VITE_API_PROXY_URL || "http://127.0.0.1:8150",
         changeOrigin: true,
       },
     },

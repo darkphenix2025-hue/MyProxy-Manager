@@ -98,7 +98,6 @@ pub fn load_app_config() -> Result<AppConfig, String> {
 }
 
 /// Save application configuration
-/// [R2-SEC-004] 配置文件写入后限制权限（仅所有者可读写）
 pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     let data_dir = get_data_dir()?;
     let config_path = data_dir.join(CONFIG_FILE);
@@ -106,19 +105,5 @@ pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     let content = serde_json::to_string_pretty(config)
         .map_err(|e| format!("failed_to_serialize_config: {}", e))?;
 
-    fs::write(&config_path, content).map_err(|e| format!("failed_to_save_config: {}", e))?;
-
-    // [R2-SEC-004] 限制配置文件权限为 owner-only (0o600)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&config_path)
-            .map_err(|e| format!("failed_to_read_perms: {}", e))?
-            .permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&config_path, perms)
-            .map_err(|e| format!("failed_to_set_perms: {}", e))?;
-    }
-
-    Ok(())
+    fs::write(&config_path, content).map_err(|e| format!("failed_to_save_config: {}", e))
 }

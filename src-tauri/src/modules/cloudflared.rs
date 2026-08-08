@@ -55,7 +55,7 @@ impl Default for CloudflaredConfig {
         Self {
             enabled: false,
             mode: TunnelMode::Quick,
-            port: 8045,
+            port: 8150,
             token: None,
             use_http2: true, // 默认启用http2，更稳定
         }

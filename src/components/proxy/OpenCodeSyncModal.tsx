@@ -186,7 +186,7 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
                                 type="text"
                                 value={customBaseUrl}
                                 onChange={(e) => setCustomBaseUrl(e.target.value)}
-                                placeholder="e.g. http://antigravity-manager:8045/v1"
+                                placeholder="e.g. http://antigravity-manager:8150/v1"
                                 className="w-full px-3 py-1.5 text-xs bg-white dark:bg-base-100 border border-gray-200 dark:border-base-300 rounded-lg focus:ring-1 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                             />
                             {customBaseUrl !== proxyUrl && (

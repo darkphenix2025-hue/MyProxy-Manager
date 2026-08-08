@@ -220,14 +220,16 @@ pub fn get_stats() -> Result<crate::proxy::monitor::ProxyStats, String> {
 pub fn get_log_detail(log_id: &str) -> Result<ProxyRequestLog, String> {
     let conn = connect_db()?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, timestamp, method, url, status, duration, model, error,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, timestamp, method, url, status, duration, model, error,
                 request_body, response_body, input_tokens, output_tokens,
                 account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url,
                 upstream_request_body, upstream_response_body
          FROM request_logs
-         WHERE id = ?1"
-    ).map_err(|e| e.to_string())?;
+         WHERE id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
 
     stmt.query_row([log_id], |row| {
         Ok(ProxyRequestLog {
@@ -497,14 +499,16 @@ pub fn get_logs_filtered(
 pub fn get_all_logs_for_export() -> Result<Vec<ProxyRequestLog>, String> {
     let conn = connect_db()?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, timestamp, method, url, status, duration, model, error,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, timestamp, method, url, status, duration, model, error,
                 request_body, response_body, input_tokens, output_tokens,
                 account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url,
                 upstream_request_body, upstream_response_body
          FROM request_logs
-         ORDER BY timestamp DESC"
-    ).map_err(|e| e.to_string())?;
+         ORDER BY timestamp DESC",
+        )
+        .map_err(|e| e.to_string())?;
 
     let logs_iter = stmt
         .query_map([], |row| {
