@@ -1720,11 +1720,13 @@ pub async fn execute_opencode_restore() -> Result<(), String> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct GetOpencodeConfigRequest {
     pub file_name: Option<String>,
 }
 
 #[tauri::command]
+#[allow(dead_code)]
 pub async fn get_opencode_config_content(
     request: GetOpencodeConfigRequest,
 ) -> Result<String, String> {

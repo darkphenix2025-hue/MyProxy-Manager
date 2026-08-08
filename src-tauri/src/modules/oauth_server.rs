@@ -24,6 +24,7 @@ pub(crate) struct OAuthFlowState {
     #[allow(dead_code)]
     redirect_uri: String,
     state: String,
+    #[allow(dead_code)]
     state_consumed: bool,
     client_key: String,
     cancel_tx: watch::Sender<bool>,
@@ -570,6 +571,7 @@ pub fn prepare_oauth_flow_manually(
 
 /// [SEC-003 + R2-SEC-002] Validate and invalidate OAuth state (one-time use).
 /// Returns true if state matches and has not been consumed, false otherwise.
+#[allow(dead_code)]
 pub fn validate_web_oauth_state(received_state: &str) -> bool {
     if let Ok(mut lock) = get_oauth_flow_state().lock() {
         if let Some(flow) = lock.as_mut() {

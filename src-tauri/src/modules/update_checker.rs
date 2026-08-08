@@ -408,6 +408,7 @@ pub fn update_last_check_time() -> Result<(), String> {
 }
 
 /// Detect if the app was installed via Homebrew Cask (macOS only)
+#[allow(dead_code)]
 pub fn is_homebrew_installed() -> bool {
     #[cfg(target_os = "macos")]
     {
