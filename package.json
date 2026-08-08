@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "preflight": "npm run test:version && npm run check:version && npm run build",
     "check:version": "node scripts/check-version.mjs",
     "test:version": "node --test scripts/check-version.test.mjs",
     "preview": "vite preview",
