@@ -567,7 +567,7 @@
             },
             "port": "Porta de Escuta",
             "port_tooltip": "Porta TCP que o Proxy da API local escuta. Pare o serviço para alterá-la, depois reinicie para aplicar.",
-            "port_hint": "Padrão 8045, reinício necessário para aplicar alterações",
+            "port_hint": "Padrão 8150, reinício necessário para aplicar alterações",
             "auto_start": "Iniciar Automaticamente com o App",
             "auto_start_tooltip": "Inicia automaticamente o serviço de Proxy da API local quando o aplicativo é iniciado.",
             "allow_lan_access": "Permitir Acesso LAN",

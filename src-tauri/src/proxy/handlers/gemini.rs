@@ -43,6 +43,12 @@ pub async fn handle_generate(
     let trace_id = format!("req_{}", chrono::Utc::now().timestamp_subsec_millis());
     let debug_cfg = state.debug_logging.read().await.clone();
 
+    // [FIX #1707] Extract llm_trace_id from middleware for upstream trace cache
+    let llm_trace_id = headers
+        .get("x-llm-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // [NEW] Detect Client Adapter
     let client_adapter = CLIENT_ADAPTERS
         .iter()
@@ -94,7 +100,11 @@ pub async fn handle_generate(
     let router = state.provider_router.read().await;
     let selection = if !router.is_empty() {
         let sel = router.select(&gemini_mapped_model, None);
-        Some((sel.resolved_model.clone(), sel.provider.clone()))
+        if router.is_empty() || sel.provider.name.is_empty() {
+            None
+        } else {
+            Some((sel.resolved_model.clone(), sel.provider.clone()))
+        }
     } else {
         None
     };
@@ -103,14 +113,41 @@ pub async fn handle_generate(
     if let Some((resolved_model, provider)) = selection {
         match provider.protocol {
             crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
-                return Ok(crate::proxy::providers::zai_gemini::forward_gemini_via_anthropic(
-                    &state, &provider, &resolved_model, &body, &headers, client_wants_stream,
-                ).await);
+                let mut resp = crate::proxy::providers::zai_gemini::forward_gemini_via_anthropic(
+                    &state,
+                    &provider,
+                    &resolved_model,
+                    &body,
+                    &headers,
+                    client_wants_stream,
+                    llm_trace_id.as_deref(),
+                )
+                .await;
+
+                resp.headers_mut().insert(
+                    "X-Upstream-Protocol",
+                    axum::http::HeaderValue::from_static("anthropic"),
+                );
+                return Ok(resp);
             }
             crate::proxy::config::ProviderProtocol::OpenAICompatible => {
-                return Ok(crate::proxy::providers::zai_gemini::forward_gemini_via_openai_compat(
-                    &state, &provider, &resolved_model, &body, &headers, client_wants_stream,
-                ).await);
+                let mut resp =
+                    crate::proxy::providers::zai_gemini::forward_gemini_via_openai_compat(
+                        &state,
+                        &provider,
+                        &resolved_model,
+                        &body,
+                        &headers,
+                        client_wants_stream,
+                        llm_trace_id.as_deref(),
+                    )
+                    .await;
+
+                resp.headers_mut().insert(
+                    "X-Upstream-Protocol",
+                    axum::http::HeaderValue::from_static("openai"),
+                );
+                return Ok(resp);
             }
             crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
                 // Fall through to existing TokenManager + Gemini v1internal path
@@ -120,7 +157,7 @@ pub async fn handle_generate(
 
     // 2. 获取 UpstreamClient 和 TokenManager
     let upstream = state.upstream.clone();
-    let token_manager = state.token_manager;
+    let token_manager = state.token_manager.clone();
     let pool_size = token_manager.len();
     let max_attempts = MAX_RETRY_ATTEMPTS.min(pool_size).max(1);
 
@@ -194,7 +231,14 @@ pub async fn handle_generate(
         // [FIX #765] Pass session_id to wrap_request for signature injection
         // [NEW] 获取完整 Token 对象以注入动态规格 (dynamic > static default > 65535)
         let token_obj = token_manager.get_token_by_id(&account_id);
-        let wrapped_body = wrap_request(&body, &project_id, &mapped_model, Some(account_id.as_str()), Some(&session_id), token_obj.as_ref());
+        let wrapped_body = wrap_request(
+            &body,
+            &project_id,
+            &mapped_model,
+            Some(account_id.as_str()),
+            Some(&session_id),
+            token_obj.as_ref(),
+        );
 
         if debug_logger::is_enabled(&debug_cfg) {
             let payload = json!({
@@ -224,6 +268,28 @@ pub async fn handle_generate(
             "generateContent"
         };
 
+        // [LLM Logging] Log upstream request (Google Flow - Gemini native)
+        {
+            let entry = crate::proxy::llm_logger::LlmLogEntry {
+                trace_id: trace_id.clone(),
+                timestamp: crate::proxy::llm_logger::now_timestamp(),
+                stage: "upstream_request",
+                method: "POST".to_string(),
+                url: format!(
+                    "https://cloudcode-pa.googleapis.com/v1internal:{}",
+                    upstream_method
+                ),
+                model: Some(mapped_model.clone()),
+                status: None,
+                content_type: Some("application/json".to_string()),
+                body_size_bytes: serde_json::to_string(&wrapped_body)
+                    .map(|s| s.len())
+                    .unwrap_or(0),
+                body: crate::proxy::llm_logger::LlmBody::Json(wrapped_body.clone()),
+            };
+            crate::proxy::llm_logger::log_entry(&entry);
+        }
+
         // [FIX #1522] Inject Anthropic Beta Headers for Claude models
         let mut extra_headers = std::collections::HashMap::new();
         if mapped_model.to_lowercase().contains("claude") {
@@ -242,6 +308,7 @@ pub async fn handle_generate(
                 query_string,
                 extra_headers.clone(),
                 Some(account_id.as_str()),
+                llm_trace_id.as_deref(),
             )
             .await
         {
@@ -467,7 +534,38 @@ pub async fn handle_generate(
                 };
 
                 if client_wants_stream {
-                    let body = Body::from_stream(stream);
+                    // [LLM Logging] Wrap stream to collect bytes for upstream_response logging
+                    let trace_id_log = trace_id.clone();
+                    let model_log = mapped_model.clone();
+                    let url_log = upstream_url.clone();
+                    let status_log = status.as_u16();
+                    let logging_stream = async_stream::stream! {
+                        let mut collected: Vec<u8> = Vec::new();
+                        let mut pinned = Box::pin(stream);
+                        while let Some(chunk) = pinned.next().await {
+                            if let Ok(ref b) = chunk {
+                                collected.extend_from_slice(b);
+                            }
+                            yield chunk;
+                        }
+                        let raw_text = String::from_utf8_lossy(&collected).to_string();
+                        let body = crate::proxy::llm_logger::LlmBody::Text(raw_text);
+                        let entry = crate::proxy::llm_logger::LlmLogEntry {
+                            trace_id: trace_id_log,
+                            timestamp: crate::proxy::llm_logger::now_timestamp(),
+                            stage: "upstream_response",
+                            method: "POST".to_string(),
+                            url: url_log,
+                            model: Some(model_log),
+                            status: Some(status_log),
+                            content_type: Some("text/event-stream".to_string()),
+                            body_size_bytes: collected.len(),
+                            body,
+                        };
+                        crate::proxy::llm_logger::log_entry(&entry);
+                    };
+
+                    let body = Body::from_stream(logging_stream);
                     return Ok(Response::builder()
                         .header("Content-Type", "text/event-stream")
                         .header("Cache-Control", "no-cache")
@@ -483,6 +581,43 @@ pub async fn handle_generate(
                     use crate::proxy::mappers::gemini::collector::collect_stream_to_json;
                     match collect_stream_to_json(Box::pin(stream), &s_id).await {
                         Ok(gemini_resp) => {
+                            // [FIX #1707] Write response body to upstream trace cache
+                            if let Some(ref trace_id) = llm_trace_id {
+                                state
+                                    .upstream_trace_cache
+                                    .put(
+                                        trace_id,
+                                        crate::proxy::upstream_trace::UpstreamTrace {
+                                            request_body: None,
+                                            response_body: Some(
+                                                serde_json::to_string(&gemini_resp)
+                                                    .unwrap_or_default(),
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                            }
+                            // [LLM Logging] Log upstream response (stream collected)
+                            {
+                                let entry = crate::proxy::llm_logger::LlmLogEntry {
+                                    trace_id: trace_id.clone(),
+                                    timestamp: crate::proxy::llm_logger::now_timestamp(),
+                                    stage: "upstream_response",
+                                    method: "POST".to_string(),
+                                    url: upstream_url.clone(),
+                                    model: Some(mapped_model.clone()),
+                                    status: Some(status.as_u16()),
+                                    content_type: Some("text/event-stream".to_string()),
+                                    body_size_bytes: serde_json::to_string(&gemini_resp)
+                                        .map(|s| s.len())
+                                        .unwrap_or(0),
+                                    body: crate::proxy::llm_logger::LlmBody::Json(
+                                        gemini_resp.clone(),
+                                    ),
+                                };
+                                crate::proxy::llm_logger::log_entry(&entry);
+                            }
+
                             info!(
                                 "[{}] ✓ Stream collected and converted to JSON (Gemini)",
                                 session_id
@@ -502,7 +637,10 @@ pub async fn handle_generate(
                             error!("Stream collection error: {}", e);
                             return Ok((
                                 StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("Stream collection error: {}", e),
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                axum::Json(serde_json::json!({
+                                    "error": { "message": format!("Stream collection error: {}", e) }
+                                }))
                             )
                                 .into_response());
                         }
@@ -514,6 +652,41 @@ pub async fn handle_generate(
                 .json()
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
+
+            // [FIX #1707] Write response body to upstream trace cache
+            if let Some(ref trace_id) = llm_trace_id {
+                state
+                    .upstream_trace_cache
+                    .put(
+                        trace_id,
+                        crate::proxy::upstream_trace::UpstreamTrace {
+                            request_body: None,
+                            response_body: Some(
+                                serde_json::to_string(&gemini_resp).unwrap_or_default(),
+                            ),
+                        },
+                    )
+                    .await;
+            }
+
+            // [LLM Logging] Log upstream response (non-stream)
+            // Note: response was already consumed by .json() above, so we log from the parsed value
+            {
+                let raw = serde_json::to_string(&gemini_resp).unwrap_or_default();
+                let entry = crate::proxy::llm_logger::LlmLogEntry {
+                    trace_id: trace_id.clone(),
+                    timestamp: crate::proxy::llm_logger::now_timestamp(),
+                    stage: "upstream_response",
+                    method: "POST".to_string(),
+                    url: upstream_url.clone(),
+                    model: Some(mapped_model.clone()),
+                    status: Some(status.as_u16()),
+                    content_type: Some("application/json".to_string()),
+                    body_size_bytes: raw.len(),
+                    body: crate::proxy::llm_logger::LlmBody::Json(gemini_resp.clone()),
+                };
+                crate::proxy::llm_logger::log_entry(&entry);
+            }
 
             // [FIX #1522] Inject Tool ID into Non-streaming Response
             crate::proxy::mappers::gemini::wrapper::inject_ids_to_response(
@@ -593,6 +766,83 @@ pub async fn handle_generate(
                 &payload,
             )
             .await;
+        }
+
+        // 429/401 → 尝试 ProviderRouter 重新路由到非 google 供应商
+        if status_code == 429 || status_code == 401 {
+            let router = state.provider_router.read().await;
+            let new_selection = router.select(&mapped_model, Some("google"));
+            if new_selection.provider.name != "google" && !new_selection.provider.name.is_empty() {
+                let sel_name = new_selection.provider.name.clone();
+                let sel_resolved = new_selection.resolved_model.clone();
+                let sel_protocol = new_selection.provider.protocol.clone();
+                let sel_provider = (*new_selection.provider).clone();
+                drop(router);
+
+                let mapped_via_provider = crate::proxy::providers::router::map_model_for_provider(
+                    &sel_resolved,
+                    &sel_provider.model_mapping,
+                );
+                tracing::info!(
+                    "[gemini_{}] Provider reroute: {} -> provider='{}', model='{}'",
+                    session_id,
+                    mapped_model,
+                    sel_name,
+                    mapped_via_provider
+                );
+
+                let result = match sel_protocol {
+                    crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
+                        let mut r =
+                            crate::proxy::providers::zai_gemini::forward_gemini_via_anthropic(
+                                &state,
+                                &sel_provider,
+                                &mapped_via_provider,
+                                &body,
+                                &headers,
+                                client_wants_stream,
+                                llm_trace_id.as_deref(),
+                            )
+                            .await;
+                        r.headers_mut().insert(
+                            "X-Upstream-Protocol",
+                            axum::http::HeaderValue::from_static("anthropic"),
+                        );
+                        Some(r)
+                    }
+                    crate::proxy::config::ProviderProtocol::OpenAICompatible => {
+                        let mut r =
+                            crate::proxy::providers::zai_gemini::forward_gemini_via_openai_compat(
+                                &state,
+                                &sel_provider,
+                                &mapped_via_provider,
+                                &body,
+                                &headers,
+                                client_wants_stream,
+                                llm_trace_id.as_deref(),
+                            )
+                            .await;
+                        r.headers_mut().insert(
+                            "X-Upstream-Protocol",
+                            axum::http::HeaderValue::from_static("openai"),
+                        );
+                        Some(r)
+                    }
+                    crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
+                        tracing::warn!(
+                            "[gemini_{}] Provider '{}' uses GeminiV1Internal protocol, skipping",
+                            session_id,
+                            sel_name
+                        );
+                        None
+                    }
+                };
+                if let Some(resp) = result {
+                    return Ok(resp);
+                }
+            } else {
+                drop(router);
+            }
         }
 
         // 确定重试策略
@@ -678,13 +928,17 @@ pub async fn handle_generate(
         Ok((
             StatusCode::TOO_MANY_REQUESTS,
             [("X-Account-Email", email)],
-            format!("All accounts exhausted. Last error: {}", last_error),
+            axum::Json(serde_json::json!({
+                "error": { "message": format!("All accounts exhausted. Last error: {}", last_error) }
+            })),
         )
             .into_response())
     } else {
         Ok((
             StatusCode::TOO_MANY_REQUESTS,
-            format!("All accounts exhausted. Last error: {}", last_error),
+            axum::Json(serde_json::json!({
+                "error": { "message": format!("All accounts exhausted. Last error: {}", last_error) }
+            })),
         )
             .into_response())
     }
@@ -728,21 +982,10 @@ pub async fn handle_get_model(Path(model_name): Path<String>) -> impl IntoRespon
 }
 
 pub async fn handle_count_tokens(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(_model_name): Path<String>,
     Json(_body): Json<Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let model_group = "gemini";
-    let (_access_token, _project_id, _, _, _wait_ms) = state
-        .token_manager
-        .get_token(model_group, false, None, "gemini")
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Token error: {}", e),
-            )
-        })?;
-
+    // Gemini count_tokens is handled locally — no provider forwarding
     Ok(Json(json!({"totalTokens": 0})))
 }

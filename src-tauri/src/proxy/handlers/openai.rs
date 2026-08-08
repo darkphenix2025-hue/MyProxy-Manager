@@ -19,11 +19,11 @@ const MAX_RETRY_ATTEMPTS: usize = 3;
 use super::common::{
     apply_retry_strategy, determine_retry_strategy, should_rotate_account, RetryStrategy,
 };
+use crate::modules::account;
 use crate::proxy::common::client_adapter::CLIENT_ADAPTERS; // [NEW] Adapter Registry
 use crate::proxy::session_manager::SessionManager;
 use axum::http::HeaderMap;
 use tokio::time::Duration;
-use crate::modules::account;
 
 pub async fn handle_chat_completions(
     State(state): State<AppState>,
@@ -31,15 +31,34 @@ pub async fn handle_chat_completions(
     Json(mut body): Json<Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // [NEW] Check for Image Model Redirection
-    let model_name = body.get("model").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-    if model_name.contains("image") || model_name.contains("dall-e") || model_name.contains("midjourney") {
-        tracing::info!("[ChatRedirection] Redirecting model {} to image generations", model_name);
+    let model_name = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if model_name.contains("image")
+        || model_name.contains("dall-e")
+        || model_name.contains("midjourney")
+    {
+        tracing::info!(
+            "[ChatRedirection] Redirecting model {} to image generations",
+            model_name
+        );
         return intercept_chat_to_image(state, body, &model_name).await;
+    }
+
+    // [NEW] 协议转换单元灰度检查
+    let translator_enabled = state
+        .translator_config
+        .read()
+        .await
+        .is_format_enabled("openai");
+    if translator_enabled {
+        debug!("[Translator] New translator path enabled for OpenAI requests");
     }
 
     // [FIX] 保存原始请求体的完整副本，用于日志记录
     // 这确保了即使结构体定义遗漏字段，日志也能完整记录所有参数
-    let original_body = body.clone();
 
     // [NEW] 自动检测并转换 Responses 格式
     // 如果请求包含 instructions 或 input 但没有 messages，则认为是 Responses 格式
@@ -90,6 +109,9 @@ pub async fn handle_chat_completions(
         }
     }
 
+    // Save original body for translator path (before it's consumed by from_value)
+    let original_body = body.clone();
+
     let mut openai_req: OpenAIRequest = serde_json::from_value(body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request: {}", e)))?;
 
@@ -111,6 +133,11 @@ pub async fn handle_chat_completions(
     }
 
     let trace_id = format!("req_{}", chrono::Utc::now().timestamp_subsec_millis());
+    // [NEW] Extract LLM trace ID from header for upstream trace cache
+    let llm_trace_id = headers
+        .get("x-llm-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     info!(
         "[{}] OpenAI Chat Request: {} | {} messages | stream: {}",
         trace_id,
@@ -172,6 +199,8 @@ pub async fn handle_chat_completions(
             &resolved_model,
             &provider.model_mapping,
         );
+        // Save clones for translator path before moves
+        let mapped_model_for_translator = mapped_model.clone();
         let openai_req = crate::proxy::mappers::openai::models::OpenAIRequest {
             model: mapped_model,
             ..openai_req
@@ -180,31 +209,61 @@ pub async fn handle_chat_completions(
         match protocol {
             crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
                 // Transform OpenAI → Claude format, then forward to provider
-                let claude_body = crate::proxy::mappers::openai::request::to_claude_body(&openai_req);
-                return Ok(crate::proxy::providers::zai_anthropic::forward_anthropic_with_provider(
-                    &state,
-                    &provider.base_url,
-                    &provider.api_key,
-                    &provider.model_mapping,
-                    axum::http::Method::POST,
-                    "/v1/messages",
-                    &headers,
-                    claude_body,
-                    openai_req.messages.len(),
-                    &provider.name,
-                )
-                .await);
+                let claude_body = if translator_enabled {
+                    // 使用 translator 框架做协议转换
+                    let raw_bytes = serde_json::to_vec(&original_body).unwrap_or_default();
+                    let converted = crate::proxy::translator::translate_request(
+                        crate::proxy::translator::format::Format::OpenAI,
+                        crate::proxy::translator::format::Format::Claude,
+                        &mapped_model_for_translator,
+                        &raw_bytes,
+                        openai_req.stream,
+                    );
+                    serde_json::from_slice(&converted).unwrap_or(original_body.clone())
+                } else {
+                    // 使用现有 mapper 路径
+                    crate::proxy::mappers::openai::request::to_claude_body(&openai_req)
+                };
+                return Ok(
+                    crate::proxy::providers::zai_anthropic::forward_anthropic_with_provider(
+                        &state,
+                        &provider.base_url,
+                        &provider.api_key,
+                        &provider.model_mapping,
+                        axum::http::Method::POST,
+                        "/v1/messages",
+                        &headers,
+                        claude_body,
+                        openai_req.messages.len(),
+                        &provider.name,
+                        "anthropic",
+                        llm_trace_id.as_deref(),
+                    )
+                    .await,
+                );
             }
             crate::proxy::config::ProviderProtocol::OpenAICompatible => {
                 // Forward directly to provider's OpenAI-compatible endpoint
                 return Ok(forward_openai_compatible(
-                    &state, &provider, &openai_req, &headers,
-                ).await);
+                    &state,
+                    &provider,
+                    &openai_req,
+                    &headers,
+                    llm_trace_id.as_deref(),
+                )
+                .await);
             }
             crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
-                return Ok(crate::proxy::providers::zai_gemini::forward_gemini_v1internal_with_provider(
-                    &state, &provider, &openai_req, &headers,
-                ).await);
+                return Ok(
+                    crate::proxy::providers::zai_gemini::forward_gemini_v1internal_with_provider(
+                        &state,
+                        &provider,
+                        &openai_req,
+                        &headers,
+                        llm_trace_id.as_deref(),
+                    )
+                    .await,
+                );
             }
         }
     }
@@ -258,7 +317,12 @@ pub async fn handle_chat_completions(
             Ok(t) => t,
             Err(e) => {
                 // [FIX] Attach headers to error response for logging visibility
-                let headers = [("X-Mapped-Model", mapped_model.as_str())];
+                let headers = [
+                    ("X-Mapped-Model", mapped_model.as_str()),
+                    ("X-Upstream-Protocol", "gemini"),
+                    ("X-Upstream-Model", mapped_model.as_str()),
+                    ("X-Upstream-URL", "token_manager"),
+                ];
                 return Ok((
                     StatusCode::SERVICE_UNAVAILABLE,
                     headers,
@@ -278,8 +342,12 @@ pub async fn handle_chat_completions(
         info!("✓ Using account: {} (type: {})", email, config.request_type);
 
         // 4. 转换请求 (返回内容包含 session_id 和 message_count)
-        let (gemini_body, session_id, message_count) =
-            transform_openai_request(&openai_req, &project_id, &mapped_model, proxy_token.as_ref());
+        let (gemini_body, session_id, message_count) = transform_openai_request(
+            &openai_req,
+            &project_id,
+            &mapped_model,
+            proxy_token.as_ref(),
+        );
 
         if debug_logger::is_enabled(&debug_cfg) {
             let payload = json!({
@@ -346,6 +414,7 @@ pub async fn handle_chat_completions(
                 query_string,
                 extra_headers.clone(),
                 Some(account_id.as_str()),
+                llm_trace_id.as_deref(),
             )
             .await
         {
@@ -506,6 +575,9 @@ pub async fn handle_chat_completions(
 
                 if client_wants_stream {
                     // 客户端请求流式，返回 SSE
+                    // [NEW] For streaming, we can't capture the full response body here
+                    // because the stream is returned directly to the client.
+                    // The response will be captured by the monitor middleware's stream wrapper.
                     let body = Body::from_stream(combined_stream);
                     return Ok(Response::builder()
                         .header("Content-Type", "text/event-stream")
@@ -514,6 +586,10 @@ pub async fn handle_chat_completions(
                         .header("X-Accel-Buffering", "no")
                         .header("X-Account-Email", &email)
                         .header("X-Mapped-Model", &mapped_model)
+                        // Add upstream headers for monitor middleware
+                        .header("X-Upstream-Protocol", "gemini")
+                        .header("X-Upstream-Model", &mapped_model)
+                        .header("X-Upstream-URL", &upstream_url)
                         .body(body)
                         .unwrap()
                         .into_response());
@@ -524,12 +600,32 @@ pub async fn handle_chat_completions(
 
                     match collect_stream_to_json(Box::pin(combined_stream)).await {
                         Ok(full_response) => {
+                            // [NEW] Write response body to upstream trace cache
+                            if let Some(ref trace_id) = llm_trace_id {
+                                state
+                                    .upstream_trace_cache
+                                    .put(
+                                        trace_id,
+                                        crate::proxy::upstream_trace::UpstreamTrace {
+                                            request_body: None,
+                                            response_body: Some(
+                                                serde_json::to_string(&full_response)
+                                                    .unwrap_or_default(),
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                            }
                             info!("[{}] ✓ Stream collected and converted to JSON", trace_id);
                             return Ok((
                                 StatusCode::OK,
                                 [
                                     ("X-Account-Email", email.as_str()),
                                     ("X-Mapped-Model", mapped_model.as_str()),
+                                    // Add upstream headers for monitor middleware
+                                    ("X-Upstream-Protocol", "gemini"),
+                                    ("X-Upstream-Model", mapped_model.as_str()),
+                                    ("X-Upstream-URL", upstream_url.as_str()),
                                 ],
                                 Json(full_response),
                             )
@@ -547,9 +643,27 @@ pub async fn handle_chat_completions(
                 }
             }
 
-            let gemini_resp: Value = response
-                .json()
+            // [NEW] Capture response body for upstream trace cache
+            let response_text = response
+                .text()
                 .await
+                .unwrap_or_else(|_| "[Failed to read response]".to_string());
+
+            // Write response body to upstream trace cache
+            if let Some(ref trace_id) = llm_trace_id {
+                state
+                    .upstream_trace_cache
+                    .put(
+                        trace_id,
+                        crate::proxy::upstream_trace::UpstreamTrace {
+                            request_body: None, // Already written by upstream client
+                            response_body: Some(response_text.clone()),
+                        },
+                    )
+                    .await;
+            }
+
+            let gemini_resp: Value = serde_json::from_str(&response_text)
                 .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
 
             let openai_response =
@@ -559,6 +673,10 @@ pub async fn handle_chat_completions(
                 [
                     ("X-Account-Email", email.as_str()),
                     ("X-Mapped-Model", mapped_model.as_str()),
+                    // Add upstream headers for monitor middleware
+                    ("X-Upstream-Protocol", "gemini"),
+                    ("X-Upstream-Model", mapped_model.as_str()),
+                    ("X-Upstream-URL", upstream_url.as_str()),
                 ],
                 Json(openai_response),
             )
@@ -826,6 +944,12 @@ pub async fn handle_completions(
         "Received /v1/completions or /v1/responses payload: {:?}",
         body
     );
+
+    // [FIX #1707] Extract llm_trace_id from middleware for upstream trace cache
+    let llm_trace_id = headers
+        .get("x-llm-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let is_codex_style = body.get("input").is_some() || body.get("instructions").is_some();
 
@@ -1235,10 +1359,15 @@ pub async fn handle_completions(
                 // because the client expects /v1/responses events (response.created, response.completed, etc.)
                 if is_codex_style {
                     return forward_anthropic_as_codex_sse(
-                        &state, &provider, &openai_req, &headers,
-                    ).await;
+                        &state,
+                        &provider,
+                        &openai_req,
+                        &headers,
+                    )
+                    .await;
                 }
-                let claude_body = crate::proxy::mappers::openai::request::to_claude_body(&openai_req);
+                let claude_body =
+                    crate::proxy::mappers::openai::request::to_claude_body(&openai_req);
                 return crate::proxy::providers::zai_anthropic::forward_anthropic_with_provider(
                     &state,
                     &provider.base_url,
@@ -1250,6 +1379,8 @@ pub async fn handle_completions(
                     claude_body,
                     openai_req.messages.len(),
                     &provider.name,
+                    "anthropic",
+                    llm_trace_id.as_deref(),
                 )
                 .await;
             }
@@ -1257,22 +1388,31 @@ pub async fn handle_completions(
                 // For Codex-style requests, convert OpenAI Chat SSE to Codex SSE format
                 if is_codex_style {
                     return forward_openai_compat_as_codex_sse(
-                        &state, &provider, &openai_req, &headers,
-                    ).await;
+                        &state,
+                        &provider,
+                        &openai_req,
+                        &headers,
+                        llm_trace_id.as_deref(),
+                    )
+                    .await;
                 }
                 return forward_openai_compatible(
-                    &state, &provider, &openai_req, &headers,
-                ).await;
+                    &state,
+                    &provider,
+                    &openai_req,
+                    &headers,
+                    llm_trace_id.as_deref(),
+                )
+                .await;
             }
             crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
                 // For Codex-style requests, convert Gemini SSE to Codex SSE format
                 if is_codex_style {
-                    return forward_gemini_as_codex_sse(
-                        &state, &provider, &openai_req, &headers,
-                    ).await;
+                    return forward_gemini_as_codex_sse(&state, &provider, &openai_req, &headers)
+                        .await;
                 }
                 return crate::proxy::providers::zai_gemini::forward_gemini_v1internal_with_provider(
-                    &state, &provider, &openai_req, &headers,
+                    &state, &provider, &openai_req, &headers, llm_trace_id.as_deref(),
                 ).await;
             }
         }
@@ -1348,8 +1488,12 @@ pub async fn handle_completions(
         info!("✓ Using account: {} (type: {})", email, config.request_type);
 
         let proxy_token = token_manager.get_token_by_id(&account_id);
-        let (gemini_body, session_id, message_count) =
-            transform_openai_request(&openai_req, &project_id, &mapped_model, proxy_token.as_ref());
+        let (gemini_body, session_id, message_count) = transform_openai_request(
+            &openai_req,
+            &project_id,
+            &mapped_model,
+            proxy_token.as_ref(),
+        );
 
         // [New] 打印转换后的报文 (Gemini Body) 供调试 (Codex 路径) ———— 缩减为 simple debug
         debug!(
@@ -1494,6 +1638,8 @@ pub async fn handle_completions(
                         .header("Connection", "keep-alive")
                         .header("X-Account-Email", &email)
                         .header("X-Mapped-Model", &mapped_model)
+                        .header("X-Upstream-Protocol", "gemini")
+                        .header("X-Upstream-Model", &mapped_model)
                         .body(Body::from_stream(combined_stream))
                         .unwrap()
                         .into_response();
@@ -1595,6 +1741,8 @@ pub async fn handle_completions(
                                 [
                                     ("X-Account-Email", email.as_str()),
                                     ("X-Mapped-Model", mapped_model.as_str()),
+                                    ("X-Upstream-Protocol", "gemini"),
+                                    ("X-Upstream-Model", mapped_model.as_str()),
                                 ],
                                 Json(legacy_resp),
                             )
@@ -1652,6 +1800,8 @@ pub async fn handle_completions(
                 [
                     ("X-Account-Email", email.as_str()),
                     ("X-Mapped-Model", mapped_model.as_str()),
+                    ("X-Upstream-Protocol", "gemini"),
+                    ("X-Upstream-Model", mapped_model.as_str()),
                 ],
                 Json(legacy_resp),
             )
@@ -1753,6 +1903,7 @@ pub async fn handle_list_models(State(state): State<AppState>) -> impl IntoRespo
 
 /// OpenAI Images API: POST /v1/images/generations
 /// 处理图像生成请求，转换为 Gemini API 格式
+#[allow(dead_code)] // Legacy endpoint retained for clients that still enable chat redirection.
 pub async fn handle_chat_redirection(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1777,7 +1928,9 @@ async fn intercept_chat_to_image(
                     } else if let Some(arr) = content.as_array() {
                         for part in arr {
                             if part.get("type").and_then(|v| v.as_str()) == Some("text") {
-                                prompt.push_str(part.get("text").and_then(|v| v.as_str()).unwrap_or(""));
+                                prompt.push_str(
+                                    part.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                                );
                             }
                         }
                     }
@@ -1790,7 +1943,10 @@ async fn intercept_chat_to_image(
         prompt = "A beautiful painting".to_string(); // fallback
     }
 
-    let is_stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // 2. Call internal image generator
     let img_req = json!({
@@ -1819,7 +1975,7 @@ async fn intercept_chat_to_image(
             // 3. Construct Chat Completion Response
             if is_stream {
                 use axum::body::Body;
-                
+
                 let chunk = json!({
                     "id": format!("chatcmpl-img-{}", uuid::Uuid::new_v4()),
                     "object": "chat.completion.chunk",
@@ -1834,7 +1990,7 @@ async fn intercept_chat_to_image(
                         "finish_reason": null
                     }]
                 });
-                
+
                 let done_chunk = json!({
                     "id": format!("chatcmpl-img-{}", uuid::Uuid::new_v4()),
                     "object": "chat.completion.chunk",
@@ -1847,8 +2003,12 @@ async fn intercept_chat_to_image(
                     }]
                 });
 
-                let sse_data = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", chunk.to_string(), done_chunk.to_string());
-                
+                let sse_data = format!(
+                    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    chunk.to_string(),
+                    done_chunk.to_string()
+                );
+
                 let body = Body::from(sse_data);
                 Ok(Response::builder()
                     .header("Content-Type", "text/event-stream")
@@ -1875,14 +2035,13 @@ async fn intercept_chat_to_image(
 
                 Ok((
                     StatusCode::OK,
-                    [
-                        ("X-Account-Email", email.as_str()),
-                    ],
-                    Json(resp)
-                ).into_response())
+                    [("X-Account-Email", email.as_str())],
+                    Json(resp),
+                )
+                    .into_response())
             }
-        },
-        Err(e) => Err(e.into()) // using Err directly is fine since return type handles it
+        }
+        Err(e) => Err(e.into()), // using Err directly is fine since return type handles it
     }
 }
 
@@ -1921,18 +2080,14 @@ pub async fn handle_images_generations_internal(
 
     let n = body.get("n").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
 
-    let size = body
-        .get("size")
-        .and_then(|v| v.as_str());
+    let size = body.get("size").and_then(|v| v.as_str());
 
     let response_format = body
         .get("response_format")
         .and_then(|v| v.as_str())
         .unwrap_or("b64_json");
 
-    let quality = body
-        .get("quality")
-        .and_then(|v| v.as_str());
+    let quality = body.get("quality").and_then(|v| v.as_str());
 
     let image_size = body
         .get("image_size")
@@ -1976,9 +2131,7 @@ pub async fn handle_images_generations_internal(
         match provider.protocol {
             ProviderProtocol::OpenAICompatible => {
                 return crate::proxy::providers::zai_images::forward_images_to_openai_compat(
-                    &state,
-                    &provider,
-                    &body,
+                    &state, &provider, &body,
                 )
                 .await;
             }
@@ -1989,12 +2142,10 @@ pub async fn handle_images_generations_internal(
     }
 
     // 3. 使用 common_utils 解析图片配置（统一逻辑，支持动态计算宽高比和 quality 映射）
-    let (image_config, clean_model_name) = crate::proxy::mappers::common_utils::parse_image_config_with_params(
-        model,
-        size,
-        quality,
-        image_size,
-    );
+    let (image_config, clean_model_name) =
+        crate::proxy::mappers::common_utils::parse_image_config_with_params(
+            model, size, quality, image_size,
+        );
 
     // 4. Prompt Enhancement（保留原有逻辑）
     let mut final_prompt = prompt.to_string();
@@ -2355,26 +2506,30 @@ pub async fn handle_images_edits(
     };
     drop(router);
 
-    let model_to_use = selection.as_ref().map(|(r, _)| r.clone()).unwrap_or(model.clone());
+    let model_to_use = selection
+        .as_ref()
+        .map(|(r, _)| r.clone())
+        .unwrap_or(model.clone());
 
     if let Some((_, provider)) = selection {
         use crate::proxy::config::ProviderProtocol;
         match provider.protocol {
             ProviderProtocol::OpenAICompatible => {
-                let (email, openai_resp) = crate::proxy::providers::zai_images::forward_images_edits_to_openai_compat(
-                    &state,
-                    &provider,
-                    image_data,
-                    mask_data,
-                    reference_images,
-                    &prompt,
-                    &model_to_use,
-                    n,
-                    &size,
-                    &response_format,
-                    style.as_deref(),
-                )
-                .await?;
+                let (email, openai_resp) =
+                    crate::proxy::providers::zai_images::forward_images_edits_to_openai_compat(
+                        &state,
+                        &provider,
+                        image_data,
+                        mask_data,
+                        reference_images,
+                        &prompt,
+                        &model_to_use,
+                        n,
+                        &size,
+                        &response_format,
+                        style.as_deref(),
+                    )
+                    .await?;
                 return Ok((
                     StatusCode::OK,
                     [
@@ -2685,6 +2840,7 @@ async fn forward_openai_compatible(
     provider: &crate::proxy::config::UpstreamProvider,
     openai_req: &crate::proxy::mappers::openai::models::OpenAIRequest,
     headers: &axum::http::HeaderMap,
+    llm_trace_id: Option<&str>,
 ) -> Response {
     use axum::body::Body;
     use axum::http::{header, HeaderValue};
@@ -2698,16 +2854,27 @@ async fn forward_openai_compatible(
         }
     };
 
-    let url = format!("{}/v1/chat/completions", provider.base_url.trim_end_matches('/'));
-    let timeout_secs = provider.request_timeout_secs.unwrap_or(state.request_timeout).max(5);
-    let upstream_proxy = state.upstream_proxy.read().await.clone();
+    let url = format!(
+        "{}/v1/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
+    let timeout_secs = provider
+        .request_timeout_secs
+        .unwrap_or(state.request_timeout)
+        .max(5);
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
     {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Build client failed: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Build client failed: {}", e),
+            )
+                .into_response()
+        }
     };
 
     let mut req_headers = axum::http::HeaderMap::new();
@@ -2724,19 +2891,38 @@ async fn forward_openai_compatible(
     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", provider.api_key)) {
         req_headers.insert(header::AUTHORIZATION, v);
     }
-    req_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    req_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
 
     let body_bytes = serde_json::to_vec(&body_val).unwrap_or_default();
 
-    let req = client
-        .post(&url)
-        .headers(req_headers)
-        .body(body_bytes);
+    // Write request body to upstream trace cache for traffic logging
+    if let Some(trace_id) = llm_trace_id {
+        let request_body_str = String::from_utf8(body_bytes.clone()).ok();
+        state
+            .upstream_trace_cache
+            .put(
+                trace_id,
+                crate::proxy::upstream_trace::UpstreamTrace {
+                    request_body: request_body_str,
+                    response_body: None, // Stream — cannot collect full response
+                },
+            )
+            .await;
+    }
+
+    let req = client.post(&url).headers(req_headers).body(body_bytes);
 
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_GATEWAY, format!("Upstream request failed: {}", e)).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("Upstream request failed: {}", e),
+            )
+                .into_response();
         }
     };
 
@@ -2745,6 +2931,27 @@ async fn forward_openai_compatible(
 
     let mut out = Response::builder().status(status);
     out = out.header("x-provider-name", &provider.name);
+
+    // Add upstream protocol, model and URL headers for monitor middleware
+    let upstream_protocol_str = match provider.protocol {
+        crate::proxy::config::ProviderProtocol::AnthropicPassthrough => "anthropic",
+        crate::proxy::config::ProviderProtocol::OpenAICompatible => "openai",
+        crate::proxy::config::ProviderProtocol::GeminiV1Internal => "gemini",
+    };
+    out = out.header("X-Upstream-Protocol", upstream_protocol_str);
+    if let Some(model) = openai_req.model.split('/').last() {
+        out = out.header("X-Upstream-Model", model);
+    }
+    // Extract just the path from the full URL
+    if let Some(path) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    {
+        if let Some(slash_pos) = path.find('/') {
+            out = out.header("X-Upstream-URL", &path[slash_pos..]);
+        }
+    }
+
     if let Some(ct) = resp.headers().get(header::CONTENT_TYPE) {
         out = out.header(header::CONTENT_TYPE, ct.clone());
     }
@@ -2755,7 +2962,11 @@ async fn forward_openai_compatible(
     });
 
     out.body(Body::from_stream(stream)).unwrap_or_else(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to build response",
+        )
+            .into_response()
     })
 }
 
@@ -2843,7 +3054,9 @@ async fn forward_anthropic_as_codex_sse(
     };
 
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let content_type = resp.headers().get(header::CONTENT_TYPE)
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
@@ -2851,15 +3064,35 @@ async fn forward_anthropic_as_codex_sse(
     // [FIX] Detect upstream error before trying to parse as SSE
     // When the upstream returns a non-success status or non-SSE content type,
     // read the error body and return a proper Codex error response
-    if !status.is_success() || (!content_type.contains("text/event-stream") && !content_type.contains("stream")) {
+    if !status.is_success()
+        || (!content_type.contains("text/event-stream") && !content_type.contains("stream"))
+    {
         let full_body = resp.bytes().await.unwrap_or_default();
         let body_str = String::from_utf8_lossy(&full_body).to_string();
-        tracing::error!("[Codex→Anthropic] Upstream error: status={}, body={}", status, body_str);
+        tracing::error!(
+            "[Codex→Anthropic] Upstream error: status={}, body={}",
+            status,
+            body_str
+        );
 
         let error_msg = if let Ok(err_json) = serde_json::from_str::<Value>(&body_str) {
-            err_json.get("message").and_then(|v| v.as_str()).map(String::from)
-                .or_else(|| err_json.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()).map(String::from))
-                .or_else(|| err_json.get("error").and_then(|v| v.as_str()).map(String::from))
+            err_json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    err_json
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    err_json
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
                 .unwrap_or_else(|| body_str.clone())
         } else {
             body_str.clone()
@@ -2944,7 +3177,11 @@ async fn forward_anthropic_as_codex_sse(
             .header("X-Mapped-Model", &openai_req.model)
             .body(Body::from_stream(codex_stream))
             .unwrap_or_else(|_| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build error response").into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build error response",
+                )
+                    .into_response()
             });
     }
 
@@ -3130,7 +3367,11 @@ async fn forward_anthropic_as_codex_sse(
         .header("X-Mapped-Model", &openai_req.model)
         .body(Body::from_stream(codex_stream))
         .unwrap_or_else(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build response",
+            )
+                .into_response()
         })
 }
 
@@ -3141,6 +3382,7 @@ async fn forward_openai_compat_as_codex_sse(
     provider: &crate::proxy::config::UpstreamProvider,
     openai_req: &crate::proxy::mappers::openai::OpenAIRequest,
     headers: &axum::http::HeaderMap,
+    llm_trace_id: Option<&str>,
 ) -> Response {
     use crate::proxy::providers::zai_anthropic::build_client;
     use axum::body::Body;
@@ -3165,7 +3407,7 @@ async fn forward_openai_compat_as_codex_sse(
 
     // Build request body — strip Codex-specific fields that upstream may not understand
     let mut body = serde_json::to_value(openai_req).unwrap_or_default();
-    body["stream"] = serde_json::Value::Bool(true);
+    body["stream"] = serde_json::Value::Bool(openai_req.stream);
 
     // Clean up null fields that most OpenAI-compatible providers don't accept
     if let Some(obj) = body.as_object_mut() {
@@ -3175,7 +3417,10 @@ async fn forward_openai_compat_as_codex_sse(
         obj.retain(|_, v| !v.is_null());
         // Ensure max_tokens has a sensible default if missing
         if !obj.contains_key("max_tokens") {
-            obj.insert("max_tokens".to_string(), serde_json::Value::Number(4096.into()));
+            obj.insert(
+                "max_tokens".to_string(),
+                serde_json::Value::Number(4096.into()),
+            );
         }
         // [FIX] Filter tools: only keep standard OpenAI function-calling format tools.
         // Codex sends native tool types (e.g. {"type":"web_search"}) that upstream providers reject.
@@ -3191,13 +3436,36 @@ async fn forward_openai_compat_as_codex_sse(
     }
 
     let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+    if let Some(trace_id) = llm_trace_id {
+        state
+            .upstream_trace_cache
+            .put(
+                trace_id,
+                crate::proxy::upstream_trace::UpstreamTrace {
+                    request_body: String::from_utf8(body_bytes.clone()).ok(),
+                    response_body: None,
+                },
+            )
+            .await;
+    }
 
-    tracing::info!("[Codex→OpenAI] Forwarding to provider: {} (model: {}, url: {})", provider.name, openai_req.model, url);
+    tracing::info!(
+        "[Codex→OpenAI] Forwarding to provider: {} (model: {}, url: {})",
+        provider.name,
+        openai_req.model,
+        url
+    );
 
     // Build headers
     let mut req_headers = axum::http::HeaderMap::new();
-    req_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    req_headers.insert(header::ACCEPT, HeaderValue::from_static("text/event-stream"));
+    req_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    req_headers.insert(
+        header::ACCEPT,
+        HeaderValue::from_static("text/event-stream"),
+    );
     // Copy some safe headers
     for (k, v) in headers.iter() {
         let key = k.as_str().to_ascii_lowercase();
@@ -3228,7 +3496,9 @@ async fn forward_openai_compat_as_codex_sse(
     };
 
     let status = resp.status();
-    let content_type = resp.headers().get(header::CONTENT_TYPE)
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
@@ -3236,20 +3506,100 @@ async fn forward_openai_compat_as_codex_sse(
     let provider_name = provider.name.clone();
     let model_name = openai_req.model.clone();
 
-    tracing::info!("[Codex→OpenAI] Upstream response: status={}, content_type={}", status, content_type);
+    tracing::info!(
+        "[Codex→OpenAI] Upstream response: status={}, content_type={}",
+        status,
+        content_type
+    );
+
+    if status.is_success() && !openai_req.stream {
+        let full_body = resp.bytes().await.unwrap_or_default();
+        let body_str = String::from_utf8_lossy(&full_body).into_owned();
+        if let Some(trace_id) = llm_trace_id {
+            state
+                .upstream_trace_cache
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None,
+                        response_body: Some(body_str),
+                    },
+                )
+                .await;
+        }
+        let upstream_json: Value = match serde_json::from_slice(&full_body) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Invalid upstream JSON response: {}", error),
+                )
+                    .into_response();
+            }
+        };
+        let response_json = openai_chat_to_responses_json(&upstream_json, &model_name);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .header("X-Provider-Name", &provider_name)
+            .header("X-Mapped-Model", &model_name)
+            .header("X-Upstream-Protocol", "openai")
+            .header("X-Upstream-Model", &model_name)
+            .header("X-Upstream-URL", "/v1/chat/completions")
+            .body(Body::from(response_json.to_string()))
+            .unwrap_or_else(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build response",
+                )
+                    .into_response()
+            });
+    }
 
     // Detect non-streaming response (error or non-SSE)
-    if !status.is_success() || (!content_type.contains("text/event-stream") && !content_type.contains("stream")) {
+    if !status.is_success()
+        || (!content_type.contains("text/event-stream") && !content_type.contains("stream"))
+    {
         // Try to read the full response as JSON error
         let full_body = resp.bytes().await.unwrap_or_default();
         let body_str = String::from_utf8_lossy(&full_body).to_string();
-        tracing::error!("[Codex→OpenAI] Non-SSE response (status={}): {}", status, body_str);
+        if let Some(trace_id) = llm_trace_id {
+            state
+                .upstream_trace_cache
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None,
+                        response_body: Some(body_str.clone()),
+                    },
+                )
+                .await;
+        }
+        tracing::error!(
+            "[Codex→OpenAI] Non-SSE response (status={}): {}",
+            status,
+            body_str
+        );
 
         // Try to parse as error JSON and return a proper Codex error response
         let error_msg = if let Ok(err_json) = serde_json::from_str::<Value>(&body_str) {
-            err_json.get("message").and_then(|v| v.as_str()).map(String::from)
-                .or_else(|| err_json.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()).map(String::from))
-                .or_else(|| err_json.get("error").and_then(|v| v.as_str()).map(String::from))
+            err_json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    err_json
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    err_json
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
                 .unwrap_or_else(|| body_str.clone())
         } else {
             body_str.clone()
@@ -3333,7 +3683,11 @@ async fn forward_openai_compat_as_codex_sse(
             .header("Connection", "keep-alive")
             .body(Body::from_stream(codex_stream))
             .unwrap_or_else(|_| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build error response").into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build error response",
+                )
+                    .into_response()
             });
     }
 
@@ -3350,7 +3704,8 @@ async fn forward_openai_compat_as_codex_sse(
     let item_id = format!("item-{}", &random_str[..16]);
 
     let provider_name_for_stream = provider_name.clone();
-    let model_name_for_stream = model_name.clone();
+    let trace_cache_for_stream = state.upstream_trace_cache.clone();
+    let trace_id_for_stream = llm_trace_id.map(str::to_owned);
 
     let codex_stream = async_stream::stream! {
         // 1. response.created
@@ -3375,13 +3730,19 @@ async fn forward_openai_compat_as_codex_sse(
         yield Ok::<Bytes, String>(Bytes::from(format!("data: {}\n\n", serde_json::to_string(&content_part_added).unwrap())));
 
         let mut accumulated_text = String::new();
+        let mut upstream_raw = Vec::new();
+        let mut pending_sse = String::new();
         let mut stream = resp.bytes_stream();
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(bytes) => {
+                    upstream_raw.extend_from_slice(&bytes);
                     let text = String::from_utf8_lossy(&bytes);
-                    for line in text.lines() {
+                    pending_sse.push_str(&text);
+                    while let Some(newline) = pending_sse.find('\n') {
+                        let line = pending_sse[..newline].trim().to_string();
+                        pending_sse.drain(..=newline);
                         let line = line.trim();
                         if !line.starts_with("data: ") { continue; }
                         let json_str = line.trim_start_matches("data: ").trim();
@@ -3436,6 +3797,24 @@ async fn forward_openai_compat_as_codex_sse(
             }
         }
 
+        if !pending_sse.trim().is_empty() {
+            tracing::warn!(
+                "[Codex→OpenAI] Incomplete trailing SSE frame ({} bytes)",
+                pending_sse.len()
+            );
+        }
+        if let Some(trace_id) = trace_id_for_stream.as_deref() {
+            trace_cache_for_stream
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None,
+                        response_body: Some(String::from_utf8_lossy(&upstream_raw).into_owned()),
+                    },
+                )
+                .await;
+        }
+
         tracing::info!("[Codex→OpenAI] Streaming complete. Total chars: {}, provider: {}", accumulated_text.len(), provider_name_for_stream);
 
         // Final events
@@ -3479,10 +3858,103 @@ async fn forward_openai_compat_as_codex_sse(
         .header("Connection", "keep-alive")
         .header("X-Provider-Name", &provider_name)
         .header("X-Mapped-Model", &model_name)
+        .header("X-Upstream-Protocol", "openai")
+        .header("X-Upstream-Model", &model_name)
+        .header("X-Upstream-URL", "/v1/chat/completions")
         .body(Body::from_stream(codex_stream))
         .unwrap_or_else(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build response",
+            )
+                .into_response()
         })
+}
+
+fn openai_chat_to_responses_json(upstream: &Value, fallback_model: &str) -> Value {
+    let response_id = upstream
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("resp-proxy");
+    let model = upstream
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_model);
+    let message = upstream
+        .pointer("/choices/0/message")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+    let mut output = vec![json!({
+        "id": format!("msg_{}", response_id),
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": content, "annotations": [] }]
+    })];
+
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for call in tool_calls {
+            output.push(json!({
+                "id": call.get("id").cloned().unwrap_or(Value::Null),
+                "type": "function_call",
+                "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                "name": call.pointer("/function/name").cloned().unwrap_or(Value::Null),
+                "arguments": call.pointer("/function/arguments").cloned().unwrap_or_else(|| Value::String(String::new())),
+                "status": "completed"
+            }));
+        }
+    }
+
+    let usage = upstream.get("usage").cloned().unwrap_or_else(|| json!({}));
+    json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": upstream.get("created").cloned().unwrap_or_else(|| json!(chrono::Utc::now().timestamp())),
+        "status": "completed",
+        "model": model,
+        "output": output,
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens").cloned().unwrap_or_else(|| json!(0)),
+            "output_tokens": usage.get("completion_tokens").cloned().unwrap_or_else(|| json!(0)),
+            "total_tokens": usage.get("total_tokens").cloned().unwrap_or_else(|| json!(0))
+        }
+    })
+}
+
+#[cfg(test)]
+mod provider_responses_tests {
+    use super::openai_chat_to_responses_json;
+    use serde_json::json;
+
+    #[test]
+    fn converts_non_stream_chat_response_without_losing_usage_or_tools() {
+        let upstream = json!({
+            "id": "chatcmpl-1",
+            "created": 123,
+            "model": "gpt-5.6-sol",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{\"id\":1}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+
+        let converted = openai_chat_to_responses_json(&upstream, "fallback");
+        assert_eq!(converted["object"], "response");
+        assert_eq!(converted["model"], "gpt-5.6-sol");
+        assert_eq!(converted["output"][0]["content"][0]["text"], "done");
+        assert_eq!(converted["output"][1]["name"], "lookup");
+        assert_eq!(converted["usage"]["total_tokens"], 15);
+    }
 }
 
 /// Forward request to a Gemini-compatible provider and convert the response
@@ -3507,9 +3979,15 @@ async fn forward_gemini_as_codex_sse(
             format!("{}&alt=sse", base)
         }
     } else if base.ends_with("/v1") {
-        format!("{}/models/{}:streamGenerateContent?alt=sse", base, openai_req.model)
+        format!(
+            "{}/models/{}:streamGenerateContent?alt=sse",
+            base, openai_req.model
+        )
     } else {
-        format!("{}/v1/models/{}:streamGenerateContent?alt=sse", base, openai_req.model)
+        format!(
+            "{}/v1/models/{}:streamGenerateContent?alt=sse",
+            base, openai_req.model
+        )
     };
 
     let timeout_secs = state.request_timeout.max(5);
@@ -3526,15 +4004,17 @@ async fn forward_gemini_as_codex_sse(
     let extract_text = |content: &crate::proxy::mappers::openai::OpenAIContent| -> String {
         match content {
             crate::proxy::mappers::openai::OpenAIContent::String(s) => s.clone(),
-            crate::proxy::mappers::openai::OpenAIContent::Array(arr) => {
-                arr.iter().filter_map(|p| {
+            crate::proxy::mappers::openai::OpenAIContent::Array(arr) => arr
+                .iter()
+                .filter_map(|p| {
                     if let crate::proxy::mappers::openai::OpenAIContentBlock::Text { text } = p {
                         Some(text.clone())
                     } else {
                         None
                     }
-                }).collect::<Vec<_>>().join("\n")
-            }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     };
 
@@ -3546,14 +4026,22 @@ async fn forward_gemini_as_codex_sse(
                         if role == "system" {
                             let text = match content_val {
                                 Value::String(s) => s.clone(),
-                                Value::Array(arr) => arr.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"),
+                                Value::Array(arr) => arr
+                                    .iter()
+                                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
                                 _ => String::new(),
                             };
                             system_instruction = Some(json!({ "parts": [{ "text": text }] }));
                         } else {
                             let text = match content_val {
                                 Value::String(s) => s.clone(),
-                                Value::Array(arr) => arr.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"),
+                                Value::Array(arr) => arr
+                                    .iter()
+                                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
                                 _ => String::new(),
                             };
                             let gemini_role = if role == "user" { "user" } else { "model" };
@@ -3597,7 +4085,10 @@ async fn forward_gemini_as_codex_sse(
     let body_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
 
     let mut req_headers = axum::http::HeaderMap::new();
-    req_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    req_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     for (k, v) in headers.iter() {
         let key = k.as_str().to_ascii_lowercase();
         if matches!(key.as_str(), "accept" | "accept-encoding" | "user-agent") {
@@ -3627,19 +4118,35 @@ async fn forward_gemini_as_codex_sse(
 
     // [FIX] Detect upstream error before trying to parse as SSE
     let upstream_status = resp.status();
-    let ct_header = resp.headers().get(header::CONTENT_TYPE)
+    let ct_header = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let is_error = !upstream_status.is_success() || (!ct_header.contains("text/event-stream") && !ct_header.contains("stream"));
+    let is_error = !upstream_status.is_success()
+        || (!ct_header.contains("text/event-stream") && !ct_header.contains("stream"));
 
     if is_error {
         let full_body = resp.bytes().await.unwrap_or_default();
         let body_str = String::from_utf8_lossy(&full_body).to_string();
-        tracing::error!("[Codex→Gemini] Upstream error: status={}, body={}", upstream_status, body_str);
+        tracing::error!(
+            "[Codex→Gemini] Upstream error: status={}, body={}",
+            upstream_status,
+            body_str
+        );
         let error_msg = if let Ok(err_json) = serde_json::from_str::<Value>(&body_str) {
-            err_json.get("message").and_then(|v| v.as_str()).map(String::from)
-                .or_else(|| err_json.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()).map(String::from))
+            err_json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    err_json
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
                 .unwrap_or_else(|| body_str.clone())
         } else {
             body_str.clone()
@@ -3714,7 +4221,11 @@ async fn forward_gemini_as_codex_sse(
             .header("X-Mapped-Model", &openai_req.model)
             .body(Body::from_stream(codex_stream))
             .unwrap_or_else(|_| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build error response").into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build error response",
+                )
+                    .into_response()
             });
     }
 
@@ -3840,6 +4351,10 @@ async fn forward_gemini_as_codex_sse(
         .header("X-Mapped-Model", &openai_req.model)
         .body(Body::from_stream(codex_stream))
         .unwrap_or_else(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build response",
+            )
+                .into_response()
         })
 }

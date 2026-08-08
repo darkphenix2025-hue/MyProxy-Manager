@@ -165,7 +165,7 @@ export default function ServiceConfig() {
                 const config = {
                     enabled: true,
                     mode: cfMode,
-                    port: appConfig?.proxy.port || 8045,
+                    port: appConfig?.proxy.port || 8150,
                     token: cfMode === 'auth' ? cfToken : null,
                     use_http2: cfUseHttp2,
                 };
@@ -181,7 +181,7 @@ export default function ServiceConfig() {
                             mode: cfMode,
                             token: cfToken,
                             use_http2: cfUseHttp2,
-                            port: appConfig.proxy.port || 8045
+                            port: appConfig.proxy.port || 8150
                         }
                     });
                 }
@@ -238,7 +238,7 @@ export default function ServiceConfig() {
     }, [models]);
 
     const getPythonExample = (modelId: string) => {
-        const port = status.running ? status.port : (appConfig?.proxy.port || 8045);
+        const port = status.running ? status.port : (appConfig?.proxy.port || 8150);
         const baseUrl = `http://127.0.0.1:${port}/v1`;
         const apiKey = appConfig?.proxy.api_key || 'YOUR_API_KEY';
 
@@ -583,7 +583,7 @@ print(response.choices[0].message.content)`;
                     </div>
                     <div className="p-5">
                         <CliSyncCard
-                            proxyUrl={status.running ? status.base_url : `http://127.0.0.1:${appConfig.proxy.port || 8045}`}
+                            proxyUrl={status.running ? status.base_url : `http://127.0.0.1:${appConfig.proxy.port || 8150}`}
                             apiKey={appConfig.proxy.api_key}
                         />
                     </div>
@@ -636,9 +636,9 @@ print(response.choices[0].message.content)`;
                             <div className="bg-slate-100 dark:bg-slate-800/80 rounded-lg p-3 text-[10px] font-mono text-slate-600 dark:text-slate-400">
                                 <div className="mb-1 font-bold text-gray-400 uppercase tracking-wider">{t('proxy.config.zai.mcp.local_endpoints')}</div>
                                 <div className="space-y-0.5 select-all">
-                                    {appConfig.proxy.zai?.mcp?.web_search_enabled && <div>http://127.0.0.1:{status.running ? status.port : (appConfig.proxy.port || 8045)}/mcp/web_search_prime/mcp</div>}
-                                    {appConfig.proxy.zai?.mcp?.web_reader_enabled && <div>http://127.0.0.1:{status.running ? status.port : (appConfig.proxy.port || 8045)}/mcp/web_reader/mcp</div>}
-                                    {appConfig.proxy.zai?.mcp?.vision_enabled && <div>http://127.0.0.1:{status.running ? status.port : (appConfig.proxy.port || 8045)}/mcp/zai-mcp-server/mcp</div>}
+                                    {appConfig.proxy.zai?.mcp?.web_search_enabled && <div>http://127.0.0.1:{status.running ? status.port : (appConfig.proxy.port || 8150)}/mcp/web_search_prime/mcp</div>}
+                                    {appConfig.proxy.zai?.mcp?.web_reader_enabled && <div>http://127.0.0.1:{status.running ? status.port : (appConfig.proxy.port || 8150)}/mcp/web_reader/mcp</div>}
+                                    {appConfig.proxy.zai?.mcp?.vision_enabled && <div>http://127.0.0.1:{status.running ? status.port : (appConfig.proxy.port || 8150)}/mcp/zai-mcp-server/mcp</div>}
                                 </div>
                             </div>
                         )}
@@ -664,22 +664,22 @@ print(response.choices[0].message.content)`;
                                 onClick={() => setSelectedProtocol('openai')}>
                                 <div className="flex items-center justify-between mb-2">
                                     <span className="text-xs font-bold text-blue-600">{t('proxy.multi_protocol.openai_label')}</span>
-                                    <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8045)}/v1`, 'openai'); }} className="btn btn-ghost btn-xs">
+                                    <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8150)}/v1`, 'openai'); }} className="btn btn-ghost btn-xs">
                                         {copied === 'openai' ? <CheckCircle size={14} /> : <div className="flex items-center gap-1 text-[10px] uppercase font-bold tracking-tighter"><Copy size={12} /> {t('proxy.multi_protocol.copy_base', { defaultValue: 'Base' })}</div>}
                                     </button>
                                 </div>
                                 <div className="space-y-1">
                                     <div className="flex items-center justify-between hover:bg-black/5 dark:hover:bg-white/5 rounded p-0.5 group">
                                         <code className="text-[10px] opacity-70">/v1/chat/completions</code>
-                                        <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8045)}/v1/chat/completions`, 'openai-chat'); }} className="opacity-0 group-hover:opacity-100 transition-opacity">{copied === 'openai-chat' ? <CheckCircle size={10} className="text-green-500" /> : <Copy size={10} />}</button>
+                                        <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8150)}/v1/chat/completions`, 'openai-chat'); }} className="opacity-0 group-hover:opacity-100 transition-opacity">{copied === 'openai-chat' ? <CheckCircle size={10} className="text-green-500" /> : <Copy size={10} />}</button>
                                     </div>
                                     <div className="flex items-center justify-between hover:bg-black/5 dark:hover:bg-white/5 rounded p-0.5 group">
                                         <code className="text-[10px] opacity-70">/v1/completions</code>
-                                        <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8045)}/v1/completions`, 'openai-compl'); }} className="opacity-0 group-hover:opacity-100 transition-opacity">{copied === 'openai-compl' ? <CheckCircle size={10} className="text-green-500" /> : <Copy size={10} />}</button>
+                                        <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8150)}/v1/completions`, 'openai-compl'); }} className="opacity-0 group-hover:opacity-100 transition-opacity">{copied === 'openai-compl' ? <CheckCircle size={10} className="text-green-500" /> : <Copy size={10} />}</button>
                                     </div>
                                     <div className="flex items-center justify-between hover:bg-black/5 dark:hover:bg-white/5 rounded p-0.5 group">
                                         <code className="text-[10px] opacity-70 font-bold text-blue-500">/v1/responses (Codex)</code>
-                                        <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8045)}/v1/responses`, 'openai-resp'); }} className="opacity-0 group-hover:opacity-100 transition-opacity">{copied === 'openai-resp' ? <CheckCircle size={10} className="text-green-500" /> : <Copy size={10} />}</button>
+                                        <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8150)}/v1/responses`, 'openai-resp'); }} className="opacity-0 group-hover:opacity-100 transition-opacity">{copied === 'openai-resp' ? <CheckCircle size={10} className="text-green-500" /> : <Copy size={10} />}</button>
                                     </div>
                                 </div>
                             </div>
@@ -688,7 +688,7 @@ print(response.choices[0].message.content)`;
                                 onClick={() => setSelectedProtocol('anthropic')}>
                                 <div className="flex items-center justify-between mb-2">
                                     <span className="text-xs font-bold text-purple-600">{t('proxy.multi_protocol.anthropic_label')}</span>
-                                    <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8045)}/v1/messages`, 'anthropic'); }} className="btn btn-ghost btn-xs">
+                                    <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8150)}/v1/messages`, 'anthropic'); }} className="btn btn-ghost btn-xs">
                                         {copied === 'anthropic' ? <CheckCircle size={14} /> : <Copy size={14} />}
                                     </button>
                                 </div>
@@ -699,7 +699,7 @@ print(response.choices[0].message.content)`;
                                 onClick={() => setSelectedProtocol('gemini')}>
                                 <div className="flex items-center justify-between mb-2">
                                     <span className="text-xs font-bold text-green-600">{t('proxy.multi_protocol.gemini_label')}</span>
-                                    <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8045)}/v1beta/models`, 'gemini'); }} className="btn btn-ghost btn-xs">
+                                    <button onClick={(e) => { e.stopPropagation(); copyToClipboardHandler(`http://127.0.0.1:${status.running ? status.port : (appConfig.proxy.port || 8150)}/v1beta/models`, 'gemini'); }} className="btn btn-ghost btn-xs">
                                         {copied === 'gemini' ? <CheckCircle size={14} /> : <Copy size={14} />}
                                     </button>
                                 </div>

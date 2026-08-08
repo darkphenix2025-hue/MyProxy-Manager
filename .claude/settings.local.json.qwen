@@ -1,0 +1,30 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-sp-8d209cef742e453f902d792046469141",
+    "ANTHROPIC_BASE_URL": "https://coding.dashscope.aliyuncs.com/apps/anthropic",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen3.5-plus",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen3.7-plus",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen3.6-plus",
+    "ANTHROPIC_MODEL": "qwen3.6-plus",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "SHELL": "/bin/zsh"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(pkill -9 -f \"antigravity\")",
+      "Bash(./target/debug/antigravity_tools --headless)",
+      "Bash(rm -f /tmp/proxy_llm.log)",
+      "Bash(rm -rf /tmp/proxy_llm_details/*)",
+      "Bash(curl -s -X POST http://127.0.0.1:8045/api/proxy/llm-logging/enable -H 'Authorization: Bearer __TRACKED_VAR__')",
+      "Bash(curl -s -X POST http://127.0.0.1:8045/api/proxy/llm-logging/enable -H 'Authorization: Bearer 198798')",
+      "Bash(curl -s -X POST http://127.0.0.1:8045/v1/chat/completions -H 'Authorization: Bearer sk-3c2c05cdcd314d03bf98a2b990448992' -H 'Content-Type: application/json' -d '{\"model\":\"claude-sonnet-4-20250514\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}],\"stream\":false}')",
+      "Read(//tmp/**)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(cargo check *)",
+      "Bash(python3 -c ' *)",
+      "Bash(grep -v ':0$')"
+    ]
+  }
+}

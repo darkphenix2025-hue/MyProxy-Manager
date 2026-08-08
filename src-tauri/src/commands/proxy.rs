@@ -257,6 +257,7 @@ pub async fn ensure_admin_server(
         integration.clone(),
         cloudflared_state,
         config.proxy_pool.clone(),
+        config.translator.clone(),
     )
     .await
     {
@@ -817,7 +818,6 @@ pub async fn test_provider_models(
     request: TestProviderModelsRequest,
     proxy_state: State<'_, ProxyServiceState>,
 ) -> Result<TestProviderModelsResponse, String> {
-    use crate::proxy::config::ProviderProtocol;
 
     let provider = request.provider;
 
@@ -882,8 +882,7 @@ fn build_test_provider_client(
     if upstream_proxy.enabled && !upstream_proxy.url.is_empty() {
         let url = crate::proxy::config::normalize_proxy_url(&upstream_proxy.url);
         builder = builder.proxy(
-            reqwest::Proxy::all(&url)
-                .map_err(|e| format!("Invalid upstream proxy url: {}", e))?,
+            reqwest::Proxy::all(&url).map_err(|e| format!("Invalid upstream proxy url: {}", e))?,
         );
     }
 

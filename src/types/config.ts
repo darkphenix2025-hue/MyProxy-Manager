@@ -8,7 +8,7 @@ export interface UpstreamProxyConfig {
 // ============================================================================
 
 /** 供应商协议类型 */
-export type ProviderProtocol = 'anthropic_passthrough' | 'openai_compatible' | 'gemini_v1internal';
+export type ProviderProtocol = 'anthropic_passthrough' | 'open_a_i_compatible' | 'gemini_v1_internal';
 
 /** 供应商分发模式 */
 export type ProviderDispatchMode = 'exclusive' | 'pooled' | 'fallback';

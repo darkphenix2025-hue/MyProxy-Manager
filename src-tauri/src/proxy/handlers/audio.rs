@@ -9,10 +9,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::proxy::{
-    audio::AudioProcessor,
-    config::ProviderProtocol,
-    providers::zai_audio::forward_audio_to_openai_compat,
-    server::AppState,
+    audio::AudioProcessor, config::ProviderProtocol,
+    providers::zai_audio::forward_audio_to_openai_compat, server::AppState,
 };
 
 /// 处理音频转录请求 (OpenAI Whisper API 兼容)

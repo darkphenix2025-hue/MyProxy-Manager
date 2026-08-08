@@ -3,8 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::proxy::config::{
-    is_valid_provider_id, ProviderDispatchMode, ProviderProtocol,
-    UpstreamProvider, ZaiConfig,
+    is_valid_provider_id, ProviderDispatchMode, ProviderProtocol, UpstreamProvider, ZaiConfig,
 };
 
 /// Result of provider selection, including the resolved model name
@@ -56,7 +55,8 @@ impl ProviderRouter {
                     tracing::warn!(
                         "[ProviderRouter] Invalid provider_id format: '{}' (provider: '{}'). \
                          Must be 1-10 alphanumeric chars, starting with a letter.",
-                        id, p.name
+                        id,
+                        p.name
                     );
                     continue;
                 }
@@ -64,7 +64,8 @@ impl ProviderRouter {
                     tracing::error!(
                         "[ProviderRouter] Duplicate provider_id: '{}' (provider: '{}'). \
                          This provider will not be routable by provider_id.",
-                        id, p.name
+                        id,
+                        p.name
                     );
                     provider_id_index.remove(id);
                     continue;
@@ -73,7 +74,11 @@ impl ProviderRouter {
             }
         }
 
-        tracing::info!("[ProviderRouter] Built with {} providers, provider_id_index = {:?}", enabled.len(), provider_id_index);
+        tracing::info!(
+            "[ProviderRouter] Built with {} providers, provider_id_index = {:?}",
+            enabled.len(),
+            provider_id_index
+        );
 
         Self {
             providers: enabled,
@@ -141,14 +146,15 @@ impl ProviderRouter {
     ///    - Exclusive providers first (sorted by priority, then config order)
     ///    - Pooled providers next (sorted by priority, then RR)
     ///    - Fallback providers last (sorted by priority, then config order)
-    pub fn select(
-        &self,
-        model: &str,
-        prev_failed: Option<&str>,
-    ) -> ProviderSelection<'_> {
+    pub fn select(&self, model: &str, prev_failed: Option<&str>) -> ProviderSelection<'_> {
         // STEP 1: Check for provider_id/ prefix routing (highest priority)
         if let Some((pid, rest)) = self.extract_provider_id_prefix(model) {
-            tracing::info!("[ProviderRouter] provider_id match: '{}' -> provider='{}', rest='{}'", model, pid, rest);
+            tracing::info!(
+                "[ProviderRouter] provider_id match: '{}' -> provider='{}', rest='{}'",
+                model,
+                pid,
+                rest
+            );
             if let Some(&idx) = self.provider_id_index.get(pid) {
                 let provider = &self.providers[idx];
                 if prev_failed.map_or(true, |pf| provider.name != pf) {
@@ -175,12 +181,13 @@ impl ProviderRouter {
 
             let has_match = if !p.model_prefixes.is_empty() {
                 // Check model_prefixes
-                p.model_prefixes.iter().any(|prefix| {
-                    model_lower.starts_with(prefix.to_lowercase().as_str())
-                })
+                p.model_prefixes
+                    .iter()
+                    .any(|prefix| model_lower.starts_with(prefix.to_lowercase().as_str()))
             } else if let Some(ref avail) = p.available_models {
                 // Check available_models (comma-separated list)
-                avail.split(',')
+                avail
+                    .split(',')
                     .map(|s| s.trim().to_lowercase())
                     .filter(|s| !s.is_empty())
                     .any(|m| m == model_lower)
@@ -266,7 +273,10 @@ impl ProviderRouter {
         fallback.sort_by_key(|p| p.priority);
         let fallback_provider = fallback.first().copied().unwrap_or_else(|| {
             // No fallback provider, use the first available provider
-            self.providers.iter().find(|p| prev_failed.map_or(true, |pf| p.name != pf)).unwrap_or(&self.providers[0])
+            self.providers
+                .iter()
+                .find(|p| prev_failed.map_or(true, |pf| p.name != pf))
+                .unwrap_or(&self.providers[0])
         });
         ProviderSelection {
             provider: fallback_provider,
@@ -452,9 +462,18 @@ mod tests {
         let router = build_router_with_providers(vec![provider.clone()]);
 
         // Without explicit mapping, models pass through as-is
-        assert_eq!(router.map_model(&provider, "claude-sonnet-4-20250514"), "claude-sonnet-4-20250514");
-        assert_eq!(router.map_model(&provider, "claude-opus-4-20250514"), "claude-opus-4-20250514");
-        assert_eq!(router.map_model(&provider, "gemini-3-flash"), "gemini-3-flash");
+        assert_eq!(
+            router.map_model(&provider, "claude-sonnet-4-20250514"),
+            "claude-sonnet-4-20250514"
+        );
+        assert_eq!(
+            router.map_model(&provider, "claude-opus-4-20250514"),
+            "claude-opus-4-20250514"
+        );
+        assert_eq!(
+            router.map_model(&provider, "gemini-3-flash"),
+            "gemini-3-flash"
+        );
     }
 
     #[test]

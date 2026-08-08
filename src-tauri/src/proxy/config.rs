@@ -619,6 +619,10 @@ pub struct ProxyConfig {
     /// 代理池配置
     #[serde(default)]
     pub proxy_pool: ProxyPoolConfig,
+
+    /// 协议转换注册表配置 (灰度发布)
+    #[serde(default)]
+    pub translator: super::translator::config::TranslatorConfig,
 }
 
 /// 上游代理配置
@@ -636,7 +640,7 @@ impl Default for ProxyConfig {
             enabled: false,
             allow_lan_access: false, // 默认仅本机访问，隐私优先
             auth_mode: ProxyAuthMode::default(),
-            port: 8045,
+            port: 8150,
             api_key: format!("sk-{}", uuid::Uuid::new_v4().simple()),
             admin_password: None,
             auto_start: false,
@@ -657,6 +661,7 @@ impl Default for ProxyConfig {
             global_system_prompt: GlobalSystemPromptConfig::default(),
             proxy_pool: ProxyPoolConfig::default(),
             image_thinking_mode: None,
+            translator: super::translator::config::TranslatorConfig::default(),
         }
     }
 }
@@ -761,14 +766,32 @@ mod tests {
     #[test]
     fn test_normalize_proxy_url() {
         // 测试已有协议
-        assert_eq!(normalize_proxy_url("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
-        assert_eq!(normalize_proxy_url("https://proxy.com"), "https://proxy.com");
-        assert_eq!(normalize_proxy_url("socks5://127.0.0.1:1080"), "socks5://127.0.0.1:1080");
-        assert_eq!(normalize_proxy_url("socks5h://127.0.0.1:1080"), "socks5h://127.0.0.1:1080");
+        assert_eq!(
+            normalize_proxy_url("http://127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            normalize_proxy_url("https://proxy.com"),
+            "https://proxy.com"
+        );
+        assert_eq!(
+            normalize_proxy_url("socks5://127.0.0.1:1080"),
+            "socks5://127.0.0.1:1080"
+        );
+        assert_eq!(
+            normalize_proxy_url("socks5h://127.0.0.1:1080"),
+            "socks5h://127.0.0.1:1080"
+        );
 
         // 测试缺少协议（默认补全 http://）
-        assert_eq!(normalize_proxy_url("127.0.0.1:7890"), "http://127.0.0.1:7890");
-        assert_eq!(normalize_proxy_url("localhost:1082"), "http://localhost:1082");
+        assert_eq!(
+            normalize_proxy_url("127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            normalize_proxy_url("localhost:1082"),
+            "http://localhost:1082"
+        );
 
         // 测试边缘情况
         assert_eq!(normalize_proxy_url(""), "");

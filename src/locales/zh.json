@@ -643,7 +643,7 @@
             },
             "port": "监听端口",
             "port_tooltip": "本地 API 代理监听的端口。需要先停止服务再修改，修改后需重启生效。",
-            "port_hint": "默认 8045，修改端口需重启服务",
+            "port_hint": "默认 8150，修改端口需重启服务",
             "auto_start": "跟随应用自动启动",
             "auto_start_tooltip": "应用启动时自动启动本地 API 代理服务。",
             "allow_lan_access": "允许局域网访问",
@@ -1351,8 +1351,8 @@
         },
         "protocols": {
             "anthropic_passthrough": "Anthropic",
-            "openai_compatible": "OpenAI",
-            "gemini_v1internal": "Gemini"
+            "open_a_i_compatible": "OpenAI",
+            "gemini_v1_internal": "Gemini"
         },
         "dispatch_modes": {
             "exclusive": "独占",

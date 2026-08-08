@@ -42,17 +42,15 @@ pub fn claude_to_openai_body(request: &ClaudeRequest) -> Value {
             }
             MessageContent::Array(blocks) => {
                 // Check if all blocks are text and can be joined into a single string
-                let all_text: Option<String> = blocks.iter().try_fold(
-                    String::new(),
-                    |mut acc, b| {
+                let all_text: Option<String> =
+                    blocks.iter().try_fold(String::new(), |mut acc, b| {
                         if let ContentBlock::Text { text } = b {
                             acc.push_str(text);
                             Some(acc)
                         } else {
                             None
                         }
-                    },
-                );
+                    });
 
                 if let Some(text) = all_text {
                     messages.push(json!({
@@ -157,10 +155,7 @@ fn content_block_to_openai(block: &ContentBlock) -> Option<Value> {
         })),
         ContentBlock::Image { source, .. } => {
             // Convert base64 image to data URL
-            let data_url = format!(
-                "data:{};base64,{}",
-                source.media_type, source.data
-            );
+            let data_url = format!("data:{};base64,{}", source.media_type, source.data);
             Some(json!({
                 "type": "image_url",
                 "image_url": {
@@ -172,13 +167,19 @@ fn content_block_to_openai(block: &ContentBlock) -> Option<Value> {
             "type": "text",
             "text": format!("<thinking>{}</thinking>", thinking),
         })),
-        ContentBlock::ToolUse { id, name, input, .. } => Some(json!({
+        ContentBlock::ToolUse {
+            id, name, input, ..
+        } => Some(json!({
             "type": "tool_use",
             "id": id,
             "name": name,
             "input": input,
         })),
-        ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
             let text = match content {
                 serde_json::Value::String(s) => s.clone(),
                 other => serde_json::to_string(other).unwrap_or_default(),
@@ -210,12 +211,10 @@ mod tests {
     fn test_basic_text_conversion() {
         let claude_req = ClaudeRequest {
             model: "claude-sonnet-4-20250514".to_string(),
-            messages: vec![
-                Message {
-                    role: "user".to_string(),
-                    content: MessageContent::String("Hello".to_string()),
-                },
-            ],
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::String("Hello".to_string()),
+            }],
             system: None,
             tools: None,
             stream: false,

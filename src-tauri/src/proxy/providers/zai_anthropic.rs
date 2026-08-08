@@ -34,6 +34,19 @@ pub fn join_base_url(base: &str, path: &str) -> Result<String, String> {
     Ok(format!("{}{}", base, path))
 }
 
+fn target_path_from_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let mut target = parsed.path().to_string();
+    if target.is_empty() {
+        target.push('/');
+    }
+    if let Some(query) = parsed.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    Some(target)
+}
+
 pub fn build_client(
     upstream_proxy: Option<crate::proxy::config::UpstreamProxyConfig>,
     timeout_secs: u64,
@@ -231,6 +244,8 @@ pub async fn forward_anthropic_with_provider(
     mut body: Value,
     message_count: usize,
     provider_name: &str,
+    upstream_protocol: &str,
+    llm_trace_id: Option<&str>,
 ) -> Response {
     if api_key.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "Provider api_key is not set").into_response();
@@ -283,6 +298,21 @@ pub async fn forward_anthropic_with_provider(
     let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
     let body_len = body_bytes.len();
 
+    // Write request body to upstream trace cache for traffic logging
+    if let Some(trace_id) = llm_trace_id {
+        let request_body_str = String::from_utf8(body_bytes.clone()).ok();
+        state
+            .upstream_trace_cache
+            .put(
+                trace_id,
+                crate::proxy::upstream_trace::UpstreamTrace {
+                    request_body: request_body_str,
+                    response_body: None, // SSE stream — cannot collect full response
+                },
+            )
+            .await;
+    }
+
     tracing::debug!("Forwarding request to provider (len: {} bytes): {}", body_len, url);
 
     let req = client.request(method, &url)
@@ -310,6 +340,16 @@ pub async fn forward_anthropic_with_provider(
     if let Some(ref mapped) = mapped_model_name {
         out = out.header("X-Mapped-Model", mapped.as_str());
     }
+    // Add upstream protocol, model and URL headers for monitor middleware
+    out = out.header("X-Upstream-Protocol", upstream_protocol);
+    if let Some(ref mapped) = mapped_model_name {
+        out = out.header("X-Upstream-Model", mapped.as_str());
+    }
+    // Report the path of the final URL that was actually requested. Using only
+    // base_url omitted the header for origin-only provider URLs.
+    if let Some(target_path) = target_path_from_url(&url) {
+        out = out.header("X-Upstream-URL", target_path);
+    }
 
     let stream = resp.bytes_stream().map(|chunk| match chunk {
         Ok(b) => Ok::<Bytes, std::io::Error>(b),
@@ -319,4 +359,25 @@ pub async fn forward_anthropic_with_provider(
     out.body(Body::from_stream(stream)).unwrap_or_else(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_path_from_url;
+
+    #[test]
+    fn extracts_target_path_from_origin_only_provider_url() {
+        assert_eq!(
+            target_path_from_url("https://provider.example/v1/messages"),
+            Some("/v1/messages".to_string())
+        );
+    }
+
+    #[test]
+    fn preserves_provider_prefix_and_query_in_target_path() {
+        assert_eq!(
+            target_path_from_url("https://provider.example/apps/anthropic/v1/messages?beta=true"),
+            Some("/apps/anthropic/v1/messages?beta=true".to_string())
+        );
+    }
 }

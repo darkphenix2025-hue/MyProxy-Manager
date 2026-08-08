@@ -575,7 +575,7 @@
             },
             "port": "監聽通訊埠",
             "port_tooltip": "本地 API 代理監聽的通訊埠。需要先停止服務再修改，修改後需重啟生效。",
-            "port_hint": "預設 8045，修改通訊埠需重啟服務",
+            "port_hint": "預設 8150，修改通訊埠需重啟服務",
             "auto_start": "跟隨應用自動啟動",
             "auto_start_tooltip": "應用啟動時自動啟動本地 API 代理服務。",
             "allow_lan_access": "允許區域網路存取",
