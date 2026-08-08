@@ -354,8 +354,13 @@ fn calculate_aspect_ratio_from_size(size: &str) -> &'static str {
     "1:1" // 默认回退
 }
 
-/// Inject current googleSearch tool and ensure no duplicate legacy search tools
-pub fn inject_google_search_tool(body: &mut Value, _mapped_model: Option<&str>) {
+/// Inject the current `googleSearch` tool and ensure no duplicate legacy search tools.
+///
+/// Gemini 2.0+ supports a grounding tool alongside function declarations. Older
+/// v1internal model families reject that combination, so those models keep the
+/// historical behaviour of skipping the search injection when function tools are
+/// present.
+pub fn inject_google_search_tool(body: &mut Value, mapped_model: Option<&str>) {
     if let Some(obj) = body.as_object_mut() {
         let tools_entry = obj.entry("tools").or_insert_with(|| json!([]));
         if let Some(tools_arr) = tools_entry.as_array_mut() {
@@ -364,12 +369,21 @@ pub fn inject_google_search_tool(body: &mut Value, _mapped_model: Option<&str>) 
                     .map_or(false, |o| o.contains_key("functionDeclarations"))
             });
 
-            // [FIX] v1internal (cloudcode-pa) does NOT support mixing googleSearch
-            // with functionDeclarations — it lacks includeServerSideToolInvocations.
-            // Skip googleSearch injection entirely when function tools are present.
-            if has_functions {
+            let supports_mixed_tools = mapped_model
+                .map(str::to_lowercase)
+                .map(|model| {
+                    model.contains("gemini-2.0")
+                        || model.contains("gemini-2.5")
+                        || model.contains("gemini-3")
+                })
+                .unwrap_or(false);
+
+            // Legacy v1internal models do not support mixing googleSearch with
+            // functionDeclarations. Gemini 2.0+ added support for this combination.
+            if has_functions && !supports_mixed_tools {
                 tracing::debug!(
-                    "Skipping googleSearch injection: functionDeclarations present (v1internal incompatible)"
+                    "Skipping googleSearch injection: functionDeclarations present for model {:?}",
+                    mapped_model
                 );
                 return;
             }

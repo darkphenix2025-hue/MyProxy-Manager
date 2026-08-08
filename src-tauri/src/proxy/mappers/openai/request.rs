@@ -1121,7 +1121,7 @@ mod tests {
             transform_openai_request(&req, "test-v", mapped_model, None);
 
         // Extract the tool call part from contents
-        let contents = result["contents"].as_array().unwrap();
+        let contents = result["request"]["contents"].as_array().unwrap();
         // Identify the part with functionCall
         let parts = contents[0]["parts"].as_array().unwrap();
         let tool_part = parts

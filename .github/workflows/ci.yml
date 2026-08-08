@@ -43,6 +43,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Prepare isolated test data directory
+        run: |
+          # Rust tests use a shared SQLite store and process-wide config
+          # singletons. Keep CI data isolated from the runner and expose the
+          # directory to all later steps.
+          ABV_DATA_DIR="${RUNNER_TEMP:-/tmp}/myproxy-data"
+          mkdir -p "$ABV_DATA_DIR"
+          echo "ABV_DATA_DIR=$ABV_DATA_DIR" >> "$GITHUB_ENV"
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-features -- --test-threads=1
