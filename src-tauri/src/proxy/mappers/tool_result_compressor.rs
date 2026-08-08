@@ -402,8 +402,17 @@ Please read the file locally."#;
             }),
         ];
 
-        // 确认工具结果不再剔除图片
+        // Text output is capped at the documented 200,000-character limit. The
+        // first block is retained in full and the second is truncated to the
+        // remaining budget; later blocks are omitted once the cap is reached.
         sanitize_tool_result_blocks(&mut blocks);
-        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks.len(), 2);
+        let first_len = blocks[0]["text"].as_str().unwrap().len();
+        let second_text = blocks[1]["text"].as_str().unwrap();
+        assert_eq!(first_len, 100_000);
+        assert!(second_text.contains("[truncated"));
+        // The truncation marker is included in the compacted block, so allow
+        // its small fixed overhead while keeping the overall result bounded.
+        assert!(first_len + second_text.len() <= MAX_TOOL_RESULT_CHARS + 100);
     }
 }

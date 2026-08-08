@@ -2987,15 +2987,17 @@ mod tests {
         let gen_config = result["request"]["generationConfig"].as_object().unwrap();
         let thinking_config = gen_config["thinkingConfig"].as_object().unwrap();
 
-        // Check injection
+        // Check injection. Claude models use Vertex's adaptive `thinkingLevel`
+        // representation; `thinkingBudget: -1` is not a valid Claude payload.
         assert_eq!(thinking_config["includeThoughts"], true);
-        assert_eq!(thinking_config["thinkingBudget"], -1);
+        assert_eq!(thinking_config["thinkingLevel"], "high");
+        assert!(thinking_config.get("thinkingBudget").is_none());
         assert!(thinking_config.get("thinkingType").is_none());
         assert!(thinking_config.get("effort").is_none());
 
         // Check maxOutputTokens default for adaptive
         let max_output_tokens = gen_config["maxOutputTokens"].as_i64().unwrap();
-        assert_eq!(max_output_tokens, 131072);
+        assert_eq!(max_output_tokens, 64000);
 
         // Reset global config
         crate::proxy::config::update_thinking_budget_config(ThinkingBudgetConfig::default());

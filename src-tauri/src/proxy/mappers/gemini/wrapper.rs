@@ -961,13 +961,14 @@ mod tests {
                 .get("thinkingConfig")
                 .expect("thinkingConfig should be injected");
 
-            // 3. 验证 Claude 默认预算为 16000
+            // 3. Claude models use the shared safe fallback when no model-specific
+            // thinking budget is available.
             let budget = thinking_config["thinkingBudget"]
                 .as_u64()
                 .expect("thinkingBudget should be a number");
             assert_eq!(
-                budget, 16000,
-                "Claude default thinking budget should be 16000"
+                budget, 24576,
+                "Claude default thinking budget should use the safe fallback"
             );
         }
 
