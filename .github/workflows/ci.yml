@@ -25,11 +25,6 @@ jobs:
 
   rust:
     runs-on: ubuntu-24.04
-    env:
-      # Rust tests use a shared SQLite store and several process-wide config
-      # singletons. Keep CI data isolated from the runner and execute the suite
-      # deterministically in one test thread.
-      ABV_DATA_DIR: ${{ runner.temp }}/myproxy-data
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux Tauri dependencies
@@ -49,7 +44,13 @@ jobs:
         with:
           workspaces: src-tauri
       - name: Prepare isolated test data directory
-        run: mkdir -p "$ABV_DATA_DIR"
+        run: |
+          # Rust tests use a shared SQLite store and process-wide config
+          # singletons. Keep CI data isolated from the runner and expose the
+          # directory to all later steps.
+          ABV_DATA_DIR="${RUNNER_TEMP:-/tmp}/myproxy-data"
+          mkdir -p "$ABV_DATA_DIR"
+          echo "ABV_DATA_DIR=$ABV_DATA_DIR" >> "$GITHUB_ENV"
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features
       - run: cargo test --manifest-path src-tauri/Cargo.toml --all-features -- --test-threads=1
