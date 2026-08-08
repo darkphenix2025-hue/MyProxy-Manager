@@ -56,15 +56,10 @@ pub async fn forward_audio_to_openai_compat(
         .text("model", model.to_string())
         .text("prompt", prompt.to_string());
 
-    let api_path = format!(
+    let url = format!(
         "{}/audio/transcriptions",
-        provider
-            .api_path
-            .as_deref()
-            .unwrap_or("/v1")
-            .trim_end_matches('/')
+        provider.base_url.trim_end_matches('/')
     );
-    let url = format!("{}{}", provider.base_url.trim_end_matches('/'), &api_path);
 
     let timeout_secs = provider
         .request_timeout_secs

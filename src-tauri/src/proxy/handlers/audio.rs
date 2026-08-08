@@ -90,8 +90,6 @@ pub async fn handle_audio_transcription(
         let sel = router.select(
             &audio_mapped_model,
             None,
-            state.cooldown_manager.as_ref().map(|a| a.as_ref()),
-            Some(&audio_mapped_model),
         );
         if router.is_empty() || sel.provider.name.is_empty() {
             None

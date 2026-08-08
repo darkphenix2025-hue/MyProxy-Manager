@@ -520,9 +520,6 @@ pub fn run() {
             commands::proxy::clear_all_proxy_rate_limits,
             commands::proxy::check_proxy_health,
             commands::proxy::test_provider_models,
-            // Model cooldown commands
-            commands::get_model_cooldowns,
-            commands::clear_model_cooldowns,
             // Proxy Pool Binding commands
             commands::proxy_pool::bind_account_proxy,
             commands::proxy_pool::unbind_account_proxy,
@@ -549,9 +546,6 @@ pub fn run() {
             commands::get_token_stats_model_trend_daily,
             commands::get_token_stats_account_trend_hourly,
             commands::get_token_stats_account_trend_daily,
-            commands::get_llm_log_traces,
-            commands::get_llm_log_detail,
-            commands::delete_llm_log_trace,
             // Security/IP monitoring commands
             commands::security::get_ip_access_logs,
             commands::security::get_ip_stats,
