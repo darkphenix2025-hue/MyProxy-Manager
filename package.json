@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:version": "node scripts/check-version.mjs",
+    "test:version": "node --test scripts/check-version.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:debug": "RUST_LOG=debug npm run tauri dev"

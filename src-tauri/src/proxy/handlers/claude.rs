@@ -183,35 +183,35 @@ The structure MUST be as follows:
   <overall_goal>
     <!-- Describe the user's high-level goal in one concise sentence -->
   </overall_goal>
-  
+
   <technical_context>
     <!-- Tech stack: frameworks, languages, toolchain, dependency versions -->
   </technical_context>
-  
+
   <file_system_state>
     <!-- List files that were created, read, modified, or deleted. Note their status -->
   </file_system_state>
-  
+
   <code_changes>
     <!-- Key code snippets (preserve function signatures and important logic) -->
   </code_changes>
-  
+
   <debugging_history>
     <!-- List all errors encountered, with stack traces, and how they were fixed -->
   </debugging_history>
-  
+
   <current_plan>
     <!-- Step-by-step plan. Mark completed steps -->
   </current_plan>
-  
+
   <user_preferences>
     <!-- User's work preferences for this project (test commands, code style, etc.) -->
   </user_preferences>
-  
+
   <key_decisions>
     <!-- Critical architectural decisions and design choices -->
   </key_decisions>
-  
+
   <latest_thinking_signature>
     <!-- [CRITICAL] Preserve the last valid thinking signature -->
     <!-- Format: base64-encoded signature string -->
@@ -1613,8 +1613,8 @@ pub async fn handle_messages(
                                 // 降级为 text
                                 if !thinking.is_empty() {
                                     tracing::debug!("[Fallback] Converting thinking block to text (len={})", thinking.len());
-                                    new_blocks.push(crate::proxy::mappers::claude::models::ContentBlock::Text { 
-                                        text: thinking 
+                                    new_blocks.push(crate::proxy::mappers::claude::models::ContentBlock::Text {
+                                        text: thinking
                                     });
                                 }
                             },

@@ -818,7 +818,6 @@ pub async fn test_provider_models(
     request: TestProviderModelsRequest,
     proxy_state: State<'_, ProxyServiceState>,
 ) -> Result<TestProviderModelsResponse, String> {
-
     let provider = request.provider;
 
     if provider.api_key.trim().is_empty() {

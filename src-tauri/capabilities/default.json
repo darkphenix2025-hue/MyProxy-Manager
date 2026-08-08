@@ -27,6 +27,9 @@
     "autostart:allow-is-enabled",
     "window-state:default",
     "process:allow-restart",
-    "process:allow-exit"
+    "process:allow-exit",
+    "updater:default",
+    "updater:allow-check",
+    "updater:allow-download-and-install"
   ]
 }

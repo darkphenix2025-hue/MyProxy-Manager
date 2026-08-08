@@ -87,10 +87,7 @@ pub async fn handle_audio_transcription(
     );
     let router = state.provider_router.read().await;
     let selection = if !router.is_empty() {
-        let sel = router.select(
-            &audio_mapped_model,
-            None,
-        );
+        let sel = router.select(&audio_mapped_model, None);
         if router.is_empty() || sel.provider.name.is_empty() {
             None
         } else {

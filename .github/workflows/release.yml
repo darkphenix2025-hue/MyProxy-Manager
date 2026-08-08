@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version from the three manifests (without the v prefix)
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - id: release
+        name: Resolve release tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="v${{ inputs.version }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          npm run check:version -- --tag "${tag}"
+      - name: Require configured updater public key
+        run: '! grep -q REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY src-tauri/tauri.conf.json'
+      - run: npm run test:version
+      - run: npm run build
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: macos-14
+            target: aarch64-apple-darwin
+          - platform: windows-2022
+            target: x86_64-pc-windows-msvc
+          - platform: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux Tauri dependencies
+        if: startsWith(matrix.platform, 'ubuntu-')
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ needs.validate.outputs.tag }}
+          releaseName: MyProxy Manager ${{ needs.validate.outputs.tag }}
+          releaseBody: See the assets below to download and install this version.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          args: --target ${{ matrix.target }}
