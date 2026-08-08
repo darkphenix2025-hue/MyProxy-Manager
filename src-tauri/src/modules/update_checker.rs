@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const GITHUB_API_URL: &str =
-    "https://api.github.com/repos/lbjlaq/Antigravity-Manager/releases/latest";
+    "https://api.github.com/repos/darkphenix2025-hue/MyProxy-Manager/releases/latest";
 const GITHUB_RAW_URL: &str =
-    "https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/package.json";
+    "https://raw.githubusercontent.com/darkphenix2025-hue/MyProxy-Manager/main/package.json";
 const JSDELIVR_URL: &str =
-    "https://cdn.jsdelivr.net/gh/lbjlaq/Antigravity-Manager@main/package.json";
+    "https://cdn.jsdelivr.net/gh/darkphenix2025-hue/MyProxy-Manager@main/package.json";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CHECK_INTERVAL_HOURS: u64 = 24;
 
@@ -55,18 +55,18 @@ struct GitHubRelease {
 }
 
 const UPDATER_JSON_URL: &str =
-    "https://github.com/lbjlaq/Antigravity-Manager/releases/latest/download/updater.json";
+    "https://github.com/darkphenix2025-hue/MyProxy-Manager/releases/latest/download/latest.json";
 
 /// Check for updates with improved strategy:
-/// 1. Check updater.json (Source of Truth for Auto-Update)
+/// 1. Check latest.json (Source of Truth for Auto-Update)
 /// 2. Fallback to GitHub API (Informational)
 pub async fn check_for_updates() -> Result<UpdateInfo, String> {
-    // 1. Try updater.json first (Critical for functional Auto-Update)
+    // 1. Try latest.json first (Critical for functional Auto-Update)
     match check_updater_json().await {
         Ok(info) => return Ok(info),
         Err(e) => {
             logger::log_warn(&format!(
-                "updater.json check failed: {}. This might mean artifacts are not ready yet.",
+                "latest.json check failed: {}. This might mean artifacts are not ready yet.",
                 e
             ));
             // Don't return error immediately, try fallbacks for at least informational update
@@ -76,18 +76,18 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
     // 2. Try GitHub API
     match check_github_api().await {
         Ok(info) => {
-            // If we found an update via API but updater.json failed, we should probably warn or
+            // If we found an update via API but latest.json failed, we should probably warn or
             // implies that auto-update won't work yet.
             // However, the user wants "auto-update to work". If we show "Update Available" based on API
-            // but updater.json is missing, the "Auto Update" button will fail.
+            // but latest.json is missing, the "Auto Update" button will fail.
             // So, ideally, if we are in this block, we should perhaps mark it as "Manual Download Only" or similar?
             // For now, we return it, but maybe the frontend handles "not ready".
             // Actually, based on User Request, "Update Available" shouldn't show if it's not ready.
             // But if we return Ok(info) here, the frontend SHOWS it.
-            // If updater.json failed, it likely means the asset isn't uploaded.
-            // So we should maybe return Ok(info) with has_update=false if checking updater.json failed?
+            // If latest.json failed, it likely means the asset isn't uploaded.
+            // So we should maybe return Ok(info) with has_update=false if checking latest.json failed?
             // Or just log it.
-            // Let's stick to the plan: Prioritize updater.json. If that fails, we fallback.
+            // Let's stick to the plan: Prioritize latest.json. If that fails, we fallback.
             // Use the fallback but maybe the user will see "Auto update failed" and use manual.
             return Ok(info);
         }
@@ -129,7 +129,7 @@ struct UpdaterJson {
 
 async fn check_updater_json() -> Result<UpdateInfo, String> {
     let client = create_client().await?;
-    logger::log_info("Checking for updates via updater.json...");
+    logger::log_info("Checking for updates via latest.json...");
 
     let response = client
         .get(UPDATER_JSON_URL)
@@ -139,7 +139,7 @@ async fn check_updater_json() -> Result<UpdateInfo, String> {
 
     if !response.status().is_success() {
         return Err(format!(
-            "updater.json returned status: {}",
+            "latest.json returned status: {}",
             response.status()
         ));
     }
@@ -147,7 +147,7 @@ async fn check_updater_json() -> Result<UpdateInfo, String> {
     let updater_info: UpdaterJson = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse updater.json: {}", e))?;
+        .map_err(|e| format!("Failed to parse latest.json: {}", e))?;
 
     let latest_version = updater_info.version.trim_start_matches('v').to_string();
     let current_version = CURRENT_VERSION.to_string();
@@ -155,18 +155,18 @@ async fn check_updater_json() -> Result<UpdateInfo, String> {
 
     if has_update {
         logger::log_info(&format!(
-            "New version found (updater.json): {} (Current: {})",
+            "New version found (latest.json): {} (Current: {})",
             latest_version, current_version
         ));
     } else {
         logger::log_info(&format!(
-            "Up to date (updater.json): {} (Matches {})",
+            "Up to date (latest.json): {} (Matches {})",
             current_version, latest_version
         ));
     }
 
     let download_url = format!(
-        "https://github.com/lbjlaq/Antigravity-Manager/releases/tag/v{}",
+        "https://github.com/darkphenix2025-hue/MyProxy-Manager/releases/tag/v{}",
         latest_version
     );
 
@@ -181,7 +181,7 @@ async fn check_updater_json() -> Result<UpdateInfo, String> {
         published_at: updater_info
             .pub_date
             .unwrap_or_else(|| Utc::now().to_rfc3339()),
-        source: Some("updater.json".to_string()),
+        source: Some("latest.json".to_string()),
     })
 }
 
@@ -309,7 +309,8 @@ async fn check_static_url(url: &str, source_name: &str) -> Result<UpdateInfo, St
     }
 
     // fallback sources generally don't provide release notes or download specific URL, construct generic
-    let download_url = "https://github.com/lbjlaq/Antigravity-Manager/releases/latest".to_string();
+    let download_url =
+        "https://github.com/darkphenix2025-hue/MyProxy-Manager/releases/latest".to_string();
     let release_notes = format!(
         "New version detected via {}. Please check release page for details.",
         source_name

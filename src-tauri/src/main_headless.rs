@@ -1,7 +1,7 @@
 // Headless proxy entry point (no Tauri GUI required)
 // Re-uses the same headless logic from lib.rs but without GTK dependency
 
-use antigravity_tools_lib::run;
+use myproxy_manager_lib::run;
 use std::env;
 
 fn main() {

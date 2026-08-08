@@ -3901,7 +3901,6 @@ async fn admin_test_provider_models(
     State(state): State<AppState>,
     Json(payload): Json<TestProviderRequest>,
 ) -> impl IntoResponse {
-
     let provider = payload.provider;
 
     if provider.api_key.trim().is_empty() {

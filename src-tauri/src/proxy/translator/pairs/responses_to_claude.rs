@@ -151,10 +151,7 @@ pub fn claude_to_responses_non_stream(
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("resp-0");
-    let item_id = format!(
-        "msg_{}",
-        &response_id.chars().skip(0).take(16).collect::<String>()
-    );
+    let item_id = format!("msg_{}", &response_id.chars().take(16).collect::<String>());
 
     let mut response = json!({
         "id": response_id,

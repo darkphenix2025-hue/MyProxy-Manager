@@ -22,6 +22,7 @@ import { listen } from '@tauri-apps/api/event';
 import { isTauri } from './utils/env';
 import { AdminAuthGuard } from './components/common/AdminAuthGuard';
 import { Agentation } from 'agentation';
+import UpdateManager from './components/update/UpdateManager';
 
 const router = createBrowserRouter([
   {
@@ -142,6 +143,7 @@ function App() {
     <AdminAuthGuard>
       <ThemeManager />
       <DebugConsole />
+      <UpdateManager />
       <RouterProvider router={router} />
       {import.meta.env.DEV && <Agentation />}
     </AdminAuthGuard>

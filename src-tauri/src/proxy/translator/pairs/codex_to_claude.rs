@@ -190,10 +190,7 @@ pub fn claude_to_codex_response_non_stream(
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("resp-0");
-    let item_id = format!(
-        "item-{}",
-        &response_id.chars().skip(0).take(16).collect::<String>()
-    );
+    let item_id = format!("item-{}", &response_id.chars().take(16).collect::<String>());
 
     let response = json!({
         "id": response_id,
