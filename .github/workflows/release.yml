@@ -83,9 +83,9 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - name: Prepare macOS signing and notarization credentials
+      - name: Select macOS signing mode
         if: ${{ startsWith(matrix.platform, 'macos-') }}
-        id: macos_credentials
+        id: macos_signing
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -97,18 +97,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          for required_name in \
-            APPLE_CERTIFICATE \
-            APPLE_CERTIFICATE_PASSWORD \
-            KEYCHAIN_PASSWORD \
-            APPLE_API_ISSUER \
-            APPLE_API_KEY \
-            APPLE_API_PRIVATE_KEY; do
+          apple_secret_names=(
+            APPLE_CERTIFICATE
+            APPLE_CERTIFICATE_PASSWORD
+            KEYCHAIN_PASSWORD
+            APPLE_API_ISSUER
+            APPLE_API_KEY
+            APPLE_API_PRIVATE_KEY
+          )
+          missing_names=()
+          configured_count=0
+
+          for required_name in "${apple_secret_names[@]}"; do
             if [[ -z "${!required_name:-}" ]]; then
-              echo "::error::Missing macOS signing/notarization secret: ${required_name}"
-              exit 1
+              missing_names+=("${required_name}")
+            else
+              configured_count=$((configured_count + 1))
             fi
           done
+
+          if [[ "${configured_count}" == "0" ]]; then
+            echo "mode=adhoc" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Apple Developer secrets are not configured; using ad-hoc macOS signing. Users must allow the app in Privacy & Security."
+            exit 0
+          fi
+
+          if [[ "${#missing_names[@]}" != "0" ]]; then
+            printf '::error::Configure all Apple signing secrets or leave all of them empty. Missing: %s\n' "${missing_names[*]}"
+            exit 1
+          fi
 
           certificate_path="${RUNNER_TEMP}/myproxy-developer-id.p12"
           api_key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY}.p8"
@@ -141,11 +158,29 @@ jobs:
             exit 1
           fi
 
+          echo "mode=developer-id" >> "${GITHUB_OUTPUT}"
           echo "apple_signing_identity=${signing_identity}" >> "${GITHUB_OUTPUT}"
           echo "apple_api_key_path=${api_key_path}" >> "${GITHUB_OUTPUT}"
 
-      - name: Build and upload Tauri bundle (macOS)
-        if: ${{ startsWith(matrix.platform, 'macos-') }}
+      - name: Build and upload Tauri bundle (macOS, ad hoc)
+        if: ${{ startsWith(matrix.platform, 'macos-') && steps.macos_signing.outputs.mode == 'adhoc' }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          tagName: ${{ needs.validate.outputs.tag }}
+          releaseName: MyProxy Manager ${{ needs.validate.outputs.tag }}
+          releaseBody: See the assets below to download and install this version.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          args: --target ${{ matrix.target }}
+
+      - name: Build and upload Tauri bundle (macOS, Developer ID)
+        if: ${{ startsWith(matrix.platform, 'macos-') && steps.macos_signing.outputs.mode == 'developer-id' }}
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -153,10 +188,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ steps.macos_credentials.outputs.apple_signing_identity }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.macos_signing.outputs.apple_signing_identity }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ steps.macos_credentials.outputs.apple_api_key_path }}
+          APPLE_API_KEY_PATH: ${{ steps.macos_signing.outputs.apple_api_key_path }}
         with:
           tagName: ${{ needs.validate.outputs.tag }}
           releaseName: MyProxy Manager ${{ needs.validate.outputs.tag }}

@@ -9,17 +9,29 @@
 
 The private key is only read by the Release workflow. Do not commit it or print it in workflow logs.
 
-## macOS Developer ID signing and notarization
+## macOS signing modes
 
-The Tauri updater key above signs update metadata. It is separate from the Apple
-Developer ID certificate that macOS Gatekeeper requires. The Release workflow
-now refuses to build the macOS targets unless both signing and notarization
-credentials are present. Windows and Linux jobs do not need these Apple secrets.
+The Tauri updater key above signs update metadata; it is separate from the
+signature Gatekeeper checks on the macOS application. Windows and Linux jobs do
+not need Apple credentials.
+
+With no Apple secrets configured, the Release workflow uses Tauri's **ad-hoc**
+signature (`APPLE_SIGNING_IDENTITY=-`). This is the usable mode for a free Apple
+account: it avoids the “damaged” failure that commonly affects downloaded Apple
+Silicon apps, but it is not notarized. Users must still choose **Open** once or
+allow the app under **System Settings → Privacy & Security**. Tauri documents
+this limitation explicitly in [macOS code signing](https://tauri.app/distribute/sign/macos/).
+
+If any Apple secret is present, the workflow requires all six Apple secrets and
+switches to Developer ID signing plus notarization. A partially configured set
+fails early with the missing secret names instead of publishing a mixed release.
+
+### Optional: paid Developer ID signing and notarization
 
 This requires a paid [Apple Developer Program](https://developer.apple.com/programs/)
 membership, a **Developer ID Application** certificate, and an App Store Connect
-API key. Apple documents the certificate and Tauri's expected CI setup in
-[MacOS code signing](https://tauri.app/distribute/sign/macos/).
+Team API key. Apple documents the certificate and Tauri's CI setup in the same
+[macOS code signing guide](https://tauri.app/distribute/sign/macos/).
 
 ### 1. Export the Developer ID certificate
 
@@ -70,7 +82,7 @@ Keep the existing `TAURI_SIGNING_PRIVATE_KEY` and
 not an Apple account password, and it may be generated locally with a password
 manager. Never put any of these values in workflow files or logs.
 
-### 4. Run a signed release
+### 4. Run a release
 
 The existing `v1.0.0` assets were produced before Apple signing/notarization was
 configured, so publish a new version rather than trying to overwrite that tag:
@@ -78,15 +90,17 @@ configured, so publish a new version rather than trying to overwrite that tag:
 1. Merge the CI-checked configuration change into `main`.
 2. Run **Actions → Release → Run workflow** from `main` and enter the next
    manifest version (for example `1.0.1`), or push a matching `v1.0.1` tag.
-3. Inspect the draft release. The macOS DMGs should open without the “damaged”
-   warning; `spctl --assess --type execute` and `xcrun stapler validate` can be
-   used for local verification.
+3. Inspect the draft release. In ad-hoc mode, macOS may require the one-time
+   **Open**/**Privacy & Security** approval described above. In Developer ID
+   mode, the DMGs should be notarized; `spctl --assess --type execute` and
+   `xcrun stapler validate` can be used for local verification.
 4. Publish the draft only after the macOS, Windows, Linux, and `latest.json`
    assets have been smoke-tested.
 
-If a macOS job reports a missing secret, add the named secret and rerun the
-workflow. The updater signing key and Apple Developer ID signing are independent
-chains, so both sets of secrets are required for a complete release.
+If you intend to use ad-hoc signing, leave all six Apple secrets absent. If you
+intend to upgrade to notarized Developer ID releases, add all six secrets and
+rerun the workflow. The updater signing key and macOS application signing are
+independent chains.
 
 ## Version and release flow
 
