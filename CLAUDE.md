@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Antigravity Tools** — a Tauri v2 desktop application that acts as a local AI gateway. It converts web-based AI sessions (Google/Anthropic) into standardized API endpoints (OpenAI, Anthropic, Gemini formats) with account rotation, protocol translation, and smart retry.
 
-- **Version:** 4.1.31
+- **Version:** 1.0.0
 - **License:** CC-BY-NC-SA-4.0
 - **Repo:** https://github.com/lbjlaq/Antigravity-Manager
 

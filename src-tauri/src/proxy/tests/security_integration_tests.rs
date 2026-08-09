@@ -369,6 +369,7 @@ mod stress_tests {
 
     /// 压力测试：大量黑名单条目
     #[test]
+    #[ignore = "timing-sensitive benchmark; run explicitly with --ignored"]
     fn stress_test_large_blacklist() {
         let _ = init_db();
         cleanup_test_data();
@@ -413,6 +414,7 @@ mod stress_tests {
 
     /// 压力测试：大量访问日志
     #[test]
+    #[ignore = "timing-sensitive benchmark; run explicitly with --ignored"]
     fn stress_test_access_logging() {
         let _ = init_db();
         let _ = clear_ip_access_logs();

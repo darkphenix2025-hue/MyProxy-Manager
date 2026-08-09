@@ -7,8 +7,8 @@ describe('release version validation', () => {
   it('accepts matching manifest versions and a matching v-prefixed tag', () => {
     assert.deepEqual(
       validateVersions(
-        { packageJson: '4.1.31', cargoToml: '4.1.31', tauriConfig: '4.1.31' },
-        'v4.1.31',
+        { packageJson: '1.0.0', cargoToml: '1.0.0', tauriConfig: '1.0.0' },
+        'v1.0.0',
       ),
       [],
     );
@@ -17,12 +17,12 @@ describe('release version validation', () => {
   it('reports every manifest that differs from package.json', () => {
     assert.deepEqual(
       validateVersions(
-        { packageJson: '4.1.31', cargoToml: '4.1.30', tauriConfig: '4.2.0' },
+        { packageJson: '1.0.0', cargoToml: '0.9.0', tauriConfig: '1.1.0' },
         undefined,
       ),
       [
-        'src-tauri/Cargo.toml version 4.1.30 does not match package.json version 4.1.31',
-        'src-tauri/tauri.conf.json version 4.2.0 does not match package.json version 4.1.31',
+        'src-tauri/Cargo.toml version 0.9.0 does not match package.json version 1.0.0',
+        'src-tauri/tauri.conf.json version 1.1.0 does not match package.json version 1.0.0',
       ],
     );
   });
@@ -30,15 +30,15 @@ describe('release version validation', () => {
   it('rejects a release tag that does not match the manifests', () => {
     assert.deepEqual(
       validateVersions(
-        { packageJson: '4.1.31', cargoToml: '4.1.31', tauriConfig: '4.1.31' },
-        'v4.1.32',
+        { packageJson: '1.0.0', cargoToml: '1.0.0', tauriConfig: '1.0.0' },
+        'v1.0.1',
       ),
-      ['Release tag v4.1.32 does not match manifest version 4.1.31'],
+      ['Release tag v1.0.1 does not match manifest version 1.0.0'],
     );
   });
 
   it('only accepts semantic v* release tags', () => {
-    assert.equal(normalizeTag('v4.1.31'), '4.1.31');
-    assert.throws(() => normalizeTag('release-4.1.31'), /Expected a tag like v1.2.3/);
+    assert.equal(normalizeTag('v1.0.0'), '1.0.0');
+    assert.throws(() => normalizeTag('release-1.0.0'), /Expected a tag like v1.2.3/);
   });
 });
