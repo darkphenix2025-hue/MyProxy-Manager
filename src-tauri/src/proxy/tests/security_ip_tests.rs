@@ -719,6 +719,7 @@ mod performance_benchmarks {
 
     /// 基准测试：黑名单查找性能
     #[test]
+    #[ignore = "timing-sensitive benchmark; run explicitly with --ignored"]
     fn benchmark_blacklist_lookup() {
         let _ = init_db();
 
@@ -759,6 +760,7 @@ mod performance_benchmarks {
 
     /// 基准测试：CIDR 匹配性能
     #[test]
+    #[ignore = "timing-sensitive benchmark; run explicitly with --ignored"]
     fn benchmark_cidr_matching() {
         let _ = init_db();
 
