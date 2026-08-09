@@ -83,7 +83,92 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - uses: tauri-apps/tauri-action@v1
+      - name: Prepare macOS signing and notarization credentials
+        if: ${{ startsWith(matrix.platform, 'macos-') }}
+        id: macos_credentials
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          for required_name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            KEYCHAIN_PASSWORD \
+            APPLE_API_ISSUER \
+            APPLE_API_KEY \
+            APPLE_API_PRIVATE_KEY; do
+            if [[ -z "${!required_name:-}" ]]; then
+              echo "::error::Missing macOS signing/notarization secret: ${required_name}"
+              exit 1
+            fi
+          done
+
+          certificate_path="${RUNNER_TEMP}/myproxy-developer-id.p12"
+          api_key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY}.p8"
+          keychain_path="${RUNNER_TEMP}/myproxy-build.keychain-db"
+
+          printf '%s' "${APPLE_CERTIFICATE}" | base64 -D > "${certificate_path}"
+          printf '%s' "${APPLE_API_PRIVATE_KEY}" | base64 -D > "${api_key_path}"
+          chmod 600 "${certificate_path}" "${api_key_path}"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${keychain_path}"
+          security set-keychain-settings -t 21600 -u "${keychain_path}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${keychain_path}"
+          security import "${certificate_path}" \
+            -k "${keychain_path}" \
+            -P "${APPLE_CERTIFICATE_PASSWORD}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "${KEYCHAIN_PASSWORD}" "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          security default-keychain -s "${keychain_path}"
+
+          signing_identity="$(
+            security find-identity -v -p codesigning "${keychain_path}" \
+              | awk -F '"' '/Developer ID Application:/ { print $2; exit }'
+          )"
+          if [[ -z "${signing_identity}" ]]; then
+            echo "::error::The imported certificate does not contain a Developer ID Application identity"
+            exit 1
+          fi
+
+          echo "apple_signing_identity=${signing_identity}" >> "${GITHUB_OUTPUT}"
+          echo "apple_api_key_path=${api_key_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and upload Tauri bundle (macOS)
+        if: ${{ startsWith(matrix.platform, 'macos-') }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.macos_credentials.outputs.apple_signing_identity }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ steps.macos_credentials.outputs.apple_api_key_path }}
+        with:
+          tagName: ${{ needs.validate.outputs.tag }}
+          releaseName: MyProxy Manager ${{ needs.validate.outputs.tag }}
+          releaseBody: See the assets below to download and install this version.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          args: --target ${{ matrix.target }}
+
+      - name: Build and upload Tauri bundle
+        if: ${{ !startsWith(matrix.platform, 'macos-') }}
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
