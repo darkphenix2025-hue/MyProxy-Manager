@@ -39,9 +39,12 @@ the exact signing identity from it. No `APPLE_SIGNING_IDENTITY` secret is needed
 ### 2. Create an App Store Connect API key
 
 In **App Store Connect → Users and Access → Integrations → App Store Connect API**,
-create a key with a role that can submit builds for notarization (Developer is
-sufficient), then download the `.p8` file. Record the **Issuer ID** and **Key ID**;
-the private key file can only be downloaded once. Convert it to one-line base64:
+open the **Team Keys** tab and create a key with a role that can submit builds
+for notarization (Tauri documents **Developer** access as sufficient). Do not
+use an **Individual Key**: Apple's API documentation states that individual keys
+cannot use `notaryTool`. Download the `.p8` file and record the **Issuer ID** and
+**Key ID**; the private key can only be downloaded once. Convert it to one-line
+base64:
 
 ```sh
 openssl base64 -A -in AuthKey_<KEY_ID>.p8 -out AuthKey_<KEY_ID>.p8.b64
