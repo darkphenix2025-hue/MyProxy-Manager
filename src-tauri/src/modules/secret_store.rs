@@ -18,7 +18,17 @@ pub enum SecretStoreError {
 
 #[async_trait::async_trait]
 pub trait SecretStore: Clone + Send + Sync + 'static {
-    async fn create(&self, namespace: &str, secret: &str) -> Result<SecretRef, SecretStoreError>;
+    fn planned_ref(&self, namespace: &str, key: &str) -> Result<SecretRef, SecretStoreError>;
+    async fn create_named(
+        &self,
+        namespace: &str,
+        key: &str,
+        secret: &str,
+    ) -> Result<SecretRef, SecretStoreError>;
+    async fn create(&self, namespace: &str, secret: &str) -> Result<SecretRef, SecretStoreError> {
+        self.create_named(namespace, &uuid::Uuid::new_v4().to_string(), secret)
+            .await
+    }
     async fn read(&self, secret_ref: &SecretRef) -> Result<String, SecretStoreError>;
     async fn replace(&self, secret_ref: &SecretRef, secret: &str) -> Result<(), SecretStoreError>;
     async fn delete(&self, secret_ref: &SecretRef) -> Result<(), SecretStoreError>;
@@ -298,6 +308,29 @@ impl KeyringSecretStore {
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::RwLock::new(())))
             .clone()
     }
+
+    fn acquire_process_lock(service: &str) -> Result<std::fs::File, SecretStoreError> {
+        use sha2::Digest;
+        let mut digest = sha2::Sha256::new();
+        digest.update(service.as_bytes());
+        let name = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            digest.finalize(),
+        );
+        let path = std::env::temp_dir().join(format!("myproxy-keyring-{name}.lock"));
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| SecretStoreError::Unavailable)?;
+        fs2::FileExt::lock_exclusive(&file).map_err(|_| SecretStoreError::Unavailable)?;
+        Ok(file)
+    }
 }
 
 fn keyring_locks() -> &'static dashmap::DashMap<String, std::sync::Arc<tokio::sync::RwLock<()>>> {
@@ -309,15 +342,26 @@ fn keyring_locks() -> &'static dashmap::DashMap<String, std::sync::Arc<tokio::sy
 
 #[async_trait::async_trait]
 impl SecretStore for KeyringSecretStore {
-    async fn create(&self, namespace: &str, secret: &str) -> Result<SecretRef, SecretStoreError> {
+    fn planned_ref(&self, namespace: &str, key: &str) -> Result<SecretRef, SecretStoreError> {
         let namespace = Self::validate_namespace(namespace)?.to_string();
-        let key = format!("{namespace}:{}", uuid::Uuid::new_v4());
+        let key = uuid::Uuid::parse_str(key).map_err(|_| SecretStoreError::InvalidNamespace)?;
+        Ok(SecretRef::new("keyring", format!("{namespace}:{key}")))
+    }
+
+    async fn create_named(
+        &self,
+        namespace: &str,
+        key: &str,
+        secret: &str,
+    ) -> Result<SecretRef, SecretStoreError> {
+        let key = self.planned_ref(namespace, key)?.key;
         let service = self.service.clone();
         let entry_key = key.clone();
         let secret = zeroize::Zeroizing::new(secret.to_string());
         let lock = self.service_lock();
         let _guard = lock.write().await;
         tokio::task::spawn_blocking(move || {
+            let _process_lock = Self::acquire_process_lock(&service)?;
             Self::recover_pending(&service)?;
             let active = Self::write_secret(&service, &entry_key, secret.as_str())?;
             let manifest = KeyringManifest {
@@ -352,6 +396,7 @@ impl SecretStore for KeyringSecretStore {
         let lock = self.service_lock();
         let _guard = lock.write().await;
         tokio::task::spawn_blocking(move || {
+            let _process_lock = Self::acquire_process_lock(&service)?;
             Self::recover_pending(&service)?;
             let manifest = Self::read_manifest(&service, &key)?;
             let mut secret = String::new();
@@ -376,6 +421,7 @@ impl SecretStore for KeyringSecretStore {
         let lock = self.service_lock();
         let _guard = lock.write().await;
         tokio::task::spawn_blocking(move || {
+            let _process_lock = Self::acquire_process_lock(&service)?;
             Self::recover_pending(&service)?;
             let previous = Self::read_manifest(&service, &key)?;
             let active = Self::write_secret(&service, &key, secret.as_str())?;
@@ -433,6 +479,7 @@ impl SecretStore for KeyringSecretStore {
         let lock = self.service_lock();
         let _guard = lock.write().await;
         tokio::task::spawn_blocking(move || {
+            let _process_lock = Self::acquire_process_lock(&service)?;
             let manifest = match Self::read_manifest(&service, &key) {
                 Ok(manifest) => Some(manifest),
                 Err(SecretStoreError::NotFound) => None,
@@ -464,11 +511,22 @@ pub struct MemorySecretStore {
 #[cfg(test)]
 #[async_trait::async_trait]
 impl SecretStore for MemorySecretStore {
-    async fn create(&self, namespace: &str, secret: &str) -> Result<SecretRef, SecretStoreError> {
+    fn planned_ref(&self, namespace: &str, key: &str) -> Result<SecretRef, SecretStoreError> {
         let namespace = KeyringSecretStore::validate_namespace(namespace)?;
-        let key = format!("{namespace}:{}", uuid::Uuid::new_v4());
+        let key = uuid::Uuid::parse_str(key).map_err(|_| SecretStoreError::InvalidNamespace)?;
+        Ok(SecretRef::new("memory", format!("{namespace}:{key}")))
+    }
+
+    async fn create_named(
+        &self,
+        namespace: &str,
+        key: &str,
+        secret: &str,
+    ) -> Result<SecretRef, SecretStoreError> {
+        let secret_ref = self.planned_ref(namespace, key)?;
+        let key = secret_ref.key.clone();
         self.values.lock().insert(key.clone(), secret.to_string());
-        Ok(SecretRef::new("memory", key))
+        Ok(secret_ref)
     }
 
     async fn read(&self, secret_ref: &SecretRef) -> Result<String, SecretStoreError> {

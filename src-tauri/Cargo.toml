@@ -48,6 +48,8 @@ tauri-plugin-fs = "2.4.5"
 image = { version = "0.25.9", default-features = false, features = ["png", "webp"] }
 thiserror = "2.0.17"
 zeroize = "1"
+tempfile = "3"
+fs2 = "0.4"
 
 # 反代服务依赖
 axum = { version = "0.7", features = ["multipart"] }

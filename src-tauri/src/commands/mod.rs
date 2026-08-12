@@ -9,6 +9,7 @@ pub mod proxy;
 pub mod autostart;
 // 导出 cloudflared 命令
 pub mod cloudflared;
+pub mod codex_account;
 // 导出 security 命令 (IP 监控)
 pub mod security;
 // 导出 proxy_pool 命令

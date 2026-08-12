@@ -308,6 +308,14 @@ pub fn run() {
     }
 
     let tray_enabled = should_enable_tray();
+    let account_platform_data_dir = modules::account::get_data_dir()
+        .expect("failed to resolve account platform data directory");
+    let codex_account_runtime = Arc::new(
+        modules::codex_account_runtime::ProductionCodexAccountRuntime::production(
+            &account_platform_data_dir,
+        )
+        .expect("failed to initialize Codex account runtime"),
+    );
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -331,6 +339,7 @@ pub fn run() {
         }))
         .manage(commands::proxy::ProxyServiceState::new())
         .manage(commands::cloudflared::CloudflaredState::new())
+        .manage(codex_account_runtime)
         .manage(AppRuntimeFlags { tray_enabled })
         .setup(|app| {
             info!("Setup starting...");
@@ -484,6 +493,10 @@ pub fn run() {
             commands::list_oauth_clients,
             commands::get_active_oauth_client,
             commands::set_active_oauth_client,
+            commands::codex_account::start_codex_login,
+            commands::codex_account::get_codex_login_status,
+            commands::codex_account::cancel_codex_login,
+            commands::codex_account::list_account_connections,
             commands::save_text_file,
             commands::read_text_file,
             commands::clear_log_cache,

@@ -400,6 +400,24 @@ impl<S: SecretStore> CodexTokenVault<S> {
             .map_err(CodexTokenError::from)
     }
 
+    pub fn planned_ref(&self, key: uuid::Uuid) -> Result<SecretRef, CodexTokenError> {
+        self.store
+            .planned_ref("codex-oauth", &key.to_string())
+            .map_err(CodexTokenError::from)
+    }
+
+    pub async fn create_named(
+        &self,
+        key: uuid::Uuid,
+        token_set: &CodexTokenSet,
+    ) -> Result<SecretRef, CodexTokenError> {
+        let encoded = token_set.encode_for_secret_store()?;
+        self.store
+            .create_named("codex-oauth", &key.to_string(), &encoded)
+            .await
+            .map_err(CodexTokenError::from)
+    }
+
     pub async fn read(&self, secret_ref: &SecretRef) -> Result<CodexTokenSet, CodexTokenError> {
         let encoded = self.store.read(secret_ref).await?;
         CodexTokenSet::decode_from_secret_store(&encoded)

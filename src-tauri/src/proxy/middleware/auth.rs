@@ -50,6 +50,9 @@ async fn auth_middleware_internal(
 
     // Allow CORS preflight regardless of auth policy.
     if method == axum::http::Method::OPTIONS {
+        if force_strict && !admin_origin_allowed(&request) {
+            return Err(StatusCode::FORBIDDEN);
+        }
         return Ok(next.run(request).await);
     }
 
@@ -106,12 +109,12 @@ async fn auth_middleware_internal(
         }
     } else {
         // 管理接口 (/api/*)
-        // 1. 如果全局鉴权关闭，则管理接口也放行 (除非是强制局域网模式)
-        if matches!(effective_mode, ProxyAuthMode::Off) {
-            return Ok(next.run(request).await);
+        // 管理接口始终要求独立凭据，不受代理流量 auth_mode 影响。
+        if !admin_origin_allowed(&request) {
+            return Err(StatusCode::FORBIDDEN);
         }
 
-        // 2. 健康检查在所有模式下对管理接口放行
+        // 健康检查在所有模式下对管理接口放行。
         if is_health_check {
             return Ok(next.run(request).await);
         }
@@ -243,6 +246,51 @@ async fn auth_middleware_internal(
     }
 }
 
+fn admin_origin_allowed(request: &Request) -> bool {
+    let Some(origin) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    if matches!(
+        origin,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    ) {
+        return true;
+    }
+    let Some(host) = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(origin) = url::Url::parse(origin) else {
+        return false;
+    };
+    if !matches!(origin.scheme(), "http" | "https")
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+    {
+        return false;
+    }
+    origin
+        .host_str()
+        .map(|origin_host| {
+            let origin_authority = match origin.port() {
+                Some(port) => format!("{origin_host}:{port}"),
+                None => origin_host.to_string(),
+            };
+            origin_authority.eq_ignore_ascii_case(host)
+        })
+        .unwrap_or(false)
+}
+
 /// 用户令牌身份信息 (传递给 Monitor 使用)
 #[derive(Clone, Debug)]
 pub struct UserTokenIdentity {
@@ -256,6 +304,8 @@ pub struct UserTokenIdentity {
 mod tests {
     use super::*;
     use crate::proxy::ProxyAuthMode;
+    use axum::{middleware, routing::get, Router};
+    use tower::ServiceExt;
 
     #[tokio::test]
     async fn test_admin_auth_with_password() {
@@ -282,5 +332,71 @@ mod tests {
     #[test]
     fn test_auth_placeholder() {
         assert!(true);
+    }
+
+    #[test]
+    fn admin_origin_requires_same_origin_or_tauri() {
+        let same_origin = Request::builder()
+            .header("origin", "http://127.0.0.1:8045")
+            .header("host", "127.0.0.1:8045")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(admin_origin_allowed(&same_origin));
+
+        let tauri = Request::builder()
+            .header("origin", "tauri://localhost")
+            .header("host", "127.0.0.1:8045")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(admin_origin_allowed(&tauri));
+
+        let cross_site = Request::builder()
+            .header("origin", "https://attacker.example")
+            .header("host", "127.0.0.1:8045")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!admin_origin_allowed(&cross_site));
+    }
+
+    #[tokio::test]
+    async fn admin_route_requires_credentials_even_when_proxy_auth_is_off() {
+        let security = Arc::new(RwLock::new(ProxySecurityConfig {
+            auth_mode: ProxyAuthMode::Off,
+            api_key: "admin-secret".to_string(),
+            admin_password: None,
+            allow_lan_access: false,
+            port: 8045,
+            security_monitor: crate::proxy::config::SecurityMonitorConfig::default(),
+        }));
+        let app = Router::new()
+            .route("/api/connections", get(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(
+                security,
+                admin_auth_middleware,
+            ));
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/connections")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/connections")
+                    .header(header::AUTHORIZATION, "Bearer admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
     }
 }

@@ -4,7 +4,7 @@
 > 范围：`src/`、`src-tauri/src/`、`scripts/`、`.github/workflows/` 与关键配置文件
 > 结论性质：静态结构审查 + 已有构建/测试结果；不包含真实生产流量性能剖析
 
-> 实施进度：Phase 0B 已完成后端认证骨架；schema v3 边界、运行时/公开凭据 DTO 隔离、Codex PKCE/AuthSession、独立 loopback listener、token exchange/refresh、Secret Store 与脱敏测试已落地。应用管理入口、账号记录创建和迁移器待后续切片。
+> 实施进度：Phase 0C 已完成 Codex 登录管理闭环；schema v3 边界、运行时/公开凭据 DTO 隔离、PKCE/AuthSession、loopback listener、token exchange/refresh、Secret Store、可信身份验证、强制鉴权的双管理入口、跨进程 metadata 锁和 onboarding 恢复 journal 已落地。账号页 UI、连接执行和迁移器待后续切片。
 
 ## 1. 执行摘要
 
@@ -591,10 +591,11 @@ src/
 5. 请求执行时解析 SecretRef，按需设置 Bearer token 与账号上下文；401 触发单次并发去重刷新。
 6. 用 mock token server 覆盖成功、state mismatch、重复 callback、端口占用、refresh token reuse 和敏感值扫描；真实登录只作为显式手工 smoke test。
 
-截至 2026-08-13，切片 B 的后端认证与秘密存储骨架已完成：专用
-loopback listener、PKCE 会话、code exchange、刷新去重、跨平台系统
-keyring adapter 和 SecretRef 返回边界均有自动化测试。应用运行时对 pending
-flow 的所有权、双管理入口、身份验证及 ProviderConnection 创建留在下一切片。
+截至 2026-08-13，切片 B 的管理闭环已完成：专用 loopback listener、PKCE
+会话、code exchange、刷新去重、跨平台系统 keyring adapter、SecretRef
+返回边界、pending flow 运行时所有权、双管理入口、可信 userinfo 身份验证及
+ProviderConnection 创建均有自动化测试。账号页 UI、连接执行与旧数据迁移留在
+下一切片。
 
 切片 B 借鉴 `CLIProxyAPI` 的流程分层，但不继承其明文 auth 文件下载、全网卡 callback、邮箱文件名和未验签 claim 信任边界。
 

@@ -58,6 +58,9 @@ pub struct CodexLoginService<S: SecretStore> {
 }
 
 impl<S: SecretStore> CodexLoginService<S> {
+    pub fn planned_secret_ref(&self, session_id: uuid::Uuid) -> Result<SecretRef, CodexLoginError> {
+        self.vault.planned_ref(session_id).map_err(Into::into)
+    }
     pub fn new(config: CodexOAuthConfig, store: S) -> Result<Self, CodexLoginError> {
         let token_client = CodexTokenClient::new(&config.token_endpoint)?;
         Ok(Self {
@@ -72,7 +75,7 @@ impl<S: SecretStore> CodexLoginService<S> {
     }
 
     #[cfg(test)]
-    fn with_client_for_test(
+    pub(crate) fn with_client_for_test(
         config: CodexOAuthConfig,
         token_client: CodexTokenClient,
         store: S,
@@ -184,7 +187,7 @@ impl<S: SecretStore> CodexLoginService<S> {
             let _ = callback.respond_failure().await;
             return Err(CodexLoginError::Cancelled);
         }
-        let secret_ref = match self.vault.create(&token_set).await {
+        let secret_ref = match self.vault.create_named(session_id, &token_set).await {
             Ok(secret_ref) => secret_ref,
             Err(error) => {
                 self.listeners.remove(&session_id);
