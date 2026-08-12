@@ -546,7 +546,7 @@ function Accounts() {
 
       const exportData = response.accounts;
       const content = JSON.stringify(exportData, null, 2);
-      const fileName = `antigravity_accounts_${new Date().toISOString().split("T")[0]}.json`;
+      const fileName = `myproxy_accounts_${new Date().toISOString().split("T")[0]}.json`;
 
       // 2. Determine Path & Export
       if (isTauri()) {

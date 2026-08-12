@@ -61,7 +61,7 @@ for (const targetRoot of targetRootCandidates) {
   }
 }
 
-const binaries = ['myproxy_manager', 'antigravity-proxy'];
+const binaries = ['myproxy_manager', 'myproxy-proxy'];
 const binaryPaths = releaseDirectories.flatMap((releaseDirectory) =>
   binaries
     .map((binary) => path.join(releaseDirectory, binary))

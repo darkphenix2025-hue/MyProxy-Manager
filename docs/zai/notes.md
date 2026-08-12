@@ -1,18 +1,18 @@
 # z.ai (GLM) integration notes (Anthropic passthrough + MCP + usage)
 
-Goal: integrate z.ai as an upstream provider into Antigravity’s proxy/service, primarily via an Anthropic API-compatible passthrough, and optionally provide “budget/usage” visibility and MCP helpers (search/reader/vision).
+Goal: integrate z.ai as an upstream provider into MyProxy Manager’s proxy/service, primarily via an Anthropic API-compatible passthrough, and optionally provide “budget/usage” visibility and MCP helpers (search/reader/vision).
 
 This is a working note capturing findings, constraints, and a proposed implementation path. It intentionally does **not** copy full upstream documentation; it extracts what matters for implementation and corner cases.
 
 ## 0) Product decisions / requirements (confirmed)
 - z.ai is configured and controlled from the **API Proxy** UI as an optional provider (enable/disable).
-- z.ai is used **inside Antigravity** (not via Google OAuth), but it must be able to serve **API Proxy** traffic alongside the existing account pool.
+- z.ai is used **inside MyProxy Manager** (not via Google OAuth), but it must be able to serve **API Proxy** traffic alongside the existing account pool.
 - Storage: z.ai config/credentials are stored in the same **data directory** as the existing accounts and GUI config (same folder where Google account JSON lives). No Keychain/Vault.
 - Dispatch strategy is user-configurable:
   - **z.ai handles all proxy requests** (exclusive mode), OR
   - **z.ai participates in the shared rotation/queue** with other accounts and only gets requests when it is selected (pooled mode), OR
   - (optional) **fallback-only** (only when the rest of the pool is unavailable).
-- z.ai MCP servers should be provided via Antigravity’s proxy as optional toggles (enable/disable) and be usable by apps **without requiring users to configure z.ai keys** in the apps.
+- z.ai MCP servers should be provided via MyProxy Manager’s proxy as optional toggles (enable/disable) and be usable by apps **without requiring users to configure z.ai keys** in the apps.
 - Proxy authorization (if enabled) applies to the **entire proxy** (no per-route bypass).
 
 ## 1) Key docs / entry points
@@ -40,7 +40,7 @@ Docs show clients can be configured with:
 
 This implies z.ai runs an Anthropic-compatible API surface behind that base URL.
 
-Practical implication for Antigravity:
+Practical implication for MyProxy Manager:
 - Add a new upstream provider “z.ai Anthropic” and forward `/v1/*` to `https://api.z.ai/api/anthropic/v1/*` (exact path joining must be verified via test calls).
 
 ### 2.2 Model mapping defaults (client-side)
@@ -51,7 +51,7 @@ Docs mention default mapping for “internal model env vars” to GLM:
 
 Implication:
 - If a client requests “Claude” model names, z.ai may already translate them to GLM on their side OR the client may send GLM model names directly (depending on the client’s model mapping config).
-- For Antigravity, the simplest first step is “treat `glm-*` as z.ai” (or require explicit `zai:` prefix), and forward model strings unchanged.
+- For MyProxy Manager, the simplest first step is “treat `glm-*` as z.ai” (or require explicit `zai:` prefix), and forward model strings unchanged.
 
 ### 2.3 OpenAI-like API (optional later)
 z.ai also provides OpenAI-style chat completions under:
@@ -150,7 +150,7 @@ Provide local endpoints so clients do not store the z.ai key:
 - `GET/POST /mcp/web_reader/mcp` → upstream `https://api.z.ai/api/mcp/web_reader/mcp`
 
 Behavior:
-- Require Antigravity’s local proxy auth (existing `api_key`) for access.
+- Require MyProxy Manager’s local proxy auth (existing `api_key`) for access.
 - Inject upstream header: `Authorization: Bearer <zai_api_key>`.
 - Stream responses.
 

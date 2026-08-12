@@ -2,6 +2,21 @@ import { create } from 'zustand';
 import { AppConfig } from '../types/config';
 import * as configService from '../services/configService';
 
+const SHOW_ALL_QUOTAS_KEY = 'myproxy_show_all_quotas';
+const LEGACY_SHOW_ALL_QUOTAS_KEY = 'antigravity_show_all_quotas';
+
+const loadShowAllQuotas = (): boolean => {
+    const current = localStorage.getItem(SHOW_ALL_QUOTAS_KEY);
+    if (current !== null) return current === 'true';
+
+    const legacy = localStorage.getItem(LEGACY_SHOW_ALL_QUOTAS_KEY);
+    if (legacy !== null) {
+        localStorage.setItem(SHOW_ALL_QUOTAS_KEY, legacy);
+        localStorage.removeItem(LEGACY_SHOW_ALL_QUOTAS_KEY);
+    }
+    return legacy === 'true';
+};
+
 interface ConfigState {
     config: AppConfig | null;
     loading: boolean;
@@ -22,7 +37,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     config: null,
     loading: false,
     error: null,
-    showAllQuotas: localStorage.getItem('antigravity_show_all_quotas') === 'true',
+    showAllQuotas: loadShowAllQuotas(),
 
     loadConfig: async () => {
         set({ loading: true, error: null });
@@ -70,7 +85,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     toggleShowAllQuotas: () => {
         const current = get().showAllQuotas;
         const next = !current;
-        localStorage.setItem('antigravity_show_all_quotas', String(next));
+        localStorage.setItem(SHOW_ALL_QUOTAS_KEY, String(next));
         set({ showAllQuotas: next });
     },
 

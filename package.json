@@ -1,6 +1,6 @@
 {
   "version": "1.0.1",
-  "name": "antigravity-tools",
+  "name": "myproxy-manager",
   "type": "module",
   "private": true,
   "scripts": {

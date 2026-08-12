@@ -45,7 +45,7 @@ function buildDroidModel(modelId: string, modelName: string) {
 
 export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDone }: DroidSyncModalProps) {
     const { t } = useTranslation();
-    const { models: antigravityModels } = useProxyModels();
+    const { models: proxyModels } = useProxyModels();
     const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
     const [previewModels, setPreviewModels] = useState<PreviewModelEntry[]>([]);
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -68,16 +68,18 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
         const existingEntries: PreviewModelEntry[] = existingModels.map((m, i) => ({
             ...(m as PreviewModelEntry),
             _uid: `existing-${i}`,
-            isAg: ((m as Record<string, unknown>).id as string || '').startsWith('custom:AG-'),
+            isManaged: ['custom:MP-', 'custom:AG-'].some(prefix =>
+                (((m as Record<string, unknown>).id as string) || '').startsWith(prefix)
+            ),
             index: i,
         }));
 
-        const existingAgModels = new Set(existingEntries.filter(e => e.isAg).map(e => e.model));
-        const selected = antigravityModels.filter(m => selectedIds.has(m.id));
+        const existingManagedModels = new Set(existingEntries.filter(e => e.isManaged).map(e => e.model));
+        const selected = proxyModels.filter(m => selectedIds.has(m.id));
         const newEntries: PreviewModelEntry[] = selected
             .filter(m => {
                 const cfg = buildDroidModel(m.id, m.name);
-                return !existingAgModels.has(cfg.model);
+                return !existingManagedModels.has(cfg.model);
             })
             .map((m, i) => {
                 const cfg = buildDroidModel(m.id, m.name);
@@ -93,7 +95,7 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
                     displayName: cfg.displayName,
                     noImageSupport: cfg.noImageSupport ?? false,
                     provider: cfg.provider,
-                    isAg: true,
+                    isManaged: true,
                 };
                 if ('maxOutputTokens' in cfg) entry.maxOutputTokens = cfg.maxOutputTokens;
                 if ('extraArgs' in cfg) entry.extraArgs = cfg.extraArgs;
@@ -103,10 +105,10 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
         const merged = [...existingEntries, ...newEntries];
         merged.forEach((m, i) => {
             m.index = i;
-            if (m.isAg) m.id = `custom:${m.displayName.replace(/\s/g, '-')}-${i}`;
+            if (m.isManaged) m.id = `custom:MP-${m.displayName.replace(/\s/g, '-')}-${i}`;
         });
         setPreviewModels(merged);
-    }, [antigravityModels, apiKey, getFormattedProxyUrl]);
+    }, [proxyModels, apiKey, getFormattedProxyUrl]);
 
     // 初始加载 settings.json
     if (!configLoaded) {
@@ -122,9 +124,9 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
 
     const reindexId = (id: string, newIdx: number) => id.replace(/-\d+$/, `-${newIdx}`);
 
-    const allSelected = antigravityModels.length > 0 && antigravityModels.every(m => selectedModels.has(m.id));
+    const allSelected = proxyModels.length > 0 && proxyModels.every(m => selectedModels.has(m.id));
     const toggleAll = () => {
-        const next = allSelected ? new Set<string>() : new Set(antigravityModels.map(m => m.id));
+        const next = allSelected ? new Set<string>() : new Set(proxyModels.map(m => m.id));
         setSelectedModels(next);
         rebuildPreview(next, currentConfig);
     };
@@ -136,7 +138,7 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
         setSelectedModels(next);
 
         if (adding) {
-            const m = antigravityModels.find(x => x.id === modelListId);
+            const m = proxyModels.find(x => x.id === modelListId);
             if (!m) return;
             const base = getFormattedProxyUrl('Droid').replace(/\/+$/, '');
             const cfg = buildDroidModel(m.id, m.name);
@@ -153,17 +155,17 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
                 displayName: cfg.displayName,
                 noImageSupport: cfg.noImageSupport ?? false,
                 provider: cfg.provider,
-                isAg: true,
+                isManaged: true,
             };
             if ('maxOutputTokens' in cfg) entry.maxOutputTokens = cfg.maxOutputTokens;
             if ('extraArgs' in cfg) entry.extraArgs = cfg.extraArgs;
             setPreviewModels([...previewModels, entry]);
         } else {
-            const m = antigravityModels.find(x => x.id === modelListId);
+            const m = proxyModels.find(x => x.id === modelListId);
             if (!m) return;
             const cfg = buildDroidModel(m.id, m.name);
             setPreviewModels(
-                previewModels.filter(e => !(e.isAg && e.model === cfg.model)).map((m, i) => ({
+                previewModels.filter(e => !(e.isManaged && e.model === cfg.model)).map((m, i) => ({
                     ...m, index: i, id: reindexId(m.id, i),
                 }))
             );
@@ -190,14 +192,14 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
     };
 
     const executeDroidSync = async () => {
-        if (!previewModels.some(m => m.isAg)) {
+        if (!previewModels.some(m => m.isManaged)) {
             showToast(t('proxy.droid_sync.toast.no_models_selected', { defaultValue: '请至少选择一个模型' }), 'error');
             return;
         }
         setSyncing(true);
         try {
             const customModels = previewModels.map(m => {
-                const { _uid, isAg, ...rest } = m;
+                const { _uid, isManaged, ...rest } = m;
                 return rest;
             });
             const added = await invoke<number>('execute_droid_sync', { customModels });
@@ -211,9 +213,9 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
         }
     };
 
-    const groups = [...new Set(antigravityModels.map(m => m.group))];
-    const existingCount = previewModels.filter(m => !m.isAg).length;
-    const agCount = previewModels.filter(m => m.isAg).length;
+    const groups = [...new Set(proxyModels.map(m => m.group))];
+    const existingCount = previewModels.filter(m => !m.isManaged).length;
+    const managedCount = previewModels.filter(m => m.isManaged).length;
 
     return (
         <div className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
@@ -243,7 +245,7 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
                     <div className="flex items-center justify-between mb-2">
                         <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
                             {t('proxy.droid_sync.select_models', { defaultValue: '选择要添加的模型' })}
-                            <span className="ml-2 text-gray-300">{selectedModels.size}/{antigravityModels.length}</span>
+                            <span className="ml-2 text-gray-300">{selectedModels.size}/{proxyModels.length}</span>
                         </span>
                         <button onClick={toggleAll} className="text-[10px] text-blue-500 hover:text-blue-600 font-medium transition-colors">
                             {allSelected ? t('common.deselect_all', { defaultValue: '取消全选' }) : t('common.select_all', { defaultValue: '全选' })}
@@ -251,7 +253,7 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
                     </div>
                     <div className="space-y-2 max-h-[25vh] overflow-auto">
                         {groups.map(group => {
-                            const groupModels = antigravityModels.filter(m => m.group === group);
+                            const groupModels = proxyModels.filter(m => m.group === group);
                             return (
                                 <div key={group}>
                                     <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">{group}</div>
@@ -287,8 +289,8 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
                             customModels Preview
                             <span className="ml-2 font-normal">
                                 {existingCount > 0 && <span className="text-gray-300">{existingCount} existing</span>}
-                                {existingCount > 0 && agCount > 0 && <span className="text-gray-200 mx-1">+</span>}
-                                {agCount > 0 && <span className="text-orange-400">{agCount} new</span>}
+                                {existingCount > 0 && managedCount > 0 && <span className="text-gray-200 mx-1">+</span>}
+                                {managedCount > 0 && <span className="text-orange-400">{managedCount} new</span>}
                             </span>
                         </span>
                         <span className="text-[9px] font-mono text-gray-300">{previewModels.length} total</span>
@@ -329,11 +331,11 @@ export function DroidSyncModal({ apiKey, getFormattedProxyUrl, onClose, onSyncDo
                     <button
                         className={cn(
                             "px-4 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5",
-                            previewModels.some(m => m.isAg)
+                            previewModels.some(m => m.isManaged)
                                 ? "bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white shadow-sm"
                                 : "bg-gray-200 dark:bg-gray-700 text-gray-400 cursor-not-allowed"
                         )}
-                        disabled={!previewModels.some(m => m.isAg) || syncing}
+                        disabled={!previewModels.some(m => m.isManaged) || syncing}
                         onClick={executeDroidSync}
                     >
                         <RefreshCw size={12} className={syncing ? 'animate-spin' : ''} />

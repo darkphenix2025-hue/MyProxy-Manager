@@ -24,7 +24,7 @@ interface OpenCodeSyncModalProps {
 
 export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: OpenCodeSyncModalProps) {
     const { t } = useTranslation();
-    const { models: antigravityModels } = useProxyModels();
+    const { models: proxyModels } = useProxyModels();
     const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
     const [previewModels, setPreviewModels] = useState<PreviewModelEntry[]>([]);
     const [syncing, setSyncing] = useState(false);
@@ -38,7 +38,7 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
     );
 
     const rebuildPreview = useCallback((selectedIds: Set<string>) => {
-        const selected = antigravityModels.filter(m => selectedIds.has(m.id));
+        const selected = proxyModels.filter(m => selectedIds.has(m.id));
         const newEntries: PreviewModelEntry[] = selected.map((m, i) => ({
             _uid: `new-${i}`,
             model: m.id,
@@ -49,10 +49,10 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
             displayName: m.name,
             noImageSupport: false,
             provider: m.id.includes('claude') ? 'anthropic' : 'google',
-            isAg: true,
+            isManaged: true,
         }));
         setPreviewModels(newEntries);
-    }, [antigravityModels, apiKey]);
+    }, [proxyModels, apiKey]);
 
     // 初始加载 opencode.json
     if (!configLoaded) {
@@ -62,9 +62,11 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
                 const parsed = JSON.parse(content);
                 const existingModelIds = new Set<string>();
 
-                // Priority 1: Read from antigravity-manager provider
-                if (parsed.provider?.['antigravity-manager']?.models) {
-                    Object.keys(parsed.provider['antigravity-manager'].models).forEach(k => existingModelIds.add(k));
+                // Prefer the current provider and fall back to the identifier used by older releases.
+                const managedProvider = parsed.provider?.['myproxy-manager']
+                    ?? parsed.provider?.['antigravity-manager'];
+                if (managedProvider?.models) {
+                    Object.keys(managedProvider.models).forEach(k => existingModelIds.add(k));
                 }
 
                 // Fallback: legacy anthropic/google providers
@@ -82,9 +84,8 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
                 const hasAuth = plugins.some((p: string) => p.includes('opencode-antigravity-auth'));
                 setHasAuthPlugin(hasAuth);
 
-                // Try to extract existing baseURL from antigravity-manager provider
-                if (parsed.provider?.['antigravity-manager']?.options?.baseURL) {
-                    setCustomBaseUrl(parsed.provider['antigravity-manager'].options.baseURL);
+                if (managedProvider?.options?.baseURL) {
+                    setCustomBaseUrl(managedProvider.options.baseURL);
                 }
 
                 setSelectedModels(existingModelIds);
@@ -93,9 +94,9 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
             .catch(() => rebuildPreview(new Set()));
     }
 
-    const allSelected = antigravityModels.length > 0 && antigravityModels.every(m => selectedModels.has(m.id));
+    const allSelected = proxyModels.length > 0 && proxyModels.every(m => selectedModels.has(m.id));
     const toggleAll = () => {
-        const next = allSelected ? new Set<string>() : new Set(antigravityModels.map(m => m.id));
+        const next = allSelected ? new Set<string>() : new Set(proxyModels.map(m => m.id));
         setSelectedModels(next);
         rebuildPreview(next);
     };
@@ -145,7 +146,7 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
         }
     };
 
-    const groups = [...new Set(antigravityModels.map(m => m.group))];
+    const groups = [...new Set(proxyModels.map(m => m.group))];
 
     return (
         <div className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
@@ -186,7 +187,7 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
                                 type="text"
                                 value={customBaseUrl}
                                 onChange={(e) => setCustomBaseUrl(e.target.value)}
-                                placeholder="e.g. http://antigravity-manager:8150/v1"
+                                placeholder="e.g. http://myproxy-manager:8150/v1"
                                 className="w-full px-3 py-1.5 text-xs bg-white dark:bg-base-100 border border-gray-200 dark:border-base-300 rounded-lg focus:ring-1 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                             />
                             {customBaseUrl !== proxyUrl && (
@@ -206,7 +207,7 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
                     <div className="flex items-center justify-between mb-2">
                         <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
                             {t('proxy.config.opencode_sync.select_models', { defaultValue: '选择要同步的模型' })}
-                            <span className="ml-2 text-gray-300">{selectedModels.size}/{antigravityModels.length}</span>
+                            <span className="ml-2 text-gray-300">{selectedModels.size}/{proxyModels.length}</span>
                         </span>
                         <button onClick={toggleAll} className="text-[10px] text-blue-500 hover:text-blue-600 font-medium transition-colors">
                             {allSelected ? t('common.deselect_all', { defaultValue: '取消全选' }) : t('common.select_all', { defaultValue: '全选' })}
@@ -214,7 +215,7 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
                     </div>
                     <div className="space-y-2 max-h-[25vh] overflow-auto">
                         {groups.map(group => {
-                            const groupModels = antigravityModels.filter(m => m.group === group);
+                            const groupModels = proxyModels.filter(m => m.group === group);
                             return (
                                 <div key={group}>
                                     <div className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">{group}</div>
@@ -248,7 +249,7 @@ export function OpenCodeSyncModal({ proxyUrl, apiKey, onClose, onSyncDone }: Ope
                     <div className="px-5 py-2 shrink-0 bg-amber-50 dark:bg-amber-900/20 border-y border-amber-100 dark:border-amber-900/30">
                         <p className="text-[10px] text-amber-700 dark:text-amber-400 leading-relaxed">
                             {t('proxy.config.opencode_sync.auth_plugin_warning', {
-                                defaultValue: 'Sync chỉ tạo provider antigravity-manager và không ghi đè google provider/plugin.'
+                                defaultValue: 'Sync chỉ tạo provider myproxy-manager và không ghi đè google provider/plugin.'
                             })}
                         </p>
                     </div>

@@ -1,12 +1,12 @@
-# API Reference (v4.0.3)
+# API Reference (v1.0.1)
 
-本文档详细介绍了 **Antigravity Tools** 暴露的 HTTP API 接口。
+本文档详细介绍了 **MyProxy Manager** 暴露的 HTTP API 接口。
 
-> **注意**: 在 v4.0.1 版本中，所有的服务（包括 AI 反代和系统管理）均已整合至统一端口 **8045**。原有的 19527 端口已废弃。
+> **注意**: AI 反代和系统管理服务统一使用端口 **8045**。
 
 ## 1. 概览 (Overview)
 
-Antigravity Gateway 是一个双重角色的服务器：
+MyProxy Manager Gateway 是一个双重角色的服务器：
 1.  **AI Proxy Interface**: 兼容 OpenAI/Anthropic/Google 官方 SDK 的标准接口。
 2.  **Management Admin API**: 用于管理账号、配置系统、监控流量的 RESTful 接口。
 

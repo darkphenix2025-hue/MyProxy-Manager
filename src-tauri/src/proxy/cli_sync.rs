@@ -4,6 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+const BACKUP_SUFFIX: &str = ".myproxy.bak";
+const LEGACY_BACKUP_SUFFIX: &str = ".antigravity.bak";
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -389,12 +392,14 @@ pub fn get_sync_status(app: &CliApp, proxy_url: &str) -> (bool, bool, Option<Str
     let mut current_base_url = None;
 
     for file in &files {
-        // 使用更简单的命名规则: original_name + .antigravity.bak
         let backup_path = file
             .path
-            .with_file_name(format!("{}.antigravity.bak", file.name));
+            .with_file_name(format!("{}{}", file.name, BACKUP_SUFFIX));
+        let legacy_backup_path = file
+            .path
+            .with_file_name(format!("{}{}", file.name, LEGACY_BACKUP_SUFFIX));
 
-        if backup_path.exists() {
+        if backup_path.exists() || legacy_backup_path.exists() {
             has_backup = true;
         }
 
@@ -518,13 +523,15 @@ pub fn sync_config(
             fs::create_dir_all(parent).map_err(|e| format!("无法创建目录: {}", e))?;
         }
 
-        // [New Feature] 自动备份：如果文件存在且没有备份，创建 .antigravity.bak 备份
-        // 这样可以保留用户最初的配置，后续多次同步不会覆盖这个备份
+        // Preserve the original config once, while honoring backups made by older releases.
         if file.path.exists() {
             let backup_path = file
                 .path
-                .with_file_name(format!("{}.antigravity.bak", file.name));
-            if !backup_path.exists() {
+                .with_file_name(format!("{}{}", file.name, BACKUP_SUFFIX));
+            let legacy_backup_path = file
+                .path
+                .with_file_name(format!("{}{}", file.name, LEGACY_BACKUP_SUFFIX));
+            if !backup_path.exists() && !legacy_backup_path.exists() {
                 if let Err(e) = fs::copy(&file.path, &backup_path) {
                     tracing::warn!("Failed to create backup for {}: {}", file.name, e);
                 } else {
@@ -784,7 +791,15 @@ pub async fn execute_cli_restore(app_type: CliApp) -> Result<(), String> {
     for file in &files {
         let backup_path = file
             .path
-            .with_file_name(format!("{}.antigravity.bak", file.name));
+            .with_file_name(format!("{}{}", file.name, BACKUP_SUFFIX));
+        let legacy_backup_path = file
+            .path
+            .with_file_name(format!("{}{}", file.name, LEGACY_BACKUP_SUFFIX));
+        let backup_path = if backup_path.exists() {
+            backup_path
+        } else {
+            legacy_backup_path
+        };
         if backup_path.exists() {
             // 还原：覆盖原文件
             if let Err(e) = fs::rename(&backup_path, &file.path) {

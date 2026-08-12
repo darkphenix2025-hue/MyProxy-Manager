@@ -13,8 +13,14 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const DROID_DIR: &str = ".factory";
 const DROID_CONFIG_FILE: &str = "settings.json";
-const BACKUP_SUFFIX: &str = ".antigravity.bak";
-const AG_ID_PREFIX: &str = "custom:AG-";
+const BACKUP_SUFFIX: &str = ".myproxy.bak";
+const LEGACY_BACKUP_SUFFIX: &str = ".antigravity.bak";
+const MANAGED_ID_PREFIX: &str = "custom:MP-";
+const LEGACY_MANAGED_ID_PREFIX: &str = "custom:AG-";
+
+fn is_managed_model_id(id: &str) -> bool {
+    id.starts_with(MANAGED_ID_PREFIX) || id.starts_with(LEGACY_MANAGED_ID_PREFIX)
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DroidStatus {
@@ -176,7 +182,7 @@ pub fn check_droid_installed() -> (bool, Option<String>) {
     }
 }
 
-/// 统计已有 customModels 中有多少由 Antigravity 添加的（id 以 custom:AG- 开头）
+/// Count models managed by current or earlier releases.
 fn count_synced_models(json: &Value) -> (usize, Option<String>) {
     let mut count = 0;
     let mut first_url = None;
@@ -184,7 +190,7 @@ fn count_synced_models(json: &Value) -> (usize, Option<String>) {
     if let Some(arr) = json.get("customModels").and_then(|v| v.as_array()) {
         for m in arr {
             let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-            if !id.starts_with(AG_ID_PREFIX) {
+            if !is_managed_model_id(id) {
                 continue;
             }
             count += 1;
@@ -206,7 +212,9 @@ pub fn get_sync_status(_proxy_url: &str) -> (bool, bool, Option<String>, usize) 
     };
 
     let backup_path = config_path.with_file_name(format!("{}{}", DROID_CONFIG_FILE, BACKUP_SUFFIX));
-    let has_backup = backup_path.exists();
+    let legacy_backup_path =
+        config_path.with_file_name(format!("{}{}", DROID_CONFIG_FILE, LEGACY_BACKUP_SUFFIX));
+    let has_backup = backup_path.exists() || legacy_backup_path.exists();
 
     if !config_path.exists() {
         return (false, has_backup, None, 0);
@@ -232,6 +240,14 @@ fn create_backup(path: &PathBuf) -> Result<(), String> {
         BACKUP_SUFFIX
     ));
     if backup_path.exists() {
+        return Ok(());
+    }
+    let legacy_backup_path = path.with_file_name(format!(
+        "{}{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        LEGACY_BACKUP_SUFFIX
+    ));
+    if legacy_backup_path.exists() {
         return Ok(());
     }
     fs::copy(path, &backup_path).map_err(|e| format!("Failed to create backup: {}", e))?;
@@ -262,12 +278,12 @@ pub fn sync_droid_config(full_custom_models: Vec<Value>) -> Result<usize, String
         config = serde_json::json!({});
     }
 
-    let ag_count = full_custom_models
+    let managed_count = full_custom_models
         .iter()
         .filter(|m| {
             m.get("id")
                 .and_then(|v| v.as_str())
-                .map(|s| s.starts_with(AG_ID_PREFIX))
+                .map(is_managed_model_id)
                 .unwrap_or(false)
         })
         .count();
@@ -283,7 +299,7 @@ pub fn sync_droid_config(full_custom_models: Vec<Value>) -> Result<usize, String
     fs::rename(&tmp_path, &config_path)
         .map_err(|e| format!("Failed to rename config file: {}", e))?;
 
-    Ok(ag_count)
+    Ok(managed_count)
 }
 
 pub fn restore_droid_config() -> Result<(), String> {
@@ -291,6 +307,13 @@ pub fn restore_droid_config() -> Result<(), String> {
         get_config_path().ok_or_else(|| "Failed to get Droid config directory".to_string())?;
 
     let backup_path = config_path.with_file_name(format!("{}{}", DROID_CONFIG_FILE, BACKUP_SUFFIX));
+    let legacy_backup_path =
+        config_path.with_file_name(format!("{}{}", DROID_CONFIG_FILE, LEGACY_BACKUP_SUFFIX));
+    let backup_path = if backup_path.exists() {
+        backup_path
+    } else {
+        legacy_backup_path
+    };
     if backup_path.exists() {
         fs::rename(&backup_path, &config_path)
             .map_err(|e| format!("Failed to restore config: {}", e))?;

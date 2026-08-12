@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sqlite3, json, os, shutil, time
 
-db_path = "/home/node/.antigravity_tools/proxy_logs.db"
+db_path = "/home/node/.myproxy_manager/proxy_logs.db"
 dest = "/tmp/db_check/proxy_logs.db"
 os.makedirs("/tmp/db_check", exist_ok=True)
 shutil.copy(db_path, dest)

@@ -42,7 +42,7 @@
 **验证命令**：
 ```bash
 # 查看日志
-tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.log | grep "Layer-1"
+tail -f ~/.proxy_manager/logs/app.log.* | grep "Layer-1"
 ```
 
 ---
@@ -66,7 +66,7 @@ tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.lo
 **验证命令**：
 ```bash
 # 查看签名保留情况
-tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.log | grep -E "(Layer-2|signature)"
+tail -f ~/.proxy_manager/logs/app.log.* | grep -E "(Layer-2|signature)"
 ```
 
 ---
@@ -90,7 +90,7 @@ tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.lo
 **验证命令**：
 ```bash
 # 查看 Layer 3 触发和摘要生成
-tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.log | grep -E "(Layer-3|XML summary|Fork)"
+tail -f ~/.proxy_manager/logs/app.log.* | grep -E "(Layer-3|XML summary|Fork)"
 ```
 
 ---
@@ -111,7 +111,7 @@ tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.lo
 **验证命令**：
 ```bash
 # 查看所有层级的触发
-tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.log | grep -E "Layer-[123]"
+tail -f ~/.proxy_manager/logs/app.log.* | grep -E "Layer-[123]"
 ```
 
 ---
@@ -132,7 +132,7 @@ tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.lo
 **验证命令**：
 ```bash
 # 查看错误处理
-tail -f ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.log | grep -E "(Layer-3.*failed|BAD_REQUEST)"
+tail -f ~/.proxy_manager/logs/app.log.* | grep -E "(Layer-3.*failed|BAD_REQUEST)"
 ```
 
 ---
@@ -301,7 +301,7 @@ for i in {1..20}; do
 done
 
 echo "=== 查看日志 ==="
-tail -100 ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.log | grep -E "Layer-[123]"
+tail -100 ~/.proxy_manager/logs/app.log.* | grep -E "Layer-[123]"
 ```
 
 ---
@@ -341,4 +341,4 @@ tail -100 ~/Library/Application\ Support/com.antigravity.tools/logs/antigravity.
 ## 联系方式
 
 如有问题，请在 GitHub 提 Issue：
-https://github.com/lbjlaq/Antigravity-Manager/issues
+https://github.com/darkphenix2025-hue/MyProxy-Manager/issues

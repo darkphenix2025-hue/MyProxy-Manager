@@ -13,7 +13,7 @@ export interface PreviewModelEntry {
     displayName: string;
     noImageSupport: boolean;
     provider: string;
-    isAg: boolean;
+    isManaged: boolean;
     [key: string]: unknown;
 }
 
@@ -33,7 +33,7 @@ export function SortableModelItem({ entry, collapsed, onToggle, onRemove }: {
         <div ref={setNodeRef} style={style} className={cn(
             "rounded-lg border",
             isDragging ? "opacity-60 z-50 shadow-lg" : "",
-            entry.isAg
+            entry.isManaged
                 ? "border-orange-200 dark:border-orange-800/40 bg-orange-50/50 dark:bg-orange-900/10"
                 : "border-gray-200 dark:border-base-300 bg-white dark:bg-base-100"
         )}>
@@ -46,7 +46,7 @@ export function SortableModelItem({ entry, collapsed, onToggle, onRemove }: {
                     {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                 </button>
                 <span className="text-xs font-medium text-gray-800 dark:text-gray-200 flex-1 truncate">{entry.displayName}</span>
-                {entry.isAg && <img src="/icon.png" alt="AG" className="w-4 h-4 rounded shrink-0" />}
+                {entry.isManaged && <img src="/icon.png" alt="MyProxy" className="w-4 h-4 rounded shrink-0" />}
                 <span className="text-[9px] font-mono text-gray-400 shrink-0 hidden sm:block">{entry.provider}</span>
                 {onRemove && (
                     <button onClick={onRemove} className="p-0.5 text-gray-300 hover:text-red-500 transition-colors" title="Remove">
@@ -57,7 +57,7 @@ export function SortableModelItem({ entry, collapsed, onToggle, onRemove }: {
             {!collapsed && (
                 <div className="px-3 pb-2 pt-0.5 border-t border-gray-100 dark:border-base-200">
                     <pre className="text-[9px] font-mono text-gray-500 dark:text-gray-400 leading-relaxed whitespace-pre-wrap">
-                        {JSON.stringify((() => { const { _uid, isAg, ...rest } = entry; return rest; })(), null, 2)}
+                        {JSON.stringify((() => { const { _uid, isManaged, ...rest } = entry; return rest; })(), null, 2)}
                     </pre>
                 </div>
             )}

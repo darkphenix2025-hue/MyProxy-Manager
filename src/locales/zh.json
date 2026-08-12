@@ -357,7 +357,7 @@
             "auto_launch": "开机自动启动",
             "auto_launch_enabled": "启用",
             "auto_launch_disabled": "禁用",
-            "auto_launch_desc": "系统启动时自动运行 Antigravity Tools"
+            "auto_launch_desc": "系统启动时自动运行 MyProxy Manager"
         },
         "account": {
             "title": "账号设置",
@@ -529,7 +529,7 @@
             "telegram": "Telegram 频道",
             "github": "开源地址",
             "view_code": "查看代码",
-            "copyright": "Copyright © 2025-2026 Antigravity. All rights reserved.",
+            "copyright": "Copyright © 2025-2026 MyProxy Manager. All rights reserved.",
             "support_btn": "支持作者",
             "support_title": "赞助支持",
             "support_desc": "如果您觉得本工具对您有帮助，欢迎扫码请作者喝杯咖啡！您的支持是我持续维护项目的最大动力。",
@@ -809,7 +809,7 @@
                 "restore_backup_confirm": "确定要从备份还原 OpenCode 配置吗？",
                 "modal_title": "选择 OpenCode 模型",
                 "select_models": "选择要同步的模型",
-                "auth_plugin_warning": "检测到 opencode-antigravity-auth 插件。同步仅会创建 antigravity-manager provider，不会覆盖 google provider/plugin。",
+                "auth_plugin_warning": "检测到 opencode-antigravity-auth 插件。同步仅会创建 myproxy-manager provider，不会覆盖 google provider/plugin。",
                 "btn_confirm_sync": "确认同步",
                 "custom_base_url_label": "自定义 Manager BaseURL",
                 "custom_base_url_desc": "适用于 Docker Compose 网络环境",
@@ -875,8 +875,8 @@
             "title": "使用示例",
             "curl": "cURL",
             "python": "Python",
-            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # 推荐使用 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# 注意: Antigravity 支持使用 Anthropic SDK 调用任意模型\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)\n\nprint(response.content[0].text)",
-            "python_gemini": "# 需要安装: pip install google-generativeai\nimport google.generativeai as genai\n\n# 使用 Antigravity 代理地址 (推荐 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Hello\")\nprint(response.text)",
+            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # 推荐使用 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# 注意: MyProxy Manager 支持使用 Anthropic SDK 调用任意模型\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)\n\nprint(response.content[0].text)",
+            "python_gemini": "# 需要安装: pip install google-generativeai\nimport google.generativeai as genai\n\n# 使用 MyProxy Manager 代理地址 (推荐 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Hello\")\nprint(response.text)",
             "python_openai_image": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    # 方式 1: 使用 size 参数 (推荐)\n    # 支持: \"1024x1024\" (1:1), \"1280x720\" (16:9), \"720x1280\" (9:16), \"1216x896\" (4:3)\n    extra_body={ \"size\": \"1024x1024\" },\n\n    # 方式 2: 使用模型后缀\n    # 例如: gemini-3-pro-image-16-9, gemini-3-pro-image-4-3\n    # model=\"gemini-3-pro-image-16-9\",\n    messages=[{\n        \"role\": \"user\",\n        \"content\": \"画一个未来城市\"\n    }]\n)\n\nprint(response.choices[0].message.content)",
             "python_openai": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)\n\nprint(response.choices[0].message.content)"
         },
@@ -915,12 +915,12 @@
         },
         "mapping": {
             "title": "Claude Code 模型映射",
-            "description": "将 Claude Code 模型映射到 Antigravity 模型,智能路由请求以优化成本和速度。",
+            "description": "将 Claude Code 模型映射到 MyProxy Manager 模型,智能路由请求以优化成本和速度。",
             "default": "默认",
             "sonnet_desc": "最强复杂任务",
             "opus_desc": "高级层级",
             "haiku_desc": "极速响应",
-            "maps_to": "映射到 Antigravity",
+            "maps_to": "映射到 MyProxy Manager",
             "apply_recommended": "应用推荐配置",
             "restore_defaults": "恢复默认配置",
             "reset_all": "重置全部"
@@ -1155,8 +1155,8 @@
         "error_invalid_key": "密码或 API Key 错误，请重试",
         "error_network": "网络连接失败，请检查服务是否正常运行",
         "note": "注意：如果设置了独立的管理密码，请输入管理密码；否则请输入 API_KEY。",
-        "lookup_hint": "如果您忘记了，请运行 docker logs antigravity-manager 寻找 Current API Key 或 Web UI Password",
-        "config_hint": "或执行 grep -E '\"api_key\"|\"admin_password\"' ~/.antigravity_tools/gui_config.json 查看。"
+        "lookup_hint": "如果您忘记了，请运行 docker logs myproxy-manager 寻找 Current API Key 或 Web UI Password",
+        "config_hint": "或执行 grep -E '\"api_key\"|\"admin_password\"' ~/.myproxy_manager/gui_config.json 查看。"
     },
     "token_stats": {
         "title": "Token 消费统计",

@@ -2,7 +2,7 @@
 
 # 获取当前脚本所在目录
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-APP_PATH="$DIR/Antigravity Tools.app"
+APP_PATH="$DIR/MyProxy Manager.app"
 
 # 定义颜色
 RED='\033[0;31m'
@@ -10,7 +10,7 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}==============================================${NC}"
-echo -e "${GREEN}   Antigravity Tools - 快速修复助手${NC}"
+echo -e "${GREEN}   MyProxy Manager - 快速修复助手${NC}"
 echo -e "${GREEN}==============================================${NC}"
 echo ""
 
@@ -28,7 +28,7 @@ if [ -d "$APP_PATH" ]; then
         echo "您现在可以像往常一样打开应用了。"
         
         # 尝试通过 AppleScript 弹窗提示成功
-        osascript -e 'display notification "修复成功，现在可以打开应用了" with title "Antigravity Tools" sound name "Glass"'
+        osascript -e 'display notification "修复成功，现在可以打开应用了" with title "MyProxy Manager" sound name "Glass"'
     else
         echo ""
         echo -e "${RED}❌ 修复失败${NC}"
@@ -36,7 +36,7 @@ if [ -d "$APP_PATH" ]; then
     fi
 else
     echo -e "${RED}⚠️  未找到应用文件${NC}"
-    echo "请确保将此修复脚本和 'Antigravity Tools.app' 放在同一个文件夹内 (通常是 /Applications)。"
+    echo "请确保将此修复脚本和 'MyProxy Manager.app' 放在同一个文件夹内 (通常是 /Applications)。"
 fi
 
 echo ""

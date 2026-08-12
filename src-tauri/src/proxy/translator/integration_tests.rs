@@ -1,4 +1,4 @@
-/// Translator 集成测试 — 验证各翻译对的往返转换正确性和边缘情况。
+//! Translator 集成测试 — 验证各翻译对的往返转换正确性和边缘情况。
 
 #[cfg(test)]
 mod tests {

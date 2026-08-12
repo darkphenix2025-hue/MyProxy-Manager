@@ -16,10 +16,12 @@ const OPENCODE_DIR: &str = ".config/opencode";
 const OPENCODE_CONFIG_FILE: &str = "opencode.json";
 const ANTIGRAVITY_CONFIG_FILE: &str = "antigravity.json";
 const ANTIGRAVITY_ACCOUNTS_FILE: &str = "antigravity-accounts.json";
-const BACKUP_SUFFIX: &str = ".antigravity-manager.bak";
+const BACKUP_SUFFIX: &str = ".myproxy-manager.bak";
+const LEGACY_MANAGER_BACKUP_SUFFIX: &str = ".antigravity-manager.bak";
 const OLD_BACKUP_SUFFIX: &str = ".antigravity.bak";
 
-const ANTIGRAVITY_PROVIDER_ID: &str = "antigravity-manager";
+const MYPROXY_PROVIDER_ID: &str = "myproxy-manager";
+const LEGACY_PROVIDER_ID: &str = "antigravity-manager";
 
 /// Variant type for model variants
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +49,7 @@ struct ModelDef {
     variant_type: Option<VariantType>,
 }
 
-/// Build the complete model catalog for antigravity-manager provider
+/// Build the complete model catalog for myproxy-manager provider
 fn build_model_catalog() -> Vec<ModelDef> {
     vec![
         // Claude models
@@ -681,7 +683,11 @@ pub fn get_sync_status(proxy_url: &str) -> (bool, bool, Option<String>) {
         config_path.with_file_name(format!("{}{}", OPENCODE_CONFIG_FILE, BACKUP_SUFFIX));
     let old_backup_path =
         config_path.with_file_name(format!("{}{}", OPENCODE_CONFIG_FILE, OLD_BACKUP_SUFFIX));
-    if backup_path.exists() || old_backup_path.exists() {
+    let legacy_manager_backup_path = config_path.with_file_name(format!(
+        "{}{}",
+        OPENCODE_CONFIG_FILE, LEGACY_MANAGER_BACKUP_SUFFIX
+    ));
+    if backup_path.exists() || legacy_manager_backup_path.exists() || old_backup_path.exists() {
         has_backup = true;
     }
 
@@ -699,8 +705,9 @@ pub fn get_sync_status(proxy_url: &str) -> (bool, bool, Option<String>) {
     // Normalize proxy URL for comparison
     let normalized_proxy = normalize_opencode_base_url(proxy_url);
 
-    // Only check antigravity-manager provider
-    let ag_opts = get_provider_options(&json, ANTIGRAVITY_PROVIDER_ID);
+    // Only check myproxy-manager provider
+    let ag_opts = get_provider_options(&json, MYPROXY_PROVIDER_ID)
+        .or_else(|| get_provider_options(&json, LEGACY_PROVIDER_ID));
     let ag_url = ag_opts
         .and_then(|o| o.get("baseURL"))
         .and_then(|v| v.as_str());
@@ -1158,9 +1165,16 @@ pub fn restore_opencode_config() -> Result<(), String> {
         config_path.with_file_name(format!("{}{}", OPENCODE_CONFIG_FILE, BACKUP_SUFFIX));
     let config_backup_old =
         config_path.with_file_name(format!("{}{}", OPENCODE_CONFIG_FILE, OLD_BACKUP_SUFFIX));
+    let config_backup_legacy_manager = config_path.with_file_name(format!(
+        "{}{}",
+        OPENCODE_CONFIG_FILE, LEGACY_MANAGER_BACKUP_SUFFIX
+    ));
 
     if config_backup_new.exists() {
         restore_backup_to_target(&config_backup_new, &config_path, "config")?;
+        restored = true;
+    } else if config_backup_legacy_manager.exists() {
+        restore_backup_to_target(&config_backup_legacy_manager, &config_path, "config")?;
         restored = true;
     } else if config_backup_old.exists() {
         restore_backup_to_target(&config_backup_old, &config_path, "config")?;
@@ -1174,9 +1188,16 @@ pub fn restore_opencode_config() -> Result<(), String> {
         "{}{}",
         ANTIGRAVITY_ACCOUNTS_FILE, OLD_BACKUP_SUFFIX
     ));
+    let accounts_backup_legacy_manager = accounts_path.with_file_name(format!(
+        "{}{}",
+        ANTIGRAVITY_ACCOUNTS_FILE, LEGACY_MANAGER_BACKUP_SUFFIX
+    ));
 
     if accounts_backup_new.exists() {
         restore_backup_to_target(&accounts_backup_new, &accounts_path, "accounts")?;
+        restored = true;
+    } else if accounts_backup_legacy_manager.exists() {
+        restore_backup_to_target(&accounts_backup_legacy_manager, &accounts_path, "accounts")?;
         restored = true;
     } else if accounts_backup_old.exists() {
         restore_backup_to_target(&accounts_backup_old, &accounts_path, "accounts")?;
@@ -1211,10 +1232,12 @@ fn apply_sync_to_config(
     ensure_object(&mut config, "provider");
 
     if let Some(provider) = config.get_mut("provider").and_then(|p| p.as_object_mut()) {
-        ensure_provider_object(provider, ANTIGRAVITY_PROVIDER_ID);
-        if let Some(ag_provider) = provider.get_mut(ANTIGRAVITY_PROVIDER_ID) {
+        // Migrate the provider identifier used by earlier releases.
+        provider.remove(LEGACY_PROVIDER_ID);
+        ensure_provider_object(provider, MYPROXY_PROVIDER_ID);
+        if let Some(ag_provider) = provider.get_mut(MYPROXY_PROVIDER_ID) {
             ensure_provider_string_field(ag_provider, "npm", "@ai-sdk/anthropic");
-            ensure_provider_string_field(ag_provider, "name", "Antigravity Manager");
+            ensure_provider_string_field(ag_provider, "name", "MyProxy Manager");
             merge_provider_options(ag_provider, &normalized_url, api_key);
             merge_catalog_models(ag_provider, models_to_sync);
         }
@@ -1227,8 +1250,9 @@ fn apply_sync_to_config(
 /// Returns the modified config Value
 fn apply_clear_to_config(mut config: Value, proxy_url: Option<&str>, clear_legacy: bool) -> Value {
     if let Some(provider) = config.get_mut("provider").and_then(|p| p.as_object_mut()) {
-        // 1. Remove antigravity-manager provider
-        provider.remove(ANTIGRAVITY_PROVIDER_ID);
+        // 1. Remove current and legacy MyProxy provider identifiers.
+        provider.remove(MYPROXY_PROVIDER_ID);
+        provider.remove(LEGACY_PROVIDER_ID);
 
         // 2. Cleanup legacy entries if requested
         if clear_legacy {
@@ -1386,23 +1410,40 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_creates_antigravity_provider() {
+    fn test_sync_creates_myproxy_provider() {
         let config = serde_json::json!({});
 
         let result = apply_sync_to_config(config, "http://localhost:3000", "test-api-key", None);
 
-        // antigravity-manager provider should be created
+        // myproxy-manager provider should be created
         let provider = result.get("provider").unwrap();
-        let ag = provider.get(ANTIGRAVITY_PROVIDER_ID).unwrap();
+        let ag = provider.get(MYPROXY_PROVIDER_ID).unwrap();
 
         // Check npm and name
         assert_eq!(ag.get("npm").unwrap(), "@ai-sdk/anthropic");
-        assert_eq!(ag.get("name").unwrap(), "Antigravity Manager");
+        assert_eq!(ag.get("name").unwrap(), "MyProxy Manager");
 
         // Check options
         let options = ag.get("options").unwrap();
         assert_eq!(options.get("baseURL").unwrap(), "http://localhost:3000/v1");
         assert_eq!(options.get("apiKey").unwrap(), "test-api-key");
+    }
+
+    #[test]
+    fn test_sync_replaces_legacy_provider() {
+        let config = serde_json::json!({
+            "provider": {
+                "antigravity-manager": {
+                    "options": { "baseURL": "http://old-host:3000/v1" }
+                }
+            }
+        });
+
+        let result = apply_sync_to_config(config, "http://localhost:3000", "test-api-key", None);
+        let provider = result.get("provider").unwrap();
+
+        assert!(provider.get(LEGACY_PROVIDER_ID).is_none());
+        assert!(provider.get(MYPROXY_PROVIDER_ID).is_some());
     }
 
     #[test]
@@ -1412,7 +1453,7 @@ mod tests {
         let result = apply_sync_to_config(config, "http://localhost:3000", "test-api-key", None);
 
         let provider = result.get("provider").unwrap();
-        let ag = provider.get(ANTIGRAVITY_PROVIDER_ID).unwrap();
+        let ag = provider.get(MYPROXY_PROVIDER_ID).unwrap();
         let models = ag.get("models").unwrap().as_object().unwrap();
 
         // Should have all catalog models
@@ -1449,7 +1490,7 @@ mod tests {
         );
 
         let provider = result.get("provider").unwrap();
-        let ag = provider.get(ANTIGRAVITY_PROVIDER_ID).unwrap();
+        let ag = provider.get(MYPROXY_PROVIDER_ID).unwrap();
         let models = ag.get("models").unwrap().as_object().unwrap();
 
         assert!(models.contains_key("claude-sonnet-4-6"));
@@ -1463,10 +1504,10 @@ mod tests {
     // Tests for apply_clear_to_config
 
     #[test]
-    fn test_clear_removes_antigravity_provider() {
+    fn test_clear_removes_myproxy_provider() {
         let config = serde_json::json!({
             "provider": {
-                "antigravity-manager": {
+                "myproxy-manager": {
                     "options": { "baseURL": "http://localhost:3000/v1" }
                 },
                 "google": { "options": { "apiKey": "key" } }
@@ -1477,8 +1518,8 @@ mod tests {
 
         let provider = result.get("provider").unwrap();
         assert!(
-            provider.get(ANTIGRAVITY_PROVIDER_ID).is_none(),
-            "antigravity-manager should be removed"
+            provider.get(MYPROXY_PROVIDER_ID).is_none(),
+            "myproxy-manager should be removed"
         );
         assert!(
             provider.get("google").is_some(),
@@ -1635,7 +1676,7 @@ mod tests {
     fn test_clear_removes_empty_provider() {
         let config = serde_json::json!({
             "provider": {
-                "antigravity-manager": {
+                "myproxy-manager": {
                     "options": { "baseURL": "http://localhost:3000/v1" }
                 }
             }
@@ -1759,7 +1800,7 @@ fn base_url_matches(config_url: &str, proxy_url: &str) -> bool {
     normalized_config == normalized_proxy
 }
 
-/// Clear OpenCode config by removing antigravity-manager provider and optionally cleaning up legacy entries
+/// Clear OpenCode config by removing myproxy-manager provider and optionally cleaning up legacy entries
 fn clear_opencode_config(proxy_url: Option<String>, clear_legacy: bool) -> Result<(), String> {
     let Some((config_path, _, accounts_path)) = get_config_paths() else {
         return Err("Failed to get OpenCode config directory".to_string());
@@ -1792,10 +1833,20 @@ fn clear_opencode_config(proxy_url: Option<String>, clear_legacy: bool) -> Resul
         "{}{}",
         ANTIGRAVITY_ACCOUNTS_FILE, OLD_BACKUP_SUFFIX
     ));
+    let accounts_backup_legacy_manager = accounts_path.with_file_name(format!(
+        "{}{}",
+        ANTIGRAVITY_ACCOUNTS_FILE, LEGACY_MANAGER_BACKUP_SUFFIX
+    ));
 
     if accounts_backup_new.exists() {
         // Restore from new backup
         restore_backup_to_target(&accounts_backup_new, &accounts_path, "accounts from backup")?;
+    } else if accounts_backup_legacy_manager.exists() {
+        restore_backup_to_target(
+            &accounts_backup_legacy_manager,
+            &accounts_path,
+            "accounts from legacy manager backup",
+        )?;
     } else if accounts_backup_old.exists() {
         // Restore from old backup
         restore_backup_to_target(

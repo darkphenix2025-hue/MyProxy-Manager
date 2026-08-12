@@ -29,7 +29,7 @@ mod tests {
     impl TestDataDir {
         fn new() -> Self {
             let temp_path = std::env::temp_dir().join(format!(
-                "antigravity_test_{}_{}",
+                "myproxy_test_{}_{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1179,7 +1179,7 @@ fn format_switch_refresh_error(message: &str) -> String {
         || lower.contains("invalid_grant")
     {
         return format!(
-            "Token refresh failed: OAuth client is not authorized for this account. Please sign in again in Antigravity-Manager and complete authorization/verification. Raw error: {}",
+            "Token refresh failed: OAuth client is not authorized for this account. Please sign in again in MyProxy-Manager and complete authorization/verification. Raw error: {}",
             message
         );
     }

@@ -7,7 +7,7 @@ use std::env;
 fn main() {
     // Inject --headless flag by prepending it to args
     let orig_args: Vec<String> = env::args().collect();
-    let mut new_args = vec!["antigravity-proxy".to_string(), "--headless".to_string()];
+    let mut new_args = vec!["myproxy-proxy".to_string(), "--headless".to_string()];
     for arg in orig_args.into_iter().skip(1) {
         new_args.push(arg);
     }

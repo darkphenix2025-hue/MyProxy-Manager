@@ -2859,7 +2859,7 @@ mod tests {
     #[tokio::test]
     async fn test_reload_account_purges_cache_when_account_becomes_proxy_disabled() {
         let tmp_root = std::env::temp_dir().join(format!(
-            "antigravity-token-manager-test-{}",
+            "myproxy-token-manager-test-{}",
             uuid::Uuid::new_v4()
         ));
         let accounts_dir = tmp_root.join("accounts");
@@ -2926,7 +2926,7 @@ mod tests {
     #[tokio::test]
     async fn test_fixed_account_mode_skips_preferred_when_disabled_on_disk_without_reload() {
         let tmp_root = std::env::temp_dir().join(format!(
-            "antigravity-token-manager-test-fixed-mode-{}",
+            "myproxy-token-manager-test-fixed-mode-{}",
             uuid::Uuid::new_v4()
         ));
         let accounts_dir = tmp_root.join("accounts");
@@ -2993,7 +2993,7 @@ mod tests {
     #[tokio::test]
     async fn test_sticky_session_skips_bound_account_when_disabled_on_disk_without_reload() {
         let tmp_root = std::env::temp_dir().join(format!(
-            "antigravity-token-manager-test-sticky-disabled-{}",
+            "myproxy-token-manager-test-sticky-disabled-{}",
             uuid::Uuid::new_v4()
         ));
         let accounts_dir = tmp_root.join("accounts");

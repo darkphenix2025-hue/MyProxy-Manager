@@ -324,7 +324,7 @@
             "auto_launch": "Mở khi đăng nhập",
             "auto_launch_enabled": "Đã bật",
             "auto_launch_disabled": "Đã tắt",
-            "auto_launch_desc": "Tự động mở Antigravity Tools khi bạn đăng nhập vào máy"
+            "auto_launch_desc": "Tự động mở MyProxy Manager khi bạn đăng nhập vào máy"
         },
         "account": {
             "title": "Cài đặt Tài khoản",
@@ -480,7 +480,7 @@
             "wechat": "WeChat",
             "github": "GitHub",
             "view_code": "Xem Mã nguồn",
-            "copyright": "Bản quyền © 2025-2026 Antigravity. Đã đăng ký bản quyền.",
+            "copyright": "Bản quyền © 2025-2026 MyProxy Manager. Đã đăng ký bản quyền.",
             "support_btn": "Hỗ trợ tác giả",
             "support_title": "Quyên góp & Hỗ trợ",
             "support_desc": "Nếu bạn thấy dự án này hữu ích, hãy mời tác giả một ly cà phê! Sự hỗ trợ của bạn là động lực lớn nhất để tôi duy trì dự án này.",
@@ -769,8 +769,8 @@
             "title": "Ví dụ Sử dụng",
             "curl": "cURL",
             "python": "Python",
-            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # Khuyên dùng: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# Lưu ý: Antigravity hỗ trợ gọi mọi model qua SDK Anthropic\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Xin chào\"}]\n)\n\nprint(response.content[0].text)",
-            "python_gemini": "# Cài đặt: pip install google-generativeai\nimport google.generativeai as genai\n\n# Sử dụng địa chỉ proxy Antigravity (khuyên dùng 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Xin chào\")\nprint(response.text)",
+            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # Khuyên dùng: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# Lưu ý: MyProxy Manager hỗ trợ gọi mọi model qua SDK Anthropic\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Xin chào\"}]\n)\n\nprint(response.content[0].text)",
+            "python_gemini": "# Cài đặt: pip install google-generativeai\nimport google.generativeai as genai\n\n# Sử dụng địa chỉ proxy MyProxy Manager (khuyên dùng 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Xin chào\")\nprint(response.text)",
             "python_openai_image": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    # Cách 1: dùng size (khuyên dùng)\n    # Hỗ trợ: \"1024x1024\" (1:1), \"1280x720\" (16:9), \"720x1280\" (9:16), \"1216x896\" (4:3)\n    extra_body={ \"size\": \"1024x1024\" },\n\n    # Cách 2: dùng hậu tố model\n    # ví dụ: gemini-3-pro-image-16-9, gemini-3-pro-image-4-3\n    # model=\"gemini-3-pro-image-16-9\",\n    messages=[{\n        \"role\": \"user\",\n        \"content\": \"Vẽ một thành phố tương lai\"\n    }]\n)\n\nprint(response.choices[0].message.content)",
             "python_openai": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    messages=[{\"role\": \"user\", \"content\": \"Xin chào\"}]\n)\n\nprint(response.choices[0].message.content)"
         },
@@ -807,12 +807,12 @@
         },
         "mapping": {
             "title": "Ánh xạ Model Claude Code",
-            "description": "Ánh xạ các model Claude Code sang Antigravity model. Tối ưu chi phí và tốc độ bằng cách điều hướng request thông minh.",
+            "description": "Ánh xạ các model Claude Code sang MyProxy Manager model. Tối ưu chi phí và tốc độ bằng cách điều hướng request thông minh.",
             "default": "Mặc định",
             "sonnet_desc": "Mạnh nhất cho công việc phức tạp",
             "opus_desc": "Hạng Premium",
             "haiku_desc": "Nhanh nhất cho câu trả lời ngắn",
-            "maps_to": "Ánh xạ sang Antigravity",
+            "maps_to": "Ánh xạ sang MyProxy Manager",
             "apply_recommended": "Áp dụng Khuyên dùng",
             "restore_defaults": "Khôi phục Mặc định",
             "reset_all": "Đặt lại Tất cả"
@@ -1021,8 +1021,8 @@
         "placeholder": "Nhập mật khẩu quản trị hoặc API Key",
         "btn_login": "Xác minh và Vào",
         "note": "Lưu ý: Nếu đã thiết lập mật khẩu quản trị riêng, vui lòng nhập mật khẩu đó; nếu không, hãy nhập API_KEY.",
-        "lookup_hint": "Nếu quên, hãy chạy lệnh docker logs antigravity-manager để tìm API Key hiện tại hoặc Mật khẩu Web UI.",
-        "config_hint": "Hoặc chạy lệnh grep -E '\"api_key\"|\"admin_password\"' ~/.antigravity_tools/gui_config.json để xem."
+        "lookup_hint": "Nếu quên, hãy chạy lệnh docker logs myproxy-manager để tìm API Key hiện tại hoặc Mật khẩu Web UI.",
+        "config_hint": "Hoặc chạy lệnh grep -E '\"api_key\"|\"admin_password\"' ~/.myproxy_manager/gui_config.json để xem."
     },
     "token_stats": {
         "title": "Thống kê Token",

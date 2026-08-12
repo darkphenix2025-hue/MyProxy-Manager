@@ -325,7 +325,7 @@
             "auto_launch": "開機自動啟動",
             "auto_launch_enabled": "啟用",
             "auto_launch_disabled": "停用",
-            "auto_launch_desc": "系統啟動時自動執行 Antigravity Tools"
+            "auto_launch_desc": "系統啟動時自動執行 MyProxy Manager"
         },
         "account": {
             "title": "帳號設定",
@@ -475,7 +475,7 @@
             "wechat": "微信服務賬號",
             "github": "開源地址",
             "view_code": "檢視程式碼",
-            "copyright": "Copyright © 2025-2026 Antigravity. All rights reserved.",
+            "copyright": "Copyright © 2025-2026 MyProxy Manager. All rights reserved.",
             "support_btn": "贊助作者",
             "support_title": "贊助支持",
             "support_desc": "如果您覺得本工具對您有幫助，歡迎掃碼請作者喝杯咖啡！您的支持是我持續維護項目的最大動力。",
@@ -769,8 +769,8 @@
             "title": "使用示例",
             "curl": "cURL",
             "python": "Python",
-            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # 推薦使用 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# 注意: Antigravity 支援使用 Anthropic SDK 呼叫任意模型\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)\n\nprint(response.content[0].text)",
-            "python_gemini": "# 需要安裝: pip install google-generativeai\nimport google.generativeai as genai\n\n# 使用 Antigravity 代理地址 (推薦 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Hello\")\nprint(response.text)",
+            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # 推薦使用 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# 注意: MyProxy Manager 支援使用 Anthropic SDK 呼叫任意模型\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)\n\nprint(response.content[0].text)",
+            "python_gemini": "# 需要安裝: pip install google-generativeai\nimport google.generativeai as genai\n\n# 使用 MyProxy Manager 代理地址 (推薦 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Hello\")\nprint(response.text)",
             "python_openai_image": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    # 方式 1: 使用 size 參數 (推薦)\n    # 支援: \"1024x1024\" (1:1), \"1280x720\" (16:9), \"720x1280\" (9:16), \"1216x896\" (4:3)\n    extra_body={ \"size\": \"1024x1024\" },\n\n    # 方式 2: 使用模型後綴\n    # 例如: gemini-3-pro-image-16-9, gemini-3-pro-image-4-3\n    # model=\"gemini-3-pro-image-16-9\",\n    messages=[{\n        \"role\": \"user\",\n        \"content\": \"畫一個未來城市\"\n    }]\n)\n\nprint(response.choices[0].message.content)",
             "python_openai": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)\n\nprint(response.choices[0].message.content)"
         },
@@ -806,12 +806,12 @@
         },
         "mapping": {
             "title": "Claude Code 模型對映",
-            "description": "將 Claude Code 模型對映到 Antigravity 模型,智慧路由請求以最佳化成本和速度。",
+            "description": "將 Claude Code 模型對映到 MyProxy Manager 模型,智慧路由請求以最佳化成本和速度。",
             "default": "預設",
             "sonnet_desc": "最強複雜任務",
             "opus_desc": "進階層級",
             "haiku_desc": "極速回應",
-            "maps_to": "對映到 Antigravity",
+            "maps_to": "對映到 MyProxy Manager",
             "apply_recommended": "應用推薦配置",
             "restore_defaults": "恢復預設配置",
             "reset_all": "重置全部"
@@ -1031,8 +1031,8 @@
         "error_invalid_key": "密碼或 API Key 錯誤，請重試",
         "error_network": "網路連線失敗，請檢查服務是否正常運行",
         "note": "注意：如果設置了獨立的管理密碼，請輸入管理密碼；否則請輸入 API_KEY。",
-        "lookup_hint": "如果您忘記了，請運行 docker logs antigravity-manager 尋找 Current API Key 或 Web UI Password",
-        "config_hint": "或執行 grep -E '\"api_key\"|\"admin_password\"' ~/.antigravity_tools/gui_config.json 查看。"
+        "lookup_hint": "如果您忘記了，請運行 docker logs myproxy-manager 尋找 Current API Key 或 Web UI Password",
+        "config_hint": "或執行 grep -E '\"api_key\"|\"admin_password\"' ~/.myproxy_manager/gui_config.json 查看。"
     },
     "token_stats": {
         "title": "Token 消費統計",

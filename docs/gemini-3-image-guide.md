@@ -1,6 +1,6 @@
 # Gemini 3 Pro Image 模型调用指南
 
-本文档详细说明了在 **Antigravity** 项目中调用 Google `gemini-3-pro-image` (Imagen 3) 模型的方法。本项目已对该模型进行了 OpenAI 协议的完全兼容封装，并扩展支持了原生的摄影宽高比、人物生成安全策略，以及**图生图 (Image-to-Image)** 功能。
+本文档详细说明了在 **MyProxy Manager** 项目中调用 Google `gemini-3-pro-image` (Imagen 3) 模型的方法。本项目已对该模型进行了 OpenAI 协议的完全兼容封装，并扩展支持了原生的摄影宽高比、人物生成安全策略，以及**图生图 (Image-to-Image)** 功能。
 
 ## 1. 基础信息
 
@@ -165,7 +165,7 @@ print(response.json())
     *   **A**: 系统会将您输入的尺寸归一化为 Gemini 支持的 10 种标准比例（见 2.1 节）。如果您的比例非常特殊且不匹配任何标准比例（容差 > 0.05），系统将回退到默认的 **1:1**。建议直接使用示例中的分辨率。
 
 2.  **Q: 支持一次生成多张图片吗？**
-    *   **A**: 支持。虽然 Gemini 上游单次请求限制生成 1 张，但 Antigravity 代理层会自动并发处理 `n` 参数。例如设置 `n: 4`，系统会并行发起 4 个请求并合并结果返回。
+    *   **A**: 支持。虽然 Gemini 上游单次请求限制生成 1 张，但 MyProxy Manager 代理层会自动并发处理 `n` 参数。例如设置 `n: 4`，系统会并行发起 4 个请求并合并结果返回。
 
 3.  **Q: `person_generation` 参数报错？**
     *   **A**: 请确保该参数位于 JSON 的**根层级**（与 `prompt`, `model` 同级），而不是嵌套在其他字段中。支持 `snake_case` (`person_generation`) 和 `camelCase` (`personGeneration`)。

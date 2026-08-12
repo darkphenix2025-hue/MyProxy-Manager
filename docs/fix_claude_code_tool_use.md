@@ -1,7 +1,7 @@
 # 针对 Claude Code "Field required" 错误的修复方案文档
 
 ## 1. 问题背景
-在使用 Claude Code CLI 并通过 Antigravity-Manager 代理时，经常会出现以下报错：
+在使用 Claude Code CLI 并通过 MyProxy-Manager 代理时，经常会出现以下报错：
 `messages.X.content.0.text.text: Field required`
 
 **根本原因**：
@@ -65,4 +65,4 @@ if !trimmed_grounding.is_empty() { ... }
     ```
 
 ---
-*文档由 Antigravity AI 助手生成，用于记录 fix/claude-code-tool-use-empty-text 分支的变更细节。*
+*文档由 MyProxy Manager AI 助手生成，用于记录 fix/claude-code-tool-use-empty-text 分支的变更细节。*

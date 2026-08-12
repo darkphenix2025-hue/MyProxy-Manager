@@ -25,7 +25,7 @@
 *   **预期结果**:
     *   Thinking 块应该非常长且详细（可能超过 5k tokens）。
     *   模型会尝试进行深度的对比分析和推理。
-    *   **关键验证点**: 检查 Antigravity 日志，确认 `generationConfig` 中包含了 `thinkingConfig: { type: "adaptive", effort: "high" }`。
+    *   **关键验证点**: 检查 MyProxy Manager 日志，确认 `generationConfig` 中包含了 `thinkingConfig: { type: "adaptive", effort: "high" }`。
 
 ---
 

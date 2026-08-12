@@ -1,6 +1,6 @@
 # Proxy Monitor Technical Reference
 
-This document provides a detailed technical overview of the Proxy Monitor feature in Antigravity Manager, covering its implementation, data structures, and usage.
+This document provides a detailed technical overview of the Proxy Monitor feature in MyProxy Manager, covering its implementation, data structures, and usage.
 
 ## 1. Interface Overview
 

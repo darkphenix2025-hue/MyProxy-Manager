@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Antigravity Tools Install Script (Linux + macOS)
-# Usage: curl -fsSL https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/install.sh | bash
+# MyProxy Manager Install Script (Linux + macOS)
+# Usage: curl -fsSL https://raw.githubusercontent.com/darkphenix2025-hue/MyProxy-Manager/main/install.sh | bash
 #
 # Environment variables:
 #   VERSION     - Install specific version (e.g., "4.1.20"), default: latest
@@ -15,9 +15,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-REPO="lbjlaq/Antigravity-Manager"
-APP_NAME="Antigravity Tools"
-APP_ID="com.lbjlaq.antigravity-tools"
+REPO="darkphenix2025-hue/MyProxy-Manager"
+APP_NAME="MyProxy Manager"
+APP_ID="com.myproxy.manager"
 GITHUB_API="https://api.github.com/repos/${REPO}/releases"
 
 # Helper functions
@@ -43,7 +43,7 @@ Usage:
     curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash
 
     # Install specific version
-    curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | VERSION=4.1.31 bash
+    curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | VERSION=1.0.1 bash
 
 Options:
     --help      Show this help message
@@ -55,7 +55,6 @@ Environment Variables:
 
 Supported Platforms:
     - Linux x86_64:  .deb (Debian/Ubuntu), .rpm (Fedora/RHEL), .AppImage (Universal)
-    - Linux aarch64: .deb (Debian/Ubuntu), .rpm (Fedora/RHEL), .AppImage (Universal)
     - macOS x86_64:  .dmg
     - macOS arm64:   .dmg
 
@@ -79,6 +78,10 @@ detect_platform() {
         aarch64|arm64)  ARCH_LABEL="aarch64"; DEB_ARCH="arm64"; RPM_ARCH="aarch64" ;;
         *)              error "Unsupported architecture: $ARCH" ;;
     esac
+
+    if [[ "$PLATFORM" == "linux" && "$ARCH_LABEL" != "x86_64" ]]; then
+        error "Linux releases are currently available for x86_64 only."
+    fi
 
     info "Detected: $PLATFORM ($ARCH_LABEL)"
 }
@@ -119,7 +122,7 @@ get_version() {
 
     # Method 1: Try GitHub API
     local response
-    if response=$(curl -fsSL -H "User-Agent: Antigravity-Installer" "${GITHUB_API}/latest" 2>/dev/null); then
+    if response=$(curl -fsSL -H "User-Agent: MyProxy-Installer" "${GITHUB_API}/latest" 2>/dev/null); then
         RELEASE_VERSION=$(echo "$response" | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
         if [[ -n "$RELEASE_VERSION" ]]; then
             info "Latest version: v$RELEASE_VERSION"
@@ -151,32 +154,30 @@ build_download_url() {
         linux)
             case "$PKG_EXT" in
                 deb)
-                    # Antigravity.Tools_4.1.31_amd64.deb or _arm64.deb
-                    DOWNLOAD_URL="${base_url}/Antigravity.Tools_${RELEASE_VERSION}_${DEB_ARCH}.deb"
-                    FILENAME="Antigravity.Tools_${RELEASE_VERSION}_${DEB_ARCH}.deb"
+                    DOWNLOAD_URL="${base_url}/MyProxy.Manager_${RELEASE_VERSION}_${DEB_ARCH}.deb"
+                    FILENAME="MyProxy.Manager_${RELEASE_VERSION}_${DEB_ARCH}.deb"
                     ;;
                 rpm)
-                    # Antigravity.Tools-4.1.31-1.x86_64.rpm or -1.aarch64.rpm
-                    DOWNLOAD_URL="${base_url}/Antigravity.Tools-${RELEASE_VERSION}-1.${RPM_ARCH}.rpm"
-                    FILENAME="Antigravity.Tools-${RELEASE_VERSION}-1.${RPM_ARCH}.rpm"
+                    DOWNLOAD_URL="${base_url}/MyProxy.Manager_${RELEASE_VERSION}_${RPM_ARCH}.rpm"
+                    FILENAME="MyProxy.Manager_${RELEASE_VERSION}_${RPM_ARCH}.rpm"
                     ;;
                 AppImage)
-                    # Antigravity.Tools_4.1.31_amd64.AppImage or _aarch64.AppImage
                     local appimage_arch
                     if [[ "$ARCH_LABEL" == "x86_64" ]]; then
-                        appimage_arch="amd64"
+                        appimage_arch="x86_64"
                     else
                         appimage_arch="aarch64"
                     fi
-                    DOWNLOAD_URL="${base_url}/Antigravity.Tools_${RELEASE_VERSION}_${appimage_arch}.AppImage"
-                    FILENAME="Antigravity.Tools_${RELEASE_VERSION}_${appimage_arch}.AppImage"
+                    DOWNLOAD_URL="${base_url}/MyProxy.Manager_${RELEASE_VERSION}_${appimage_arch}.AppImage"
+                    FILENAME="MyProxy.Manager_${RELEASE_VERSION}_${appimage_arch}.AppImage"
                     ;;
             esac
             ;;
         macos)
-            # Prefer universal DMG, fallback to arch-specific
-            DOWNLOAD_URL="${base_url}/Antigravity.Tools_${RELEASE_VERSION}_universal.dmg"
-            FILENAME="Antigravity.Tools_${RELEASE_VERSION}_universal.dmg"
+            local dmg_arch
+            [[ "$ARCH_LABEL" == "aarch64" ]] && dmg_arch="aarch64" || dmg_arch="x64"
+            DOWNLOAD_URL="${base_url}/MyProxy.Manager_${RELEASE_VERSION}_${dmg_arch}.dmg"
+            FILENAME="MyProxy.Manager_${RELEASE_VERSION}_${dmg_arch}.dmg"
             ;;
     esac
 
@@ -217,10 +218,10 @@ install_linux() {
             local install_dir="${HOME}/.local/bin"
             run mkdir -p "$install_dir"
             run chmod +x "$DOWNLOAD_PATH"
-            run cp "$DOWNLOAD_PATH" "${install_dir}/antigravity-tools"
+            run cp "$DOWNLOAD_PATH" "${install_dir}/myproxy-manager"
 
             if [[ ":$PATH:" != *":${install_dir}:"* ]]; then
-                warn "Add ${install_dir} to your PATH to run antigravity-tools from anywhere"
+                warn "Add ${install_dir} to your PATH to run myproxy-manager from anywhere"
 
                 local shell_name rc_file export_line
                 shell_name="$(basename "${SHELL:-/bin/bash}")"

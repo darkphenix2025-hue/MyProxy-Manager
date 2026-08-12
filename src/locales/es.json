@@ -325,7 +325,7 @@
             "auto_launch": "Iniciar al Arrancar",
             "auto_launch_enabled": "Habilitado",
             "auto_launch_disabled": "Deshabilitado",
-            "auto_launch_desc": "Iniciar automáticamente Antigravity Tools al arrancar el sistema"
+            "auto_launch_desc": "Iniciar automáticamente MyProxy Manager al arrancar el sistema"
         },
         "account": {
             "title": "Configuración de Cuenta",
@@ -481,7 +481,7 @@
             "wechat": "WeChat",
             "github": "GitHub",
             "view_code": "Ver Código",
-            "copyright": "Copyright © 2025-2026 Antigravity. Todos los derechos reservados.",
+            "copyright": "Copyright © 2025-2026 MyProxy Manager. Todos los derechos reservados.",
             "support_btn": "Apoyar al Autor",
             "support_title": "Donación y Apoyo",
             "support_desc": "Si encuentras útil este proyecto, ¡siéntete libre de invitarme un café! Tu apoyo es la mayor motivación para mantener este proyecto.",
@@ -761,8 +761,8 @@
             "title": "Ejemplos de Uso",
             "curl": "cURL",
             "python": "Python",
-            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # Recomendado: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# Nota: Antigravity soporta llamar cualquier modelo vía el SDK de Anthropic\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hola\"}]\n)\n\nprint(response.content[0].text)",
-            "python_gemini": "# Instalar: pip install google-generativeai\nimport google.generativeai as genai\n\n# Usar dirección de proxy de Antigravity (recomendado 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Hola\")\nprint(response.text)",
+            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # Recomendado: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# Nota: MyProxy Manager soporta llamar cualquier modelo vía el SDK de Anthropic\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hola\"}]\n)\n\nprint(response.content[0].text)",
+            "python_gemini": "# Instalar: pip install google-generativeai\nimport google.generativeai as genai\n\n# Usar dirección de proxy de MyProxy Manager (recomendado 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Hola\")\nprint(response.text)",
             "python_openai_image": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    # Opción 1: usar tamaño (recomendado)\n    # Soportados: \"1024x1024\" (1:1), \"1280x720\" (16:9), \"720x1280\" (9:16), \"1216x896\" (4:3)\n    extra_body={ \"size\": \"1024x1024\" },\n\n    # Opción 2: usar sufijo de modelo\n    # ej. gemini-3-pro-image-16-9, gemini-3-pro-image-4-3\n    # model=\"gemini-3-pro-image-16-9\",\n    messages=[{\n        \"role\": \"user\",\n        \"content\": \"Dibuja una ciudad futurista\"\n    }]\n)\n\nprint(response.choices[0].message.content)",
             "python_openai": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    messages=[{\"role\": \"user\", \"content\": \"Hola\"}]\n)\n\nprint(response.choices[0].message.content)"
         },
@@ -801,12 +801,12 @@
         },
         "mapping": {
             "title": "Mapeo de Modelos Claude Code",
-            "description": "Mapee modelos de Claude Code a modelos de Antigravity. Optimice costo y velocidad enrutando solicitudes inteligentemente.",
+            "description": "Mapee modelos de Claude Code a modelos de MyProxy Manager. Optimice costo y velocidad enrutando solicitudes inteligentemente.",
             "default": "Predeterminado",
             "sonnet_desc": "Más capaz para trabajo complejo",
             "opus_desc": "Nivel premium",
             "haiku_desc": "Más rápido para respuestas rápidas",
-            "maps_to": "Mapea a Antigravity",
+            "maps_to": "Mapea a MyProxy Manager",
             "apply_recommended": "Aplicar Recomendado",
             "restore_defaults": "Restaurar Configuración Predeterminada",
             "reset_all": "Restablecer Todo"
@@ -994,8 +994,8 @@
         "placeholder": "Ingrese contraseña de administración o Clave API",
         "btn_login": "Verificar y Entrar",
         "note": "Nota: Si se estableció una contraseña de administración separada, ingrésela; de lo contrario, ingrese la API_KEY.",
-        "lookup_hint": "Si olvidó, ejecute docker logs antigravity-manager para encontrar la Current API Key o Web UI Password",
-        "config_hint": "O ejecute grep -E '\"api_key\"|\"admin_password\"' ~/.antigravity_tools/gui_config.json para ver."
+        "lookup_hint": "Si olvidó, ejecute docker logs myproxy-manager para encontrar la Current API Key o Web UI Password",
+        "config_hint": "O ejecute grep -E '\"api_key\"|\"admin_password\"' ~/.myproxy_manager/gui_config.json para ver."
     },
     "token_stats": {
         "title": "Estadísticas de Consumo de Tokens",

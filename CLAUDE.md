@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Antigravity Tools** — a Tauri v2 desktop application that acts as a local AI gateway. It converts web-based AI sessions (Google/Anthropic) into standardized API endpoints (OpenAI, Anthropic, Gemini formats) with account rotation, protocol translation, and smart retry.
+**MyProxy Manager** — a Tauri v2 desktop application that acts as a local AI gateway. It converts web-based AI sessions (Google/Anthropic) into standardized API endpoints (OpenAI, Anthropic, Gemini formats) with account rotation, protocol translation, and smart retry.
 
 - **Version:** 1.0.0
 - **License:** CC-BY-NC-SA-4.0
-- **Repo:** https://github.com/lbjlaq/Antigravity-Manager
+- **Repo:** https://github.com/darkphenix2025-hue/MyProxy-Manager
 
 ## Tech Stack
 
@@ -21,7 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Directory Structure
 
 ```
-Antigravity-Manager/
+MyProxy-Manager/
 ├── src/                          # React frontend
 │   ├── main.tsx                  # Entry point
 │   ├── App.tsx                   # Router + global state + Tauri events
@@ -75,7 +75,7 @@ cargo fmt -- --check                                    # Check formatting
 cargo clippy --all-targets --all-features -- -D warnings # Lint
 cargo check                                             # Compilation check
 cargo test                                              # Run all tests
-cargo test --package antigravity_tools <test_name>       # Run specific test
+cargo test --package myproxy_manager <test_name>       # Run specific test
 cargo build --release                                   # Release build
 ```
 

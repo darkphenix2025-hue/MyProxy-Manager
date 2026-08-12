@@ -327,7 +327,7 @@
             "auto_launch": "تشغيل عند البدء",
             "auto_launch_enabled": "مفعل",
             "auto_launch_disabled": "معطل",
-            "auto_launch_desc": "تشغيل Antigravity Tools تلقائيًا عند بدء النظام"
+            "auto_launch_desc": "تشغيل MyProxy Manager تلقائيًا عند بدء النظام"
         },
         "account": {
             "title": "إعدادات الحساب",
@@ -483,7 +483,7 @@
             "wechat": "WeChat",
             "github": "GitHub",
             "view_code": "عرض الكود",
-            "copyright": "حقوق النشر © 2025-2026 Antigravity. جميع الحقوق محفوظة.",
+            "copyright": "حقوق النشر © 2025-2026 MyProxy Manager. جميع الحقوق محفوظة.",
             "support_btn": "دعم المؤلف",
             "support_title": "تبرع ودعم",
             "support_desc": "إذا وجدت هذا المشروع مفيدًا، لا تتردد في شراء قهوة لي! دعمك هو أكبر حافز لي لصيانة هذا المشروع.",
@@ -767,8 +767,8 @@
             "title": "أمثلة الاستخدام",
             "curl": "cURL",
             "python": "Python",
-            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # Recommended: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# Note: Antigravity supports calling any model via the Anthropic SDK\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"مرحبًا\"}]\n)\n\nprint(response.content[0].text)",
-            "python_gemini": "# Install: pip install google-generativeai\nimport google.generativeai as genai\n\n# Use Antigravity proxy address (recommended 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"مرحبًا\")\nprint(response.text)",
+            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # Recommended: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# Note: MyProxy Manager supports calling any model via the Anthropic SDK\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"مرحبًا\"}]\n)\n\nprint(response.content[0].text)",
+            "python_gemini": "# Install: pip install google-generativeai\nimport google.generativeai as genai\n\n# Use MyProxy Manager proxy address (recommended 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"مرحبًا\")\nprint(response.text)",
             "python_openai_image": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    # Option 1: use size (recommended)\n    # Supported: \"1024x1024\" (1:1), \"1280x720\" (16:9), \"720x1280\" (9:16), \"1216x896\" (4:3)\n    extra_body={ \"size\": \"1024x1024\" },\n\n    # Option 2: use model suffix\n    # e.g. gemini-3-pro-image-16-9, gemini-3-pro-image-4-3\n    # model=\"gemini-3-pro-image-16-9\",\n    messages=[{\n        \"role\": \"user\",\n        \"content\": \"ارسم مدينة مستقبلية\"\n    }]\n)\n\nprint(response.choices[0].message.content)",
             "python_openai": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    messages=[{\"role\": \"user\", \"content\": \"مرحبًا\"}]\n)\n\nprint(response.choices[0].message.content)"
         },
@@ -805,12 +805,12 @@
         },
         "mapping": {
             "title": "خريطة نماذج Claude Code",
-            "description": "اربط نماذج Claude Code بنماذج Antigravity. تحسين التكلفة والسرعة عن طريق توجيه الطلبات بذكاء.",
+            "description": "اربط نماذج Claude Code بنماذج MyProxy Manager. تحسين التكلفة والسرعة عن طريق توجيه الطلبات بذكاء.",
             "default": "افتراضي",
             "sonnet_desc": "الأكثر قدرة للأعمال المعقدة",
             "opus_desc": "الفئة المميزة",
             "haiku_desc": "الأسرع للإجابات السريعة",
-            "maps_to": "يربط بـ Antigravity",
+            "maps_to": "يربط بـ MyProxy Manager",
             "apply_recommended": "تطبيق الموصى به",
             "restore_defaults": "استعادة التكوين الافتراضي",
             "reset_all": "إعادة تعيين الكل"
@@ -998,8 +998,8 @@
         "placeholder": "أدخل كلمة مرور الإدارة أو مفتاح API",
         "btn_login": "تحقق ودخول",
         "note": "ملاحظة: إذا تم تعيين كلمة مرور إدارة منفصلة، يرجى إدخالها؛ وإلا، أدخل مفتاح API.",
-        "lookup_hint": "إذا نسيت، قم بتشغيل docker logs antigravity-manager للعثور على مفتاح API الحالي أو كلمة مرور واجهة الويب",
-        "config_hint": "أو قم بتشغيل grep -E '\"api_key\"|\"admin_password\"' ~/.antigravity_tools/gui_config.json للعرض."
+        "lookup_hint": "إذا نسيت، قم بتشغيل docker logs myproxy-manager للعثور على مفتاح API الحالي أو كلمة مرور واجهة الويب",
+        "config_hint": "أو قم بتشغيل grep -E '\"api_key\"|\"admin_password\"' ~/.myproxy_manager/gui_config.json للعرض."
     },
     "token_stats": {
         "title": "إحصائيات استهلاك التوكن",

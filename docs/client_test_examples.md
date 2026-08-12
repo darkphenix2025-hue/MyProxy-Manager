@@ -81,7 +81,7 @@ RUST_LOG=debug npm run tauri dev
 
 2.  **模拟环境变更 (Step 2)**:
     *   **动作**：**保持当前 Claude CLI 会话不关闭**。
-    *   **动作**：在另一个终端完全重启 Antigravity (或 `npm run tauri dev`)。
+    *   **动作**：在另一个终端完全重启 MyProxy Manager (或 `npm run tauri dev`)。
     *   *原理*：重启会清空代理内存中的“签名白名单”，这意味着 Step 1 中下发的签名现在对代理来说是“未知/不可信”的。
 
 3.  **触发历史重放 (Step 3)**:
@@ -159,11 +159,11 @@ RUST_LOG=debug npm run tauri dev
 
 ## 7. OpenCode (Claude Code CLI) 多协议接入测试
 
-**Antigravity 已全面支持 OpenCode 的多协议接入**，彻底解决了 `AI_TypeValidationError` 等兼容性问题。您可以根据需要选择以下任一方式接入。
+**MyProxy Manager 已全面支持 OpenCode 的多协议接入**，彻底解决了 `AI_TypeValidationError` 等兼容性问题。您可以根据需要选择以下任一方式接入。
 
 ### 端点配置表
 
-| 协议类型 | Base URL (Antigravity) | 对应的 OpenCode Provider | 备注 |
+| 协议类型 | Base URL (MyProxy Manager) | 对应的 OpenCode Provider | 备注 |
 | :--- | :--- | :--- | :--- |
 | **Anthropic (原生)** | `http://localhost:8045/v1` | `anthropic` | **推荐**。支持 Thinking、工具调用、Artifacts 预览。 |
 | **OpenAI (标准)** | `http://localhost:8045/v1` | `openai` | 支持通用 OpenAI 客户端逻辑。 |
@@ -178,7 +178,7 @@ RUST_LOG=debug npm run tauri dev
     ```bash
     # 设置 Base URL (注意：OpenCode 的 anthropic provider 有时需要完整路径)
     export ANTHROPIC_BASE_URL="http://localhost:8045/v1"
-    # 设置 API Key (Antigravity 的密钥)
+    # 设置 API Key (MyProxy Manager 的密钥)
     export ANTHROPIC_API_KEY="sk-antigravity-key"
     ```
 
@@ -189,7 +189,7 @@ RUST_LOG=debug npm run tauri dev
 
 3.  **验证点**:
     *   **Thinking**: 是否能看到蓝色的思维块输出？
-    *   **签名**: 检查 Antigravity 日志，应显示 `Cached signature to session ... [FIFO: true]`。
+    *   **签名**: 检查 MyProxy Manager 日志，应显示 `Cached signature to session ... [FIFO: true]`。
     *   **无错**: 全程无 `Invalid signature` 报错。
 
 ### B. 方式 2：OpenAI 协议 (含 Compatible)
@@ -216,7 +216,7 @@ RUST_LOG=debug npm run tauri dev
 
 ### C. 方式 3：Google Gemini 原生协议
 
-Antigravity v4.1.4 新增支持。
+MyProxy Manager v4.1.4 新增支持。
 
 1.  **配置**:
     ```bash
@@ -226,16 +226,16 @@ Antigravity v4.1.4 新增支持。
     ```
 
 2.  **验证点**:
-    *   **适配器检测**: Antigravity 日志应显示 `[Gemini] Client Adapter detected`。
+    *   **适配器检测**: MyProxy Manager 日志应显示 `[Gemini] Client Adapter detected`。
     *   **Let It Crash**: 当遇到 403/404 错误时，响应应立即返回，而不是让 OpenCode 挂起等待重试。
 
 ### D. 常见问题排查
 
 *   **Q: 报错 `AI_TypeValidationError`？**
-    *   **A**: 请确保升级 Antigravity 到 v4.1.2+。旧版本返回的错误格式（纯文本）无法通过 OpenCode 的 Zod 校验。
+    *   **A**: 请确保升级 MyProxy Manager 到 v4.1.2+。旧版本返回的错误格式（纯文本）无法通过 OpenCode 的 Zod 校验。
 
 *   **Q: Thinking 块显示为 `[Redacted]` 或直接消失？**
-    *   **A**: 这是正常现象。为了保护 Google 的签名不被破坏，Antigravity 可能会在特定情况下（如高上下文压力或签名验证失败时）主动剥离思维块。只要对话能继续，说明 "Dynamic Stripping" 机制正在工作。
+    *   **A**: 这是正常现象。为了保护 Google 的签名不被破坏，MyProxy Manager 可能会在特定情况下（如高上下文压力或签名验证失败时）主动剥离思维块。只要对话能继续，说明 "Dynamic Stripping" 机制正在工作。
 
 ---
 
@@ -274,7 +274,7 @@ Antigravity v4.1.4 新增支持。
     ```
 *   **验证点**:
     *   **乱序容忍**: 即使响应到达顺序可能与请求不一致，客户端不应崩溃。
-    *   **队列深度**: Antigravity 日志中应显示 Signature Cache 正常更新，未出现覆盖导致的前序签名失效。
+    *   **队列深度**: MyProxy Manager 日志中应显示 Signature Cache 正常更新，未出现覆盖导致的前序签名失效。
 
 #### 第 4 轮：长文本生成 (Output Token Limit)
 *   **指令**:

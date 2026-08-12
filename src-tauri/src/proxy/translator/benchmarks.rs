@@ -1,12 +1,12 @@
-/// Translator performance benchmarks — 新转换单元性能基准。
-///
-/// 使用标准 #[test] + 手动计时（不依赖 criterion / nightly），
-/// 在 CI 的 stable Rust 上可运行。
-///
-/// 测试场景：
-/// 1. 请求转换延迟（各翻译对）
-/// 2. 非流响应转换延迟
-/// 3. SSE 流响应逐 chunk 转换延迟
+//! Translator performance benchmarks — 新转换单元性能基准。
+//!
+//! 使用标准 #[test] + 手动计时（不依赖 criterion / nightly），
+//! 在 CI 的 stable Rust 上可运行。
+//!
+//! 测试场景：
+//! 1. 请求转换延迟（各翻译对）
+//! 2. 非流响应转换延迟
+//! 3. SSE 流响应逐 chunk 转换延迟
 
 #[cfg(test)]
 mod tests {

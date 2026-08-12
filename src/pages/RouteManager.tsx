@@ -104,9 +104,13 @@ export default function RouteManager() {
     // Load custom presets from localStorage
     useEffect(() => {
         try {
-            const saved = localStorage.getItem('antigravity_custom_presets');
+            const storageKey = 'myproxy_custom_presets';
+            const legacyStorageKey = 'antigravity_custom_presets';
+            const saved = localStorage.getItem(storageKey) ?? localStorage.getItem(legacyStorageKey);
             if (saved) {
                 setCustomPresets(JSON.parse(saved));
+                localStorage.setItem(storageKey, saved);
+                localStorage.removeItem(legacyStorageKey);
             }
         } catch (error) {
             console.error('Failed to load custom presets:', error);
@@ -204,7 +208,7 @@ export default function RouteManager() {
     // Preset management
     const saveCustomPresetsToStorage = (presets: CustomPreset[]) => {
         try {
-            localStorage.setItem('antigravity_custom_presets', JSON.stringify(presets));
+            localStorage.setItem('myproxy_custom_presets', JSON.stringify(presets));
             setCustomPresets(presets);
         } catch (error) {
             console.error('Failed to save custom presets:', error);

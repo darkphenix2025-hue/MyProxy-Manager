@@ -1,7 +1,7 @@
 # Claude Opus 4.6 Thinking Integration
 
 ## Overview
-This document describes the integration of Claude Opus 4.6 Thinking model into the Antigravity Proxy.
+This document describes the integration of Claude Opus 4.6 Thinking model into the MyProxy Manager Proxy.
 
 ## Changes Made
 

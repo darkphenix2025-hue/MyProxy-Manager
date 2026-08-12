@@ -1837,7 +1837,7 @@ pub async fn handle_list_models(State(state): State<AppState>) -> impl IntoRespo
                 "id": id,
                 "object": "model",
                 "created": 1706745600,
-                "owned_by": "antigravity"
+                "owned_by": "myproxy"
             })
         })
         .collect();

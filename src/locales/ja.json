@@ -117,7 +117,7 @@
             "export_error": "エクスポートに失敗しました"
         },
         "branding": {
-            "title": "Antigravity Tools",
+            "title": "MyProxy Manager",
             "subtitle": "プロフェッショナルなアカウント管理"
         }
     },
@@ -337,7 +337,7 @@
             "auto_launch": "起動時に実行",
             "auto_launch_enabled": "有効",
             "auto_launch_disabled": "無効",
-            "auto_launch_desc": "システム起動時にAntigravity Toolsを自動的に起動する"
+            "auto_launch_desc": "システム起動時にMyProxy Managerを自動的に起動する"
         },
         "account": {
             "title": "アカウント設定",
@@ -490,7 +490,7 @@
             "wechat": "WeChat",
             "github": "GitHub",
             "view_code": "コードを表示",
-            "copyright": "Copyright © 2025-2026 Antigravity. All rights reserved.",
+            "copyright": "Copyright © 2025-2026 MyProxy Manager. All rights reserved.",
             "support_btn": "作者をサポート",
             "support_title": "寄付とサポート",
             "support_desc": "このプロジェクトがお役に立てば、コーヒーを一杯ご馳走してください！皆様のサポートが、プロジェクトを継続する最大の動機です。",
@@ -549,7 +549,7 @@
             "title": "スマートウォームアップ"
         },
         "branding": {
-            "title": "Antigravity Tools",
+            "title": "MyProxy Manager",
             "subtitle": "プロフェッショナルなアカウント管理"
         }
     },
@@ -798,7 +798,7 @@
                 "sync_confirm_message": "現在のプロキシ設定に基づき、OpenCode の設定が上書きされます。続行しますか？",
                 "restore_confirm": "OpenCode をデフォルト設定に復元しますか？",
                 "restore_backup_confirm": "バックアップから OpenCode の設定を復元しますか？",
-                "auth_plugin_warning": "opencode-antigravity-auth プラグインを検出しました。同期では antigravity-manager provider のみ作成し、google provider/plugin は上書きしません。"
+                "auth_plugin_warning": "opencode-antigravity-auth プラグインを検出しました。同期では myproxy-manager provider のみ作成し、google provider/plugin は上書きしません。"
             },
             "droid_sync": {
                 "modal_title": "Droid にモデルを追加",
@@ -860,8 +860,8 @@
             "title": "使用例",
             "curl": "cURL",
             "python": "Python",
-            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # 推奨: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# 注意: AntigravityはAnthropic SDK経由でのあらゆるモデル呼び出しをサポートします\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"こんにちは\"}]\n)\n\nprint(response.content[0].text)",
-            "python_gemini": "# インストール: pip install google-generativeai\nimport google.generativeai as genai\n\n# Antigravityプロキシアドレスを使用 (推奨 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"こんにちは\")\nprint(response.text)",
+            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # 推奨: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# 注意: MyProxy ManagerはAnthropic SDK経由でのあらゆるモデル呼び出しをサポートします\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"こんにちは\"}]\n)\n\nprint(response.content[0].text)",
+            "python_gemini": "# インストール: pip install google-generativeai\nimport google.generativeai as genai\n\n# MyProxy Managerプロキシアドレスを使用 (推奨 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"こんにちは\")\nprint(response.text)",
             "python_openai_image": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    # オプション1: サイズ指定 (推奨)\n    # サポート: \"1024x1024\" (1:1), \"1280x720\" (16:9), \"720x1280\" (9:16), \"1216x896\" (4:3)\n    extra_body={ \"size\": \"1024x1024\" },\n\n    # オプション2: モデルサフィックス使用\n    # 例: gemini-3-pro-image-16-9, gemini-3-pro-image-4-3\n    # model=\"gemini-3-pro-image-16-9\",\n    messages=[{\n        \"role\": \"user\",\n        \"content\": \"近未来の都市を描いてください\"\n    }]\n)\n\nprint(response.choices[0].message.content)",
             "python_openai": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    messages=[{\"role\": \"user\", \"content\": \"こんにちは\"}]\n)\n\nprint(response.choices[0].message.content)"
         },
@@ -900,12 +900,12 @@
         },
         "mapping": {
             "title": "Claude Code モデルマッピング",
-            "description": "Claude CodeモデルをAntigravityモデルにマッピングします。リクエストを賢くルーティングしてコストと速度を最適化します。",
+            "description": "Claude CodeモデルをMyProxy Managerモデルにマッピングします。リクエストを賢くルーティングしてコストと速度を最適化します。",
             "default": "デフォルト",
             "sonnet_desc": "複雑な作業に最適",
             "opus_desc": "プレミアムティア",
             "haiku_desc": "クイックな回答に最速",
-            "maps_to": "Antigravityにマップ",
+            "maps_to": "MyProxy Managerにマップ",
             "apply_recommended": "推奨設定を適用",
             "restore_defaults": "デフォルト設定に戻す",
             "reset_all": "すべてリセット"
@@ -1149,8 +1149,8 @@
         "error_invalid_key": "パスワードまたは API キーが無効です。再試行してください",
         "error_network": "ネットワーク接続に失敗しました。サービスが実行中か確認してください",
         "note": "注意：独立した管理パスワードが設定されている場合は管理パスワードを入力してください。そうでない場合は API_KEY を入力してください。",
-        "lookup_hint": "お忘れの場合は、docker logs antigravity-manager を実行して Current API Key または Web UI Password を探してください",
-        "config_hint": "または grep -E '\"api_key\"|\"admin_password\"' ~/.antigravity_tools/gui_config.json を実行して確認してください。"
+        "lookup_hint": "お忘れの場合は、docker logs myproxy-manager を実行して Current API Key または Web UI Password を探してください",
+        "config_hint": "または grep -E '\"api_key\"|\"admin_password\"' ~/.myproxy_manager/gui_config.json を実行して確認してください。"
     },
     "token_stats": {
         "title": "トークン統計",

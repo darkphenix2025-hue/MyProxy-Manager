@@ -140,7 +140,7 @@ where
 
             // 2. Inject system message to inform user
             // We use a new text block for this.
-            let recovery_msg = "\n\n[System] Upstream model interrupted after thinking. (Recovered by Antigravity)";
+            let recovery_msg = "\n\n[System] Upstream model interrupted after thinking. (Recovered by MyProxy Manager)";
             let start_chunks = state.start_block(
                 crate::proxy::mappers::claude::streaming::BlockType::Text,
                 serde_json::json!({ "type": "text", "text": recovery_msg })
@@ -547,7 +547,7 @@ mod tests {
         assert!(output.contains("Thinking..."));
 
         // 必须包含恢复的系统提示
-        assert!(output.contains("Recovered by Antigravity"));
+        assert!(output.contains("Recovered by MyProxy Manager"));
 
         // 必须包含模拟的 Usage
         assert!(output.contains("\"usage\":"));

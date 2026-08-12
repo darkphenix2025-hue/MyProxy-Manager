@@ -1,8 +1,8 @@
-# Antigravity Tools Install Script for Windows
-# Usage: irm https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/install.ps1 | iex
+# MyProxy Manager Install Script for Windows
+# Usage: irm https://raw.githubusercontent.com/darkphenix2025-hue/MyProxy-Manager/main/install.ps1 | iex
 #
 # Parameters (set before running):
-#   $Version = "4.1.31"  # Install specific version
+#   $Version = "1.0.1"  # Install specific version
 #   $DryRun = $true      # Preview commands without executing
 
 if (-not $Version) { $Version = "" }
@@ -10,8 +10,8 @@ if (-not $DryRun) { $DryRun = $false }
 
 $ErrorActionPreference = "Continue"
 
-$Repo = "lbjlaq/Antigravity-Manager"
-$AppName = "Antigravity Tools"
+$Repo = "darkphenix2025-hue/MyProxy-Manager"
+$AppName = "MyProxy Manager"
 $GithubApi = "https://api.github.com/repos/$Repo/releases"
 $script:ReleaseVersion = ""
 $script:DownloadUrl = ""
@@ -52,7 +52,7 @@ function Get-ReleaseVersion {
     # Method 1: Try GitHub API
     try {
         $release = Invoke-RestMethod -Uri "$GithubApi/latest" -Headers @{
-            "User-Agent" = "Antigravity-Installer"
+            "User-Agent" = "MyProxy-Installer"
             "Accept"     = "application/vnd.github.v3+json"
         } -TimeoutSec 10
         $script:ReleaseVersion = $release.tag_name -replace "^v", ""
@@ -85,14 +85,14 @@ function Get-ReleaseVersion {
     }
 
     Script-Error "Failed to determine latest version. Try specifying version manually:"
-    Write-Host '  $Version = "4.1.31"; irm https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/install.ps1 | iex' -ForegroundColor Yellow
+    Write-Host '  $Version = "1.0.1"; irm https://raw.githubusercontent.com/darkphenix2025-hue/MyProxy-Manager/main/install.ps1 | iex' -ForegroundColor Yellow
     return $false
 }
 
 function Get-DownloadUrl {
-    # NSIS installer: Antigravity.Tools_4.1.31_x64-setup.exe
-    $script:DownloadUrl = "https://github.com/$Repo/releases/download/v$($script:ReleaseVersion)/Antigravity.Tools_$($script:ReleaseVersion)_x64-setup.exe"
-    $script:Filename = "Antigravity.Tools_$($script:ReleaseVersion)_x64-setup.exe"
+    # NSIS installer: MyProxy.Manager_1.0.1_x64-setup.exe
+    $script:DownloadUrl = "https://github.com/$Repo/releases/download/v$($script:ReleaseVersion)/MyProxy.Manager_$($script:ReleaseVersion)_x64-setup.exe"
+    $script:Filename = "MyProxy.Manager_$($script:ReleaseVersion)_x64-setup.exe"
 
     Info "Download URL: $($script:DownloadUrl)"
 }

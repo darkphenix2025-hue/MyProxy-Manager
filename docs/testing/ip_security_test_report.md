@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-本 PR 为 Antigravity Manager 增加了 IP 安全监控功能，包括：
+本 PR 为 MyProxy Manager 增加了 IP 安全监控功能，包括：
 
 1. **IP 黑名单**：支持按单个 IP 或 CIDR 范围封禁恶意访问者
 2. **IP 白名单**：支持白名单模式和白名单优先模式
@@ -52,19 +52,19 @@
 ```bash
 # 运行所有安全相关测试
 cd src-tauri
-cargo test --package antigravity-manager --lib proxy::tests::security
+cargo test --package myproxy-manager --lib proxy::tests::security
 
 # 运行单元测试
-cargo test --package antigravity-manager --lib proxy::tests::security_ip_tests
+cargo test --package myproxy-manager --lib proxy::tests::security_ip_tests
 
 # 运行集成测试
-cargo test --package antigravity-manager --lib proxy::tests::security_integration_tests
+cargo test --package myproxy-manager --lib proxy::tests::security_integration_tests
 
 # 运行性能基准测试 (带输出)
-cargo test --package antigravity-manager --lib benchmark -- --nocapture
+cargo test --package myproxy-manager --lib benchmark -- --nocapture
 
 # 运行压力测试 (带输出)
-cargo test --package antigravity-manager --lib stress -- --nocapture
+cargo test --package myproxy-manager --lib stress -- --nocapture
 ```
 
 ## 测试结果

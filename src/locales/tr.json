@@ -313,7 +313,7 @@
             "auto_launch": "Başlangıçta Çalıştır",
             "auto_launch_enabled": "Etkin",
             "auto_launch_disabled": "Devre Dışı",
-            "auto_launch_desc": "Sistem başladığında Antigravity Tools'u otomatik olarak başlat"
+            "auto_launch_desc": "Sistem başladığında MyProxy Manager'u otomatik olarak başlat"
         },
         "account": {
             "title": "Hesap Ayarları",
@@ -453,7 +453,7 @@
             "wechat": "WeChat",
             "github": "GitHub",
             "view_code": "Kodu Görüntüle",
-            "copyright": "Telif Hakkı © 2025-2026 Antigravity. Tüm hakları saklıdır.",
+            "copyright": "Telif Hakkı © 2025-2026 MyProxy Manager. Tüm hakları saklıdır.",
             "support_btn": "Yazarı Destekle",
             "support_title": "Bağış ve Destek",
             "support_desc": "Bu projeyi yararlı buluyorsanız, yazara bir kahve ısmarlayabilirsiniz! Desteğiniz, bu projeyi sürdürmek için en büyük motivasyon kaynağımdır.",
@@ -745,8 +745,8 @@
             "title": "Kullanım Örnekleri",
             "curl": "cURL",
             "python": "Python",
-            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # Önerilen: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# Not: Antigravity, Anthropic SDK ile herhangi bir modeli çağırmayı destekler\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Merhaba\"}]\n)\n\nprint(response.content[0].text)",
-            "python_gemini": "# Kurulum: pip install google-generativeai\nimport google.generativeai as genai\n\n# Antigravity proxy adresini kullan (önerilen 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Merhaba\")\nprint(response.text)",
+            "python_anthropic": "from anthropic import Anthropic\n\nclient = Anthropic(\n    # Önerilen: 127.0.0.1\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\n# Not: MyProxy Manager, Anthropic SDK ile herhangi bir modeli çağırmayı destekler\nresponse = client.messages.create(\n    model=\"{{modelId}}\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Merhaba\"}]\n)\n\nprint(response.content[0].text)",
+            "python_gemini": "# Kurulum: pip install google-generativeai\nimport google.generativeai as genai\n\n# MyProxy Manager proxy adresini kullan (önerilen 127.0.0.1)\ngenai.configure(\n    api_key=\"{{apiKey}}\",\n    transport='rest',\n    client_options={'api_endpoint': '{{rawBaseUrl}}'}\n)\n\nmodel = genai.GenerativeModel('{{modelId}}')\nresponse = model.generate_content(\"Merhaba\")\nprint(response.text)",
             "python_openai_image": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    # Seçenek 1: boyut kullan (önerilen)\n    # Desteklenen: \"1024x1024\" (1:1), \"1280x720\" (16:9), \"720x1280\" (9:16), \"1216x896\" (4:3)\n    extra_body={ \"size\": \"1024x1024\" },\n\n    # Seçenek 2: model eki kullan\n    # örn. gemini-3-pro-image-16-9, gemini-3-pro-image-4-3\n    # model=\"gemini-3-pro-image-16-9\",\n    messages=[{\n        \"role\": \"user\",\n        \"content\": \"Fütüristik bir şehir çiz\"\n    }]\n)\n\nprint(response.choices[0].message.content)",
             "python_openai": "from openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"{{baseUrl}}\",\n    api_key=\"{{apiKey}}\"\n)\n\nresponse = client.chat.completions.create(\n    model=\"{{modelId}}\",\n    messages=[{\"role\": \"user\", \"content\": \"Merhaba\"}]\n)\n\nprint(response.choices[0].message.content)"
         },
@@ -783,12 +783,12 @@
         },
         "mapping": {
             "title": "Claude Code Model Eşleme",
-            "description": "Claude Code modellerini Antigravity modellerine eşleyin. İstekleri akıllıca yönlendirerek maliyeti ve hızı optimize edin.",
+            "description": "Claude Code modellerini MyProxy Manager modellerine eşleyin. İstekleri akıllıca yönlendirerek maliyeti ve hızı optimize edin.",
             "default": "Varsayılan",
             "sonnet_desc": "Karmaşık işler için en yetenekli",
             "opus_desc": "Premium katman",
             "haiku_desc": "Hızlı cevaplar için en hızlı",
-            "maps_to": "Antigravity'ye Eşlenir",
+            "maps_to": "MyProxy Manager'ye Eşlenir",
             "apply_recommended": "Önerileni Uygula",
             "restore_defaults": "Varsayılan Yapılandırmayı Geri Yükle",
             "reset_all": "Tümünü Sıfırla"
@@ -979,8 +979,8 @@
         "placeholder": "Yönetici parolasını veya API Anahtarını girin",
         "btn_login": "Doğrula ve Gir",
         "note": "Not: Ayarlanmış ayrı bir yönetici parolası varsa, lütfen onu girin; aksi takdirde API_KEY girin.",
-        "lookup_hint": "Unuttuysanız, Mevcut API Anahtarını veya Web Kullanıcı Arayüzü Parolasını bulmak için docker logs antigravity-manager komutunu çalıştırın.",
-        "config_hint": "Veya görüntülemek için grep -E '\"api_key\"|\"admin_password\"' ~/.antigravity_tools/gui_config.json komutunu çalıştırın."
+        "lookup_hint": "Unuttuysanız, Mevcut API Anahtarını veya Web Kullanıcı Arayüzü Parolasını bulmak için docker logs myproxy-manager komutunu çalıştırın.",
+        "config_hint": "Veya görüntülemek için grep -E '\"api_key\"|\"admin_password\"' ~/.myproxy_manager/gui_config.json komutunu çalıştırın."
     },
     "token_stats": {
         "title": "Token İstatistikleri",

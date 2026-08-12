@@ -29,11 +29,22 @@ dist
 src-tauri/target/
 src-tauri/gen/
 src-tauri/.env
+src-tauri/squashfs-root/
 
 # Environment
 .env
 .env.*
 environment/
+
+# Local AI/editor session artifacts
+.specstory/
+.meta-kim/
+.claude/*.backup
+.claude/*.ali
+.claude/*.cliproxy
+.claude/*.glm
+.claude/*.qwen
+.claude/*.lock
 
 # Python virtual environments and test files
 .venv*/

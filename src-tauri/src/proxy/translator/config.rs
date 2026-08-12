@@ -43,7 +43,7 @@ impl TranslatorConfig {
         // 使用应用的 config 目录
         let config_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("antigravity-tools");
+            .join("myproxy-manager");
         config_dir.join("translator_config.json")
     }
 
