@@ -1,7 +1,7 @@
 # Codex 优先的多认证账号平台需求说明
 
 > 状态：Draft / 已确认产品方向，认证接入细节待 Spike 验证
-> 日期：2026-08-12
+> 日期：2026-08-13
 > 范围：账号、凭据、供应商连接、协议能力、路由与旧数据迁移
 > 关联设计：[`docs/architecture/design-myproxy-manager.md`](../architecture/design-myproxy-manager.md)
 
@@ -11,9 +11,10 @@
 
 - 已建立 schema v3 的 Identity、Credential、SecretRef、CredentialSummary、ProviderConnection、WireProtocol 和生命周期类型；v3 持久化包络携带数值版本、拒绝错版本，并以 `auth_kind` 判别凭据载荷；
 - 已将运行时 Credential 与公开 DTO 分离：普通 API 仅序列化 CredentialSummary，SecretRef 只通过显式 v3 持久化边界写入；SecretRef/TokenResponse 的 Debug 输出和 OAuth 上游错误均已脱敏；
+- 已完成 Codex browser PKCE 后端闭环：独立 loopback listener、一次性 callback、code exchange、refresh token 复用、并发刷新去重及系统 keyring Secret Store；运行时 token set 不可直接序列化，领域层只接收 SecretRef；
 - 已移除源码内嵌的 legacy Google OAuth client ID/secret，改为显式环境配置；
 - 已移除 OAuth 成功日志中的 access token 前缀；
-- Codex browser PKCE/AuthSession 安全核心已实现（S256、state、loopback URI 校验、超时、取消、替换与单次消费）；独立 callback listener、token exchange/refresh、Secret Store 持久化和 schema v2 迁移尚未实现。
+- Codex browser PKCE/AuthSession 与后端登录流水线已实现；应用运行时、双管理入口、账号记录创建和 schema v2 迁移尚未实现。
 
 供应商侧旧 OAuth secret 的轮换/撤销属于外部操作，不能仅通过代码提交完成。
 

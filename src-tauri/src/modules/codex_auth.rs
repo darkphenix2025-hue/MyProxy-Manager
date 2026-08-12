@@ -109,6 +109,19 @@ pub struct CodexTokenExchangeMaterial {
 }
 
 impl CodexTokenExchangeMaterial {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        authorization_code: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        code_verifier: impl Into<String>,
+    ) -> Self {
+        Self {
+            authorization_code: authorization_code.into().into(),
+            redirect_uri: redirect_uri.into(),
+            code_verifier: code_verifier.into().into(),
+        }
+    }
+
     pub fn authorization_code(&self) -> &str {
         self.authorization_code.as_str()
     }

@@ -60,7 +60,9 @@ tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 eventsource-stream = "0.2"
 dashmap = "6.1"
 anyhow = "1.0"
+async-trait = "0.1"
 futures = "0.3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 rand = "0.8"                        # 生成 sessionId 和 mock project_id
 async-stream = "0.3.6"              # 简化异步流生成
 regex = "1.12.2"                    # Duration 解析
