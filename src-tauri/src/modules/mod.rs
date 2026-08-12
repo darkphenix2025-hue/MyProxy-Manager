@@ -2,6 +2,7 @@ pub mod account;
 pub mod account_service;
 pub mod cache;
 pub mod cloudflared;
+pub mod codex_auth;
 pub mod config;
 pub mod db;
 pub mod device;

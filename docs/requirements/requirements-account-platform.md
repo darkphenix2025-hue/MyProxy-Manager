@@ -7,13 +7,13 @@
 
 ## 实施状态
 
-截至 2026-08-12，P0 基础切片已开始实施：
+截至 2026-08-13，P0 基础切片已开始实施：
 
 - 已建立 schema v3 的 Identity、Credential、SecretRef、CredentialSummary、ProviderConnection、WireProtocol 和生命周期类型；v3 持久化包络携带数值版本、拒绝错版本，并以 `auth_kind` 判别凭据载荷；
 - 已将运行时 Credential 与公开 DTO 分离：普通 API 仅序列化 CredentialSummary，SecretRef 只通过显式 v3 持久化边界写入；SecretRef/TokenResponse 的 Debug 输出和 OAuth 上游错误均已脱敏；
 - 已移除源码内嵌的 legacy Google OAuth client ID/secret，改为显式环境配置；
 - 已移除 OAuth 成功日志中的 access token 前缀；
-- Codex browser PKCE、Secret Store 持久化和 schema v2 迁移尚未实现。
+- Codex browser PKCE/AuthSession 安全核心已实现（S256、state、loopback URI 校验、超时、取消、替换与单次消费）；独立 callback listener、token exchange/refresh、Secret Store 持久化和 schema v2 迁移尚未实现。
 
 供应商侧旧 OAuth secret 的轮换/撤销属于外部操作，不能仅通过代码提交完成。
 

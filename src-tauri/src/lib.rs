@@ -3,6 +3,7 @@ pub mod constants;
 pub mod error;
 pub mod models;
 mod modules;
+pub use modules::codex_auth;
 mod proxy; // Proxy service module
 mod utils;
 

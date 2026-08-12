@@ -14,6 +14,7 @@ This folder contains developer-focused documentation (architecture, implementati
 
 - [`docs/proxy/auth.md`](proxy/auth.md) — proxy authorization modes, expected client behavior, and implementation pointers.
 - [`docs/proxy/accounts.md`](proxy/accounts.md) — account lifecycle in the proxy pool (including auto-disable on `invalid_grant`) and UI behavior.
+- [`docs/proxy/codex-auth.md`](proxy/codex-auth.md) — Codex-first authentication implementation status, PKCE/AuthSession security contract, and remaining browser/token-storage work.
 
 ## z.ai (GLM) integration
 

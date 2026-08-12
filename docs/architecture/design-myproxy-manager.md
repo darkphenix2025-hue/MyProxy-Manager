@@ -4,7 +4,7 @@
 > 范围：`src/`、`src-tauri/src/`、`scripts/`、`.github/workflows/` 与关键配置文件
 > 结论性质：静态结构审查 + 已有构建/测试结果；不包含真实生产流量性能剖析
 
-> 实施进度：Phase 0A 已启动；带版本校验及判别凭据的 schema v3 持久化边界、运行时/公开凭据 DTO 隔离、legacy OAuth 外部配置和 OAuth 错误/token 脱敏测试已落地，Codex PKCE/Secret Store/迁移器待后续切片。
+> 实施进度：Phase 0A 已启动；带版本校验及判别凭据的 schema v3 持久化边界、运行时/公开凭据 DTO 隔离、legacy OAuth 外部配置和 OAuth 错误/token 脱敏测试已落地。Codex PKCE/AuthSession 安全核心已完成；独立 loopback listener、token exchange/refresh、Secret Store 与迁移器待后续切片。
 
 ## 1. 执行摘要
 
