@@ -6,9 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preflight": "npm run test:version && npm run check:version && npm run build",
+    "preflight": "npm run test:version && npm run test:release-assets && npm run check:version && npm run build",
+    "ci:local": "node scripts/ci-local.mjs",
+    "ci:local:tauri": "node scripts/ci-local.mjs --with-tauri",
     "check:version": "node scripts/check-version.mjs",
     "test:version": "node --test scripts/check-version.test.mjs",
+    "test:release-assets": "node --test scripts/release-assets.test.mjs",
+    "test:local-hooks": "node --test scripts/local-hooks.test.mjs",
+    "setup:hooks": "node scripts/setup-git-hooks.mjs",
+    "prepare": "node scripts/setup-git-hooks.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:debug": "RUST_LOG=debug npm run tauri dev"

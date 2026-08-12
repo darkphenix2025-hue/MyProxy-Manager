@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root"
+
+if [ "${SKIP_LOCAL_CI:-}" = "1" ]; then
+  echo "Local pre-push checks skipped (SKIP_LOCAL_CI=1)."
+  exit 0
+fi
+
+npm run ci:local:tauri
+

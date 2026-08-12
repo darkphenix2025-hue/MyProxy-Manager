@@ -12,7 +12,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -20,9 +20,12 @@ concurrency:
 
 jobs:
   validate:
+    name: Validate release inputs
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,19 +37,39 @@ jobs:
         name: Resolve release tag
         shell: bash
         run: |
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             tag="v${{ inputs.version }}"
           else
             tag="${GITHUB_REF_NAME}"
           fi
+          version="${tag#v}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
           npm run check:version -- --tag "${tag}"
       - name: Require configured updater public key
         run: '! grep -q REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY src-tauri/tauri.conf.json'
+      - name: Require updater signing secrets
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "${TAURI_SIGNING_PRIVATE_KEY}" ]] || {
+            echo '::error::TAURI_SIGNING_PRIVATE_KEY is not configured.'
+            exit 1
+          }
+          [[ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" ]] || {
+            echo '::error::TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not configured.'
+            exit 1
+          }
       - run: npm run test:version
+      - run: npm run test:release-assets
       - run: npm run build
 
   build:
+    name: Build ${{ matrix.platform_key }} bundle
     needs: validate
     strategy:
       fail-fast: false
@@ -54,20 +77,35 @@ jobs:
         include:
           - platform: macos-15-intel
             target: x86_64-apple-darwin
+            platform_key: darwin-x86_64
           - platform: macos-14
             target: aarch64-apple-darwin
+            platform_key: darwin-aarch64
           - platform: windows-2022
             target: x86_64-pc-windows-msvc
+            platform_key: windows-x86_64
           - platform: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            platform_key: linux-x86_64
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux Tauri dependencies
         if: startsWith(matrix.platform, 'ubuntu-')
-        run: >-
-          sudo apt-get update && sudo apt-get install -y
-          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            wget
       - name: Install NASM (Windows)
         if: startsWith(matrix.platform, 'windows-')
         shell: pwsh
@@ -162,28 +200,26 @@ jobs:
           echo "apple_signing_identity=${signing_identity}" >> "${GITHUB_OUTPUT}"
           echo "apple_api_key_path=${api_key_path}" >> "${GITHUB_OUTPUT}"
 
-      - name: Build and upload Tauri bundle (macOS, ad hoc)
+      - name: Build Tauri bundle (macOS, ad hoc)
         if: ${{ startsWith(matrix.platform, 'macos-') && steps.macos_signing.outputs.mode == 'adhoc' }}
         uses: tauri-apps/tauri-action@v1
+        with:
+          args: --target ${{ matrix.target }}
+          uploadUpdaterJson: false
+          uploadWorkflowArtifacts: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: "-"
-        with:
-          tagName: ${{ needs.validate.outputs.tag }}
-          releaseName: MyProxy Manager ${{ needs.validate.outputs.tag }}
-          releaseBody: See the assets below to download and install this version.
-          releaseDraft: true
-          prerelease: false
-          uploadUpdaterJson: true
-          args: --target ${{ matrix.target }}
+          APPLE_SIGNING_IDENTITY: '-'
 
-      - name: Build and upload Tauri bundle (macOS, Developer ID)
+      - name: Build Tauri bundle (macOS, Developer ID)
         if: ${{ startsWith(matrix.platform, 'macos-') && steps.macos_signing.outputs.mode == 'developer-id' }}
         uses: tauri-apps/tauri-action@v1
+        with:
+          args: --target ${{ matrix.target }}
+          uploadUpdaterJson: false
+          uploadWorkflowArtifacts: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -192,27 +228,112 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ steps.macos_signing.outputs.apple_api_key_path }}
-        with:
-          tagName: ${{ needs.validate.outputs.tag }}
-          releaseName: MyProxy Manager ${{ needs.validate.outputs.tag }}
-          releaseBody: See the assets below to download and install this version.
-          releaseDraft: true
-          prerelease: false
-          uploadUpdaterJson: true
-          args: --target ${{ matrix.target }}
 
-      - name: Build and upload Tauri bundle
+      - name: Build Tauri bundle
         if: ${{ !startsWith(matrix.platform, 'macos-') }}
         uses: tauri-apps/tauri-action@v1
+        with:
+          args: --target ${{ matrix.target }}
+          uploadUpdaterJson: false
+          uploadWorkflowArtifacts: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Normalize and verify release assets
+        run: >-
+          node scripts/release-assets.mjs prepare
+          --bundle-root "src-tauri/target/${{ matrix.target }}/release/bundle"
+          --output "${{ runner.temp }}/release-assets"
+          --platform "${{ matrix.platform_key }}"
+          --version "${{ needs.validate.outputs.version }}"
+
+      - name: Upload release assets as an artifact
+        uses: actions/upload-artifact@v4
         with:
-          tagName: ${{ needs.validate.outputs.tag }}
-          releaseName: MyProxy Manager ${{ needs.validate.outputs.tag }}
-          releaseBody: See the assets below to download and install this version.
-          releaseDraft: true
-          prerelease: false
-          uploadUpdaterJson: true
-          args: --target ${{ matrix.target }}
+          name: release-assets-${{ matrix.platform_key }}
+          path: ${{ runner.temp }}/release-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Assemble and publish draft Release
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+      - name: Build and verify latest.json
+        run: >-
+          node scripts/release-assets.mjs merge
+          --input release-assets
+          --output release-payload
+          --repository "${GITHUB_REPOSITORY}"
+          --tag "${{ needs.validate.outputs.tag }}"
+          --version "${{ needs.validate.outputs.version }}"
+      - name: Verify updater manifest schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e \
+            --arg version "${{ needs.validate.outputs.version }}" \
+            '(.version == $version) and (.platforms | keys | length == 4) and all(.platforms[]; (.url | startswith("https://github.com/")) and (.signature | length > 0))' \
+            release-payload/latest.json > /dev/null
+      - name: Create or update the draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.validate.outputs.tag }}"
+          title="MyProxy Manager ${tag}"
+          mapfile -t assets < <(find release-payload -maxdepth 1 -type f -print | sort)
+          if [[ "${#assets[@]}" == "0" ]]; then
+            echo 'No release assets were assembled.' >&2
+            exit 1
+          fi
+
+          existing_draft="$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null || true)"
+          if [[ -z "${existing_draft}" ]]; then
+            if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+              gh release create "${tag}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --target "${GITHUB_SHA}" \
+                --draft \
+                --title "${title}" \
+                --notes 'See the assets below to download and install this version.' \
+                "${assets[@]}"
+            else
+              gh release create "${tag}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --verify-tag \
+                --draft \
+                --title "${title}" \
+                --notes 'See the assets below to download and install this version.' \
+                "${assets[@]}"
+            fi
+          elif [[ "${existing_draft}" == "true" ]]; then
+            gh release edit "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --title "${title}" \
+              --notes 'See the assets below to download and install this version.'
+            gh release upload "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber \
+              "${assets[@]}"
+          else
+            echo "Release ${tag} is already published; refusing to overwrite it." >&2
+            exit 1
+          fi
