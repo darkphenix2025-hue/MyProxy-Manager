@@ -46,6 +46,15 @@ Token refresh failures returned to API clients no longer include account emails:
 - If an account becomes disabled due to `invalid_grant`, it usually means the `refresh_token` was revoked or expired.
 - Re-authorize the account (or update the stored token) to restore it.
 
+### Legacy Google OAuth client configuration
+
+The legacy Antigravity/Google OAuth client secret is no longer embedded in the binary. OAuth login and refresh require one of these external configurations before the OAuth registry is first used:
+
+- `ANTIGRAVITY_OAUTH_CLIENT_ID` and `ANTIGRAVITY_OAUTH_CLIENT_SECRET` together; or
+- `ANTIGRAVITY_OAUTH_CLIENTS` with `key|client_id|client_secret|optional_label` entries separated by `;`.
+
+`ANTIGRAVITY_OAUTH_CLIENT_KEY` optionally selects the active configured entry. If no complete client is configured, legacy Google OAuth is disabled with an explicit error; existing non-OAuth provider connections are unaffected. Never commit these values or include them in diagnostics.
+
 ## Validation
 1) Ensure at least one account file has `disabled: true`.
 2) Start the proxy and verify:

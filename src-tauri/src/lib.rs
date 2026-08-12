@@ -1,7 +1,7 @@
 mod commands;
 pub mod constants;
 pub mod error;
-mod models;
+pub mod models;
 mod modules;
 mod proxy; // Proxy service module
 mod utils;

@@ -1170,7 +1170,7 @@ function Settings() {
                                                 <Lock size={16} className="text-purple-500 dark:text-purple-400" />
                                             </div>
                                             <div>
-                                                <div className="font-bold text-gray-900 dark:text-gray-100 text-sm">Google OAuth 凭据</div>
+                                                <div className="font-bold text-gray-900 dark:text-gray-100 text-sm">旧版 Google OAuth 凭据</div>
                                                 <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5 leading-tight max-w-[280px]">
                                                     用于 Google 账号登录。留空则使用环境变量或第三方客户端。
                                                 </p>
@@ -1197,7 +1197,7 @@ function Settings() {
                                             <input
                                                 type="password"
                                                 className="w-full px-4 py-2.5 bg-gray-50 dark:bg-base-200 border border-gray-100 dark:border-base-300 rounded-xl focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 outline-none text-sm font-medium transition-all shadow-inner font-mono"
-                                                placeholder="GOCSPX-..."
+                                                placeholder="OAuth client secret"
                                                 value={formData.oauth_client_secret || ''}
                                                 onChange={(e) => setFormData({ ...formData, oauth_client_secret: e.target.value })}
                                             />
