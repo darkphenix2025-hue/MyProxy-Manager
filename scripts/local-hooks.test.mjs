@@ -14,12 +14,12 @@ function readHook(name) {
 describe('local Git hooks', () => {
   it('enables hooks after dependency installation', () => {
     assert.equal(packageJson.scripts.prepare, 'node scripts/setup-git-hooks.mjs');
+    assert.match(packageJson.scripts.preflight, /npm run test:local-hooks/);
   });
 
-  it('runs fast checks before commits', () => {
+  it('runs the full local CI checks before commits', () => {
     const hook = readHook('pre-commit');
-    assert.match(hook, /npm run test:version/);
-    assert.match(hook, /npm run test:release-assets/);
+    assert.match(hook, /npm run ci:local/);
     assert.match(hook, /SKIP_LOCAL_CI=1/);
   });
 

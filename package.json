@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preflight": "npm run test:version && npm run test:release-assets && npm run check:version && npm run build",
+    "preflight": "npm run test:version && npm run test:release-assets && npm run test:local-hooks && npm run check:version && npm run build",
     "ci:local": "node scripts/ci-local.mjs",
     "ci:local:tauri": "node scripts/ci-local.mjs --with-tauri",
     "check:version": "node scripts/check-version.mjs",
