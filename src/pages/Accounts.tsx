@@ -28,6 +28,7 @@ import { useConfigStore } from "../stores/useConfigStore";
 import { Account } from "../types/account";
 import { cn } from "../utils/cn";
 import { isTauri } from "../utils/env";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import { request as invoke } from "../utils/request";
 import { useTranslation } from "react-i18next";
 
@@ -331,7 +332,6 @@ function Accounts() {
     if (loading || switchingAccountId) return;
 
     setSwitchingAccountId(accountId);
-    console.log("[Accounts] handleSwitch called for:", accountId);
     try {
       await switchAccount(accountId);
       showToast(t("common.success"), "success");
@@ -377,10 +377,8 @@ function Accounts() {
     setIsBatchDelete(false);
     try {
       const ids = Array.from(selectedIds);
-      console.log("[Accounts] Batch deleting:", ids);
       await deleteAccounts(ids);
       setSelectedIds(new Set());
-      console.log("[Accounts] Batch delete success");
       showToast(t("common.success"), "success");
     } catch (error) {
       console.error("[Accounts] Batch delete failed:", error);
@@ -389,7 +387,6 @@ function Accounts() {
   };
 
   const handleDelete = (accountId: string) => {
-    console.log("[Accounts] Request to delete:", accountId);
     setDeleteConfirmId(accountId);
   };
 
@@ -397,9 +394,7 @@ function Accounts() {
     if (!deleteConfirmId) return;
 
     try {
-      console.log("[Accounts] Executing delete for:", deleteConfirmId);
       await deleteAccount(deleteConfirmId);
-      console.log("[Accounts] Delete success");
       showToast(t("common.success"), "success");
     } catch (error) {
       console.error("[Accounts] Delete failed:", error);
@@ -558,7 +553,6 @@ function Accounts() {
           path = await join(config.default_export_path, fileName);
         } else {
           // Use Native Dialog
-          const { save } = await import("@tauri-apps/plugin-dialog");
           path = await save({
             filters: [
               {
@@ -678,7 +672,6 @@ function Accounts() {
   const handleImportJson = async () => {
     if (isTauri()) {
       try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
         const selected = await open({
           multiple: false,
           filters: [

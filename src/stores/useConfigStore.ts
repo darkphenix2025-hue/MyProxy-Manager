@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { AppConfig } from '../types/config';
 import * as configService from '../services/configService';
+import { invoke } from '@tauri-apps/api/core';
+import { isTauri } from '../utils/env';
 
 const SHOW_ALL_QUOTAS_KEY = 'myproxy_show_all_quotas';
 const LEGACY_SHOW_ALL_QUOTAS_KEY = 'antigravity_show_all_quotas';
@@ -54,9 +56,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         try {
             await configService.saveConfig(config);
             set({ config, loading: false });
-            const { isTauri } = await import('../utils/env');
             if (isTauri()) {
-                const { invoke } = await import('@tauri-apps/api/core');
                 await invoke('set_window_theme', { theme: config.theme }).catch(() => {
                 });
             }

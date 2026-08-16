@@ -554,11 +554,4 @@ pub fn get_account_trend_daily(days: i64) -> Result<Vec<AccountTrendPoint>, Stri
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn test_record_and_query() {
-        // This would need a test database setup
-        // For now, just verify the module compiles
-        assert!(true);
-    }
-}
+mod tests {}

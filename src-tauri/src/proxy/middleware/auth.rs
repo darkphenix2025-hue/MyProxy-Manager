@@ -330,11 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_placeholder() {
-        assert!(true);
-    }
-
-    #[test]
     fn admin_origin_requires_same_origin_or_tauri() {
         let same_origin = Request::builder()
             .header("origin", "http://127.0.0.1:8045")

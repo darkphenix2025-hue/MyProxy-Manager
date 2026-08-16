@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TranslatorConfig {
     /// 是否启用新转换单元（默认 false）
     #[serde(default)]
@@ -16,15 +16,6 @@ pub struct TranslatorConfig {
     /// 例如: `{"openai": true, "claude": false}`
     #[serde(default)]
     pub format_toggle: HashMap<String, bool>,
-}
-
-impl Default for TranslatorConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            format_toggle: HashMap::new(),
-        }
-    }
 }
 
 impl TranslatorConfig {

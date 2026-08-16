@@ -122,7 +122,7 @@ pub fn update_image_thinking_mode(mode: Option<String>) {
 }
 
 /// 全局系统提示词配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GlobalSystemPromptConfig {
     /// 是否启用全局系统提示词
     #[serde(default)]
@@ -132,34 +132,23 @@ pub struct GlobalSystemPromptConfig {
     pub content: String,
 }
 
-impl Default for GlobalSystemPromptConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            content: String::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ProxyAuthMode {
     Off,
     Strict,
     AllExceptHealth,
+    #[default]
     Auto,
-}
-
-impl Default for ProxyAuthMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ZaiDispatchMode {
     /// Never use z.ai.
+    #[default]
     Off,
     /// Use z.ai for all Anthropic protocol requests.
     Exclusive,
@@ -169,13 +158,7 @@ pub enum ZaiDispatchMode {
     Fallback,
 }
 
-impl Default for ZaiDispatchMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ZaiMcpConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -185,17 +168,6 @@ pub struct ZaiMcpConfig {
     pub web_reader_enabled: bool,
     #[serde(default)]
     pub vision_enabled: bool,
-}
-
-impl Default for ZaiMcpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            web_search_enabled: false,
-            web_reader_enabled: false,
-            vision_enabled: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,8 +204,10 @@ impl Default for ZaiConfig {
 /// Generic upstream provider protocol type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ProviderProtocol {
     /// Provider speaks Anthropic Messages API. Requests forwarded as-is.
+    #[default]
     AnthropicPassthrough,
     /// Provider speaks OpenAI Chat Completions API.
     #[serde(alias = "openai_compatible")]
@@ -243,28 +217,18 @@ pub enum ProviderProtocol {
     GeminiV1Internal,
 }
 
-impl Default for ProviderProtocol {
-    fn default() -> Self {
-        Self::AnthropicPassthrough
-    }
-}
-
 /// Dispatch mode for a provider within the routing chain.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ProviderDispatchMode {
     /// Always use this provider for matching models.
     Exclusive,
     /// Round-robin among pooled providers with same model capability.
+    #[default]
     Pooled,
     /// Only when higher-priority providers fail.
     Fallback,
-}
-
-impl Default for ProviderDispatchMode {
-    fn default() -> Self {
-        Self::Pooled
-    }
 }
 
 /// A single upstream provider configured by API Key + Base URL.
@@ -305,7 +269,7 @@ pub struct UpstreamProvider {
 pub fn is_valid_provider_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 10
-        && id.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+        && id.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
@@ -375,8 +339,10 @@ fn default_threshold_l3() -> f32 {
 /// 控制如何处理调用方传入的 thinking_budget 参数
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ThinkingBudgetMode {
     /// 自动限制：对特定模型（Flash/Thinking）应用 24576 上限
+    #[default]
     Auto,
     /// 透传：完全使用调用方传入的值，不做任何修改
     Passthrough,
@@ -384,12 +350,6 @@ pub enum ThinkingBudgetMode {
     Custom,
     /// 自适应：使用 effort 参数控制思考强度 (Claude 4.6+)
     Adaptive,
-}
-
-impl Default for ThinkingBudgetMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Thinking Budget 配置
@@ -428,21 +388,12 @@ fn default_false() -> bool {
     false
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DebugLoggingConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub output_dir: Option<String>,
-}
-
-impl Default for DebugLoggingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            output_dir: None,
-        }
-    }
 }
 
 /// IP 黑名单配置
@@ -492,7 +443,7 @@ impl Default for IpWhitelistConfig {
 }
 
 /// 安全监控配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SecurityMonitorConfig {
     /// IP 黑名单配置
     #[serde(default)]
@@ -501,15 +452,6 @@ pub struct SecurityMonitorConfig {
     /// IP 白名单配置
     #[serde(default)]
     pub whitelist: IpWhitelistConfig,
-}
-
-impl Default for SecurityMonitorConfig {
-    fn default() -> Self {
-        Self {
-            blacklist: IpBlacklistConfig::default(),
-            whitelist: IpWhitelistConfig::default(),
-        }
-    }
 }
 
 /// 反代服务配置
@@ -771,9 +713,7 @@ pub fn build_provider_api_url(base_url: &str, endpoint: &str) -> String {
         return base.to_string();
     }
 
-    if base.ends_with("/v1") {
-        format!("{base}/{endpoint}")
-    } else if base.contains("/v1/") {
+    if base.ends_with("/v1") || base.contains("/v1/") {
         format!("{base}/{endpoint}")
     } else {
         format!("{base}/v1/{endpoint}")

@@ -279,7 +279,7 @@ pub fn wrap_request(
         // Google v1internal requires maxOutputTokens > thinkingBudget.
         // [FIX #1825] Handle adaptive fallback (incl. -1 and thinkingLevel)
         let thinking_config_opt = gen_config.get("thinkingConfig");
-        let is_adaptive = thinking_config_opt.map_or(false, |t| {
+        let is_adaptive = thinking_config_opt.is_some_and(|t| {
             t.get("thinkingLevel").is_some()
                 || t.get("thinkingBudget").and_then(|v| v.as_i64()) == Some(-1)
         }) || (thinking_config_opt
@@ -300,14 +300,14 @@ pub fn wrap_request(
                 .or(req_max_tokens);
 
             if is_adaptive {
-                if current_max.map_or(true, |m| m < 131072) {
+                if current_max.is_none_or(|m| m < 131072) {
                     gen_config.insert("maxOutputTokens".to_string(), json!(131072));
                 }
             } else if let Some(budget_i64) = budget_opt {
                 if budget_i64 > 0 {
                     let budget = budget_i64 as u64;
                     let min_required_max = budget + 8192;
-                    if current_max.map_or(true, |m| m <= budget) {
+                    if current_max.is_none_or(|m| m <= budget) {
                         tracing::info!(
                             "[Gemini-Wrap] Bumping maxOutputTokens from {:?} to {} to satisfy thinkingBudget ({})",
                             current_max, min_required_max, budget
@@ -350,7 +350,7 @@ pub fn wrap_request(
     let tools_val: Option<Vec<Value>> = inner_request
         .get("tools")
         .and_then(|t| t.as_array())
-        .map(|arr| arr.clone());
+        .cloned();
 
     // [FIX] Extract OpenAI-compatible image parameters from root (for gemini-3-pro-image)
     let size = body.get("size").and_then(|v| v.as_str());
@@ -493,7 +493,7 @@ pub fn wrap_request(
                 if let Some(parts_array) = parts.as_array_mut() {
                     // 检查第一个 part 是否已包含 Antigravity 身份
                     let has_antigravity = parts_array
-                        .get(0)
+                        .first()
                         .and_then(|p| p.get("text"))
                         .and_then(|t| t.as_str())
                         .map(|s| s.contains("You are Antigravity"))
@@ -510,7 +510,7 @@ pub fn wrap_request(
                         && !global_prompt_config.content.trim().is_empty()
                     {
                         // 插入位置：Antigravity 身份之后 (index 1)
-                        let insert_pos = if has_antigravity { 1 } else { 1 };
+                        let insert_pos = 1;
                         if insert_pos <= parts_array.len() {
                             parts_array
                                 .insert(insert_pos, json!({"text": global_prompt_config.content}));

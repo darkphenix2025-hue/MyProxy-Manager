@@ -72,7 +72,7 @@ fn record_user_token_usage(
             log.model.as_deref().unwrap_or("unknown"),
             log.input_tokens.unwrap_or(0) as i32,
             log.output_tokens.unwrap_or(0) as i32,
-            log.status as u16,
+            log.status,
             user_agent,
         );
     }
@@ -414,11 +414,9 @@ pub async fn monitor_middleware(
                     // Extract just the path portion from full URL
                     if let Some(pos) = url.find("://") {
                         let after_scheme = &url[pos + 3..];
-                        if let Some(slash_pos) = after_scheme.find('/') {
-                            Some(after_scheme[slash_pos..].to_string())
-                        } else {
-                            None
-                        }
+                        after_scheme
+                            .find('/')
+                            .map(|slash_pos| after_scheme[slash_pos..].to_string())
                     } else {
                         Some(url.to_string())
                     }
@@ -871,7 +869,7 @@ pub async fn monitor_middleware(
         match axum::body::to_bytes(body, MAX_RESPONSE_LOG_SIZE).await {
             Ok(bytes) => {
                 if let Ok(s) = std::str::from_utf8(&bytes) {
-                    if let Ok(json) = serde_json::from_str::<Value>(&s) {
+                    if let Ok(json) = serde_json::from_str::<Value>(s) {
                         // 支持 OpenAI "usage" 或 Gemini "usageMetadata"
                         if let Some(usage) = json.get("usage").or(json.get("usageMetadata")) {
                             log.input_tokens = usage

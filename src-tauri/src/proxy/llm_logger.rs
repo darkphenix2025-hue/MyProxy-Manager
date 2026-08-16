@@ -74,7 +74,7 @@ pub fn log_entry(entry: &LlmLogEntry) {
         return;
     }
 
-    let detail_filename = format!("{}_{}.json", &entry.trace_id, entry.stage);
+    let detail_filename = format!("{}_{}.json", entry.trace_id, entry.stage);
     let detail_path = PathBuf::from(DETAILS_DIR).join(&detail_filename);
 
     // Write detail JSON file (full body)
@@ -114,8 +114,8 @@ pub fn log_entry(entry: &LlmLogEntry) {
         entry.trace_id,
         entry.stage,
         direction,
-        &entry.method,
-        &entry.url,
+        entry.method,
+        entry.url,
         status_str,
         model_str,
         detail_filename,

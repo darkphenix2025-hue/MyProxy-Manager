@@ -113,7 +113,7 @@ fn try_fetch_remote_version() -> Option<String> {
 /// This guarantees that even when:
 ///   - The local Antigravity install is outdated, OR
 ///   - Local detection fails (Docker / headless / non-standard path),
-/// ...we always report a version >= the current minimum required by Google's API.
+///     ...we always report a version >= the current minimum required by Google's API.
 fn resolve_version_config() -> (VersionConfig, VersionSource) {
     // Floor: static known-stable value (updated with each release of this project)
     let mut best_version = KNOWN_STABLE_VERSION.to_string();

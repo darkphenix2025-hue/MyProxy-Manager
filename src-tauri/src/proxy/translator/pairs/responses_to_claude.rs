@@ -151,7 +151,7 @@ pub fn claude_to_responses_non_stream(
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("resp-0");
-    let item_id = format!("msg_{}", &response_id.chars().take(16).collect::<String>());
+    let item_id = format!("msg_{}", response_id.chars().take(16).collect::<String>());
 
     let mut response = json!({
         "id": response_id,
@@ -254,7 +254,7 @@ fn process_claude_event_for_responses(
     if state.response_id.is_none() {
         if let Some(id) = parsed.get("id").and_then(|v| v.as_str()) {
             state.response_id = Some(id.to_string());
-            state.item_id = Some(format!("msg_{}", &id.chars().take(16).collect::<String>()));
+            state.item_id = Some(format!("msg_{}", id.chars().take(16).collect::<String>()));
         } else {
             state.response_id = Some("resp-0".to_string());
             state.item_id = Some("msg-0".to_string());

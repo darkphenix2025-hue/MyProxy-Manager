@@ -1,28 +1,28 @@
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
+import { lazy, Suspense, useEffect } from 'react';
 
-import Layout from './components/layout/Layout';
-import Dashboard from './pages/Dashboard';
-import Accounts from './pages/Accounts';
-import Settings from './pages/Settings';
-import ApiProxy from './pages/ApiProxy';
-import Monitor from './pages/Monitor';
-import TokenStats from './pages/TokenStats';
-import Security from './pages/Security';
-import ThemeManager from './components/common/ThemeManager';
-import UserToken from './pages/UserToken';
-import ProviderManager from './pages/ProviderManager';
-import ServiceConfig from './pages/ServiceConfig';
-import RouteManager from './pages/RouteManager';
-import DebugConsole from './components/debug/DebugConsole';
-import { useEffect } from 'react';
+const Layout = lazy(() => import('./components/layout/Layout'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Accounts = lazy(() => import('./pages/Accounts'));
+const Settings = lazy(() => import('./pages/Settings'));
+const ApiProxy = lazy(() => import('./pages/ApiProxy'));
+const Monitor = lazy(() => import('./pages/Monitor'));
+const TokenStats = lazy(() => import('./pages/TokenStats'));
+const Security = lazy(() => import('./pages/Security'));
+const ThemeManager = lazy(() => import('./components/common/ThemeManager'));
+const UserToken = lazy(() => import('./pages/UserToken'));
+const ProviderManager = lazy(() => import('./pages/ProviderManager'));
+const ServiceConfig = lazy(() => import('./pages/ServiceConfig'));
+const RouteManager = lazy(() => import('./pages/RouteManager'));
+const DebugConsole = lazy(() => import('./components/debug/DebugConsole'));
 import { useConfigStore } from './stores/useConfigStore';
 import { useAccountStore } from './stores/useAccountStore';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
 import { isTauri } from './utils/env';
-import { AdminAuthGuard } from './components/common/AdminAuthGuard';
+const AdminAuthGuard = lazy(() => import('./components/common/AdminAuthGuard').then(module => ({ default: module.AdminAuthGuard })));
+const UpdateManager = lazy(() => import('./components/update/UpdateManager'));
 import { Agentation } from 'agentation';
-import UpdateManager from './components/update/UpdateManager';
 
 const router = createBrowserRouter([
   {
@@ -107,7 +107,6 @@ function App() {
     // 监听托盘切换账号事件
     unlistenPromises.push(
       listen('tray://account-switched', () => {
-        console.log('[App] Tray account switched, refreshing...');
         fetchCurrentAccount();
         fetchAccounts();
       })
@@ -116,7 +115,6 @@ function App() {
     // 监听托盘刷新事件
     unlistenPromises.push(
       listen('tray://refresh-current', () => {
-        console.log('[App] Tray refresh triggered, refreshing...');
         fetchCurrentAccount();
         fetchAccounts();
       })
@@ -125,7 +123,6 @@ function App() {
     // 监听后端全量刷新事件 (Command / Scheduler)
     unlistenPromises.push(
       listen('accounts://refreshed', () => {
-        console.log('[App] Backend triggered quota refresh, syncing UI...');
         fetchCurrentAccount();
         fetchAccounts();
       })
@@ -140,13 +137,15 @@ function App() {
   }, [fetchCurrentAccount, fetchAccounts]);
 
   return (
-    <AdminAuthGuard>
-      <ThemeManager />
-      <DebugConsole />
-      <UpdateManager />
-      <RouterProvider router={router} />
-      {import.meta.env.DEV && <Agentation />}
-    </AdminAuthGuard>
+    <Suspense fallback={<div aria-busy="true" />}>
+      <AdminAuthGuard>
+        <ThemeManager />
+        <DebugConsole />
+        <UpdateManager />
+        <RouterProvider router={router} />
+        {import.meta.env.DEV && <Agentation />}
+      </AdminAuthGuard>
+    </Suspense>
   );
 }
 

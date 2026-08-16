@@ -15,10 +15,7 @@ pub fn transform_openai_request(
         crate::proxy::session_manager::SessionManager::extract_openai_session_id(request);
     let message_count = request.messages.len();
     // 将 OpenAI 工具转为 Value 数组以便探测
-    let tools_val = request
-        .tools
-        .as_ref()
-        .map(|list| list.iter().map(|v| v.clone()).collect::<Vec<_>>());
+    let tools_val = request.tools.as_ref().map(|list| list.to_vec());
 
     let mapped_model_lower = mapped_model.to_lowercase();
 
@@ -152,11 +149,11 @@ pub fn transform_openai_request(
 
     // 从缓存获取当前会话的思维签名
     let thought_sig = session_thought_sig;
-    if thought_sig.is_some() {
+    if let Some(sig) = &thought_sig {
         tracing::debug!(
             "[OpenAI-Request] Using session signature (sid: {}, len: {})",
             session_id,
-            thought_sig.as_ref().unwrap().len()
+            sig.len()
         );
     }
 
@@ -311,7 +308,7 @@ pub fn transform_openai_request(
 
             // Handle tool calls (assistant message)
             if let Some(tool_calls) = &msg.tool_calls {
-                for (_index, tc) in tool_calls.iter().enumerate() {
+                for tc in tool_calls.iter() {
                     /* 暂时移除：防止 Codex CLI 界面碎片化
                     if index == 0 && parts.is_empty() {
                          if mapped_model.contains("gemini-3") {
@@ -762,16 +759,12 @@ pub fn transform_openai_request(
 
 fn enforce_uppercase_types(value: &mut Value) {
     if let Value::Object(map) = value {
-        if let Some(type_val) = map.get_mut("type") {
-            if let Value::String(ref mut s) = type_val {
-                *s = s.to_uppercase();
-            }
+        if let Some(Value::String(s)) = map.get_mut("type") {
+            *s = s.to_uppercase();
         }
-        if let Some(properties) = map.get_mut("properties") {
-            if let Value::Object(ref mut props) = properties {
-                for v in props.values_mut() {
-                    enforce_uppercase_types(v);
-                }
+        if let Some(Value::Object(props)) = map.get_mut("properties") {
+            for v in props.values_mut() {
+                enforce_uppercase_types(v);
             }
         }
         if let Some(items) = map.get_mut("items") {
@@ -782,6 +775,101 @@ fn enforce_uppercase_types(value: &mut Value) {
             enforce_uppercase_types(item);
         }
     }
+}
+
+/// Convert OpenAI request to Claude-format JSON body for AnthropicPassthrough providers.
+pub fn to_claude_body(request: &OpenAIRequest) -> Value {
+    use super::models::OpenAIContent;
+
+    let messages: Vec<Value> = request
+        .messages
+        .iter()
+        .map(|m| {
+            let role = match m.role.to_lowercase().as_str() {
+                "system" => "user",
+                "assistant" => "assistant",
+                "tool" | "function" => "user",
+                _ => "user",
+            };
+            let content: Value = match &m.content {
+                Some(OpenAIContent::String(s)) => Value::String(s.clone()),
+                Some(OpenAIContent::Array(blocks)) => {
+                    let parts: Vec<Value> = blocks.iter().map(|b| match b {
+                        super::models::OpenAIContentBlock::Text { text } => {
+                            json!({ "type": "text", "text": text })
+                        }
+                        super::models::OpenAIContentBlock::ImageUrl { image_url } => {
+                            json!({ "type": "image", "source": { "type": "url", "url": &image_url.url } })
+                        }
+                        super::models::OpenAIContentBlock::AudioUrl { audio_url } => {
+                            json!({ "type": "text", "text": format!("[audio: {}]", audio_url.url) })
+                        }
+                    }).collect();
+                    if parts.len() == 1 {
+                        parts[0]["text"].clone()
+                    } else {
+                        Value::Array(parts)
+                    }
+                }
+                None => Value::String(String::new()),
+            };
+            json!({ "role": role, "content": content })
+        })
+        .collect();
+
+    // Extract system messages
+    let system: Vec<String> = request
+        .messages
+        .iter()
+        .filter(|m| m.role.to_lowercase() == "system")
+        .filter_map(|m| match &m.content {
+            Some(OpenAIContent::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    let system_str = if system.is_empty() {
+        None
+    } else {
+        Some(system.join("\n"))
+    };
+
+    let mut body = json!({
+        "model": &request.model,
+        "messages": messages,
+        "stream": request.stream,
+    });
+
+    if let Some(ref s) = system_str {
+        body["system"] = Value::String(s.clone());
+    }
+    if let Some(mt) = request.max_tokens {
+        body["max_tokens"] = Value::Number(mt.into());
+    } else {
+        // [FIX] z.ai Anthropic passthrough requires max_tokens to be present
+        body["max_tokens"] = Value::Number(4096.into());
+    }
+    if let Some(t) = request.temperature {
+        body["temperature"] = serde_json::Number::from_f64(t)
+            .unwrap_or(serde_json::Number::from_f64(1.0).unwrap())
+            .into();
+    }
+    if let Some(t) = request.top_p {
+        body["top_p"] = serde_json::Number::from_f64(t)
+            .unwrap_or(serde_json::Number::from_f64(1.0).unwrap())
+            .into();
+    }
+    if let Some(ref thinking) = request.thinking {
+        body["thinking"] = json!({
+            "type": thinking.thinking_type.clone().unwrap_or_else(|| "enabled".to_string()),
+            "budget_tokens": thinking.budget_tokens,
+            "effort": thinking.effort,
+        });
+    }
+    if let Some(ref tools) = request.tools {
+        body["tools"] = serde_json::to_value(tools).unwrap_or(Value::Null);
+    }
+
+    body
 }
 
 #[cfg(test)]
@@ -1175,7 +1263,7 @@ mod tests {
             let tool_part = parts
                 .iter()
                 .find(|p| p.get("functionCall").is_some())
-                .expect(&format!("[{model}] Should find functionCall part"));
+                .unwrap_or_else(|| panic!("[{model}] Should find functionCall part"));
 
             assert_eq!(
                 tool_part["thoughtSignature"].as_str(),
@@ -1269,99 +1357,4 @@ mod tests {
             "Should contain googleSearch (Gemini 2.0+ supports mixed tools)"
         );
     }
-}
-
-/// Convert OpenAI request to Claude-format JSON body for AnthropicPassthrough providers.
-pub fn to_claude_body(request: &OpenAIRequest) -> Value {
-    use super::models::OpenAIContent;
-
-    let messages: Vec<Value> = request
-        .messages
-        .iter()
-        .map(|m| {
-            let role = match m.role.to_lowercase().as_str() {
-                "system" => "user",
-                "assistant" => "assistant",
-                "tool" | "function" => "user",
-                _ => "user",
-            };
-            let content: Value = match &m.content {
-                Some(OpenAIContent::String(s)) => Value::String(s.clone()),
-                Some(OpenAIContent::Array(blocks)) => {
-                    let parts: Vec<Value> = blocks.iter().map(|b| match b {
-                        super::models::OpenAIContentBlock::Text { text } => {
-                            json!({ "type": "text", "text": text })
-                        }
-                        super::models::OpenAIContentBlock::ImageUrl { image_url } => {
-                            json!({ "type": "image", "source": { "type": "url", "url": &image_url.url } })
-                        }
-                        super::models::OpenAIContentBlock::AudioUrl { audio_url } => {
-                            json!({ "type": "text", "text": format!("[audio: {}]", audio_url.url) })
-                        }
-                    }).collect();
-                    if parts.len() == 1 {
-                        parts[0]["text"].clone()
-                    } else {
-                        Value::Array(parts)
-                    }
-                }
-                None => Value::String(String::new()),
-            };
-            json!({ "role": role, "content": content })
-        })
-        .collect();
-
-    // Extract system messages
-    let system: Vec<String> = request
-        .messages
-        .iter()
-        .filter(|m| m.role.to_lowercase() == "system")
-        .filter_map(|m| match &m.content {
-            Some(OpenAIContent::String(s)) => Some(s.clone()),
-            _ => None,
-        })
-        .collect();
-    let system_str = if system.is_empty() {
-        None
-    } else {
-        Some(system.join("\n"))
-    };
-
-    let mut body = json!({
-        "model": &request.model,
-        "messages": messages,
-        "stream": request.stream,
-    });
-
-    if let Some(ref s) = system_str {
-        body["system"] = Value::String(s.clone());
-    }
-    if let Some(mt) = request.max_tokens {
-        body["max_tokens"] = Value::Number(mt.into());
-    } else {
-        // [FIX] z.ai Anthropic passthrough requires max_tokens to be present
-        body["max_tokens"] = Value::Number(4096.into());
-    }
-    if let Some(t) = request.temperature {
-        body["temperature"] = serde_json::Number::from_f64(t)
-            .unwrap_or(serde_json::Number::from_f64(1.0).unwrap())
-            .into();
-    }
-    if let Some(t) = request.top_p {
-        body["top_p"] = serde_json::Number::from_f64(t)
-            .unwrap_or(serde_json::Number::from_f64(1.0).unwrap())
-            .into();
-    }
-    if let Some(ref thinking) = request.thinking {
-        body["thinking"] = json!({
-            "type": thinking.thinking_type.clone().unwrap_or_else(|| "enabled".to_string()),
-            "budget_tokens": thinking.budget_tokens,
-            "effort": thinking.effort,
-        });
-    }
-    if let Some(ref tools) = request.tools {
-        body["tools"] = serde_json::to_value(tools).unwrap_or(Value::Null);
-    }
-
-    body
 }
