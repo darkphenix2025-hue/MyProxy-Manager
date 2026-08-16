@@ -121,6 +121,10 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'list_oauth_clients': { url: '/api/accounts/oauth/clients', method: 'GET' },
   'get_active_oauth_client': { url: '/api/accounts/oauth/client', method: 'GET' },
   'set_active_oauth_client': { url: '/api/accounts/oauth/client', method: 'POST' },
+  'start_codex_login': { url: '/api/accounts/codex/login/start', method: 'POST' },
+  'get_codex_login_status': { url: '/api/accounts/codex/login/:sessionId', method: 'GET' },
+  'cancel_codex_login': { url: '/api/accounts/codex/login/:sessionId', method: 'DELETE' },
+  'list_account_connections': { url: '/api/connections', method: 'GET' },
 
   // Import
   'import_v1_accounts': { url: '/api/accounts/import/v1', method: 'POST' },

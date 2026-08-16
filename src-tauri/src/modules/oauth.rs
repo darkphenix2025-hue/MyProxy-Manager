@@ -1,15 +1,14 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 // Google OAuth configuration
-const CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const CLIENT_SECRET: &str = "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";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 const TOKEN_REFRESH_SKEW_SECONDS: i64 = 900;
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     pub expires_in: i64,
@@ -19,6 +18,22 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     #[serde(skip)]
     pub oauth_client_key: Option<String>,
+}
+
+impl fmt::Debug for TokenResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .field("token_type", &self.token_type)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("oauth_client_key", &self.oauth_client_key)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,13 +65,26 @@ impl UserInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct OAuthClientConfig {
     key: String,
     label: String,
     client_id: String,
     client_secret: String,
     is_builtin: bool,
+}
+
+impl fmt::Debug for OAuthClientConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthClientConfig")
+            .field("key", &self.key)
+            .field("label", &self.label)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("is_builtin", &self.is_builtin)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +104,8 @@ pub struct OAuthClientDescriptor {
 
 const OAUTH_CLIENTS_ENV: &str = "ANTIGRAVITY_OAUTH_CLIENTS";
 const ACTIVE_OAUTH_CLIENT_ENV: &str = "ANTIGRAVITY_OAUTH_CLIENT_KEY";
+const DEFAULT_OAUTH_CLIENT_ID_ENV: &str = "ANTIGRAVITY_OAUTH_CLIENT_ID";
+const DEFAULT_OAUTH_CLIENT_SECRET_ENV: &str = "ANTIGRAVITY_OAUTH_CLIENT_SECRET";
 const DEFAULT_OAUTH_CLIENT_KEY: &str = "antigravity_enterprise";
 
 static OAUTH_CLIENT_REGISTRY: std::sync::OnceLock<std::sync::RwLock<OAuthClientRegistry>> =
@@ -85,16 +115,29 @@ fn normalize_client_key(key: &str) -> String {
     key.trim().to_ascii_lowercase()
 }
 
-fn build_registry() -> OAuthClientRegistry {
-    let mut clients: Vec<OAuthClientConfig> = vec![OAuthClientConfig {
-        key: normalize_client_key(DEFAULT_OAUTH_CLIENT_KEY),
-        label: "Antigravity Enterprise".to_string(),
-        client_id: CLIENT_ID.to_string(),
-        client_secret: CLIENT_SECRET.to_string(),
-        is_builtin: true,
-    }];
+fn build_registry_from_values(
+    default_client_id: Option<&str>,
+    default_client_secret: Option<&str>,
+    raw_extra_clients: Option<&str>,
+    requested_active_key: Option<&str>,
+) -> OAuthClientRegistry {
+    let mut clients = Vec::new();
 
-    if let Ok(raw_extra_clients) = std::env::var(OAUTH_CLIENTS_ENV) {
+    if let (Some(client_id), Some(client_secret)) = (default_client_id, default_client_secret) {
+        let client_id = client_id.trim();
+        let client_secret = client_secret.trim();
+        if !client_id.is_empty() && !client_secret.is_empty() {
+            clients.push(OAuthClientConfig {
+                key: normalize_client_key(DEFAULT_OAUTH_CLIENT_KEY),
+                label: "Antigravity Enterprise".to_string(),
+                client_id: client_id.to_string(),
+                client_secret: client_secret.to_string(),
+                is_builtin: false,
+            });
+        }
+    }
+
+    if let Some(raw_extra_clients) = raw_extra_clients {
         for entry in raw_extra_clients.split(';') {
             let trimmed = entry.trim();
             if trimmed.is_empty() {
@@ -104,19 +147,11 @@ fn build_registry() -> OAuthClientRegistry {
             // Expected format: key|client_id|client_secret|optional_label
             let parts: Vec<&str> = trimmed.split('|').map(|v| v.trim()).collect();
             if parts.len() < 3 {
-                crate::modules::logger::log_warn(&format!(
-                    "Ignored invalid OAuth client entry in {}: {}",
-                    OAUTH_CLIENTS_ENV, trimmed
-                ));
                 continue;
             }
 
             let key = normalize_client_key(parts[0]);
             if key.is_empty() || parts[1].is_empty() || parts[2].is_empty() {
-                crate::modules::logger::log_warn(&format!(
-                    "Ignored incomplete OAuth client entry in {}: {}",
-                    OAUTH_CLIENTS_ENV, trimmed
-                ));
                 continue;
             }
 
@@ -136,37 +171,48 @@ fn build_registry() -> OAuthClientRegistry {
 
             if let Some(existing_index) = clients.iter().position(|c| c.key == key) {
                 clients[existing_index] = custom_client;
-                crate::modules::logger::log_info(&format!(
-                    "OAuth client '{}' overridden by {}",
-                    key, OAUTH_CLIENTS_ENV
-                ));
             } else {
                 clients.push(custom_client);
-                crate::modules::logger::log_info(&format!(
-                    "OAuth client '{}' loaded from {}",
-                    key, OAUTH_CLIENTS_ENV
-                ));
             }
         }
     }
 
-    let mut active_key = std::env::var(ACTIVE_OAUTH_CLIENT_ENV)
-        .ok()
-        .map(|v| normalize_client_key(&v))
+    let mut active_key = requested_active_key
+        .map(normalize_client_key)
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| normalize_client_key(DEFAULT_OAUTH_CLIENT_KEY));
+        .unwrap_or_default();
 
     if !clients.iter().any(|c| c.key == active_key) {
-        active_key = clients
-            .first()
-            .map(|c| c.key.clone())
-            .unwrap_or_else(|| normalize_client_key(DEFAULT_OAUTH_CLIENT_KEY));
+        active_key = clients.first().map(|c| c.key.clone()).unwrap_or_default();
     }
 
     OAuthClientRegistry {
         clients,
         active_key,
     }
+}
+
+fn build_registry() -> OAuthClientRegistry {
+    let default_client_id = std::env::var(DEFAULT_OAUTH_CLIENT_ID_ENV).ok();
+    let default_client_secret = std::env::var(DEFAULT_OAUTH_CLIENT_SECRET_ENV).ok();
+    let raw_extra_clients = std::env::var(OAUTH_CLIENTS_ENV).ok();
+    let active_key = std::env::var(ACTIVE_OAUTH_CLIENT_ENV).ok();
+
+    let registry = build_registry_from_values(
+        default_client_id.as_deref(),
+        default_client_secret.as_deref(),
+        raw_extra_clients.as_deref(),
+        active_key.as_deref(),
+    );
+
+    if registry.clients.is_empty() {
+        crate::modules::logger::log_warn(&format!(
+            "Legacy Google OAuth is disabled: configure both {} and {}, or provide {}",
+            DEFAULT_OAUTH_CLIENT_ID_ENV, DEFAULT_OAUTH_CLIENT_SECRET_ENV, OAUTH_CLIENTS_ENV
+        ));
+    }
+
+    registry
 }
 
 fn oauth_registry() -> &'static std::sync::RwLock<OAuthClientRegistry> {
@@ -253,6 +299,27 @@ fn is_client_mismatch_error(status: reqwest::StatusCode, error_text: &str) -> bo
         || text.contains("invalid_client")
 }
 
+fn sanitize_oauth_provider_error(status: reqwest::StatusCode, response_body: &str) -> String {
+    let error_code = serde_json::from_str::<serde_json::Value>(response_body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.as_str())
+                .map(str::to_owned)
+        })
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+                })
+        })
+        .unwrap_or_else(|| "provider_error".to_string());
+
+    format!("OAuth provider rejected request (HTTP {status}, {error_code})")
+}
+
 fn normalize_refreshed_oauth_client_key(
     current_token: &crate::models::TokenData,
     refreshed_client_key: Option<String>,
@@ -297,6 +364,9 @@ pub fn list_oauth_clients() -> Result<Vec<OAuthClientDescriptor>, String> {
 
 pub fn get_active_oauth_client_key() -> Result<String, String> {
     let registry_guard = oauth_registry().read().map_err(|e| e.to_string())?;
+    if registry_guard.active_key.is_empty() {
+        return Err("No OAuth clients configured".to_string());
+    }
     Ok(registry_guard.active_key.clone())
 }
 
@@ -330,8 +400,15 @@ pub fn get_auth_url_with_client(
     client_key: Option<&str>,
 ) -> Result<(String, String), String> {
     let client = select_auth_client(client_key)?;
+    build_auth_url(&client, redirect_uri, state)
+}
 
-    let scopes = vec![
+fn build_auth_url(
+    client: &OAuthClientConfig,
+    redirect_uri: &str,
+    state: &str,
+) -> Result<(String, String), String> {
+    let scopes = [
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/userinfo.email",
         "https://www.googleapis.com/auth/userinfo.profile",
@@ -353,14 +430,12 @@ pub fn get_auth_url_with_client(
 
     let url = url::Url::parse_with_params(AUTH_URL, &params)
         .map_err(|e| format!("Invalid Auth URL: {}", e))?;
-    Ok((url.to_string(), client.key))
+    Ok((url.to_string(), client.key.clone()))
 }
 
 /// Generate OAuth authorization URL using current active client.
-pub fn get_auth_url(redirect_uri: &str, state: &str) -> String {
-    get_auth_url_with_client(redirect_uri, state, None)
-        .map(|(url, _)| url)
-        .expect("Failed to build OAuth URL")
+pub fn get_auth_url(redirect_uri: &str, state: &str) -> Result<String, String> {
+    get_auth_url_with_client(redirect_uri, state, None).map(|(url, _)| url)
 }
 
 async fn exchange_code_once(
@@ -415,11 +490,9 @@ async fn exchange_code_once(
             .map_err(|e| (None, format!("Token parsing failed: {}", e)))?;
         token_res.oauth_client_key = Some(client_cfg.key.clone());
 
-        // Add detailed logs
         crate::modules::logger::log_info(&format!(
-            "Token exchange successful via [{}]! access_token: {}..., refresh_token: {}",
+            "Token exchange successful via [{}]; refresh_token: {}",
             client_cfg.key,
-            &token_res.access_token.chars().take(20).collect::<String>(),
             if token_res.refresh_token.is_some() {
                 "✓"
             } else {
@@ -443,7 +516,7 @@ async fn exchange_code_once(
         let error_text = response.text().await.unwrap_or_default();
         Err((
             Some(status),
-            format!("Token exchange failed: {}", error_text),
+            sanitize_oauth_provider_error(status, &error_text),
         ))
     }
 }
@@ -576,7 +649,10 @@ async fn refresh_access_token_once(
     } else {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        Err((Some(status), format!("Refresh failed: {}", error_text)))
+        Err((
+            Some(status),
+            sanitize_oauth_provider_error(status, &error_text),
+        ))
     }
 }
 
@@ -666,8 +742,9 @@ pub async fn get_user_info(
             .await
             .map_err(|e| format!("User info parsing failed: {}", e))
     } else {
+        let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        Err(format!("Failed to get user info: {}", error_text))
+        Err(sanitize_oauth_provider_error(status, &error_text))
     }
 }
 
@@ -717,10 +794,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registry_has_no_implicit_client_without_external_secret() {
+        let registry = build_registry_from_values(None, None, None, None);
+
+        assert!(registry.clients.is_empty());
+        assert!(registry.active_key.is_empty());
+    }
+
+    #[test]
+    fn default_client_requires_id_and_secret_pair() {
+        let id_only = build_registry_from_values(Some("client-id"), None, None, None);
+        let secret_only = build_registry_from_values(None, Some("client-secret"), None, None);
+
+        assert!(id_only.clients.is_empty());
+        assert!(secret_only.clients.is_empty());
+    }
+
+    #[test]
+    fn externally_configured_default_client_is_loaded() {
+        let registry = build_registry_from_values(
+            Some("client-id"),
+            Some("client-secret"),
+            None,
+            Some(DEFAULT_OAUTH_CLIENT_KEY),
+        );
+
+        assert_eq!(registry.clients.len(), 1);
+        assert_eq!(registry.active_key, DEFAULT_OAUTH_CLIENT_KEY);
+        assert_eq!(registry.clients[0].client_id, "client-id");
+        assert_eq!(registry.clients[0].client_secret, "client-secret");
+        assert!(!registry.clients[0].is_builtin);
+    }
+
+    #[test]
+    fn oauth_client_debug_output_redacts_secret() {
+        let registry =
+            build_registry_from_values(Some("client-id"), Some("super-secret-value"), None, None);
+
+        let rendered = format!("{:?}", registry.clients[0]);
+        assert!(rendered.contains("client-id"));
+        assert!(!rendered.contains("super-secret-value"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn token_response_debug_output_redacts_tokens() {
+        let token = TokenResponse {
+            access_token: "access-canary".to_string(),
+            expires_in: 3600,
+            token_type: "Bearer".to_string(),
+            refresh_token: Some("refresh-canary".to_string()),
+            oauth_client_key: Some("client-key".to_string()),
+        };
+
+        let rendered = format!("{token:?}");
+        assert!(!rendered.contains("access-canary"));
+        assert!(!rendered.contains("refresh-canary"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn oauth_provider_error_does_not_echo_response_body() {
+        let rendered = sanitize_oauth_provider_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid_client","error_description":"canary-secret"}"#,
+        );
+
+        assert!(rendered.contains("invalid_client"));
+        assert!(!rendered.contains("canary-secret"));
+    }
+
+    #[test]
+    fn extra_client_configuration_remains_compatible() {
+        let registry = build_registry_from_values(
+            None,
+            None,
+            Some("codex-test|client-id|client-secret|Test Client"),
+            Some("codex-test"),
+        );
+
+        assert_eq!(registry.clients.len(), 1);
+        assert_eq!(registry.clients[0].key, "codex-test");
+        assert_eq!(registry.clients[0].label, "Test Client");
+        assert_eq!(registry.active_key, "codex-test");
+    }
+
+    #[test]
     fn test_get_auth_url_contains_state() {
+        let registry =
+            build_registry_from_values(Some("client-id"), Some("client-secret"), None, None);
         let redirect_uri = "http://localhost:8080/callback";
         let state = "test-state-123456";
-        let url = get_auth_url(redirect_uri, state);
+        let (url, _) = build_auth_url(&registry.clients[0], redirect_uri, state)
+            .expect("configured OAuth client should produce a URL");
 
         assert!(url.contains("state=test-state-123456"));
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fcallback"));

@@ -759,6 +759,37 @@ pub enum ProxySelectionStrategy {
     WeightedRoundRobin,
 }
 
+/// Build an upstream endpoint without duplicating the /v1 prefix.
+/// Providers may be configured as an origin, an origin ending in /v1, or
+/// as a complete endpoint URL.
+pub fn build_provider_api_url(base_url: &str, endpoint: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let endpoint = endpoint.trim_start_matches('/');
+    let endpoint_suffix = format!("/{endpoint}");
+
+    if base.ends_with(&endpoint_suffix) {
+        return base.to_string();
+    }
+
+    if base.ends_with("/v1") {
+        format!("{base}/{endpoint}")
+    } else if base.contains("/v1/") {
+        format!("{base}/{endpoint}")
+    } else {
+        format!("{base}/v1/{endpoint}")
+    }
+}
+
+/// OpenCode Go's GPT 5.6 Luna model is exposed through the Responses API.
+pub fn uses_responses_api(model: &str) -> bool {
+    let model = model
+        .split_once('(')
+        .map(|(base, _)| base)
+        .unwrap_or(model)
+        .trim();
+    model.eq_ignore_ascii_case("gpt-5.6-luna")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,5 +827,31 @@ mod tests {
         // 测试边缘情况
         assert_eq!(normalize_proxy_url(""), "");
         assert_eq!(normalize_proxy_url("   "), "");
+    }
+
+    #[test]
+    fn test_build_provider_api_url_does_not_duplicate_v1() {
+        assert_eq!(
+            build_provider_api_url("https://opencode.ai/zen/go", "chat/completions"),
+            "https://opencode.ai/zen/go/v1/chat/completions"
+        );
+        assert_eq!(
+            build_provider_api_url("https://opencode.ai/zen/go/v1", "chat/completions"),
+            "https://opencode.ai/zen/go/v1/chat/completions"
+        );
+        assert_eq!(
+            build_provider_api_url(
+                "https://opencode.ai/zen/go/v1/chat/completions",
+                "chat/completions"
+            ),
+            "https://opencode.ai/zen/go/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_open_code_go_responses_model_detection() {
+        assert!(uses_responses_api("gpt-5.6-luna"));
+        assert!(uses_responses_api("gpt-5.6-luna(medium)"));
+        assert!(!uses_responses_api("glm-5.3"));
     }
 }

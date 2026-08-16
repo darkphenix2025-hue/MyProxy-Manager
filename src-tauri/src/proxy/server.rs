@@ -108,7 +108,9 @@ pub struct AppState {
     pub switching: Arc<RwLock<bool>>, // [NEW] 账号切换状态，用于防止并发切换
     pub integration: crate::modules::integration::SystemManager, // [NEW] 系统集成层实现
     pub account_service: Arc<crate::modules::account_service::AccountService>, // [NEW] 账号管理服务层
-    pub security: Arc<RwLock<crate::proxy::ProxySecurityConfig>>,              // [NEW] 安全配置状态
+    pub codex_account_runtime:
+        Arc<crate::modules::codex_account_runtime::ProductionCodexAccountRuntime>,
+    pub security: Arc<RwLock<crate::proxy::ProxySecurityConfig>>, // [NEW] 安全配置状态
     pub cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>, // [NEW] Cloudflared 插件状态
     pub is_running: Arc<RwLock<bool>>, // [NEW] 运行状态标识
     pub port: u16,                     // [NEW] 本地监听端口 (v4.0.8 修复)
@@ -340,6 +342,9 @@ impl AxumServer {
         debug_logging: crate::proxy::config::DebugLoggingConfig,
 
         integration: crate::modules::integration::SystemManager,
+        codex_account_runtime: Arc<
+            crate::modules::codex_account_runtime::ProductionCodexAccountRuntime,
+        >,
         cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
         proxy_pool_config: crate::proxy::config::ProxyPoolConfig, // [NEW]
         translator_config: crate::proxy::translator::config::TranslatorConfig, // 新协议转换单元灰度配置
@@ -405,6 +410,7 @@ impl AxumServer {
             account_service: Arc::new(crate::modules::account_service::AccountService::new(
                 integration.clone(),
             )),
+            codex_account_runtime,
             security: security_state.clone(),
             cloudflared_state: cloudflared_state.clone(),
             is_running: is_running_state.clone(),
@@ -610,6 +616,12 @@ impl AxumServer {
                 get(admin_get_preferred_account).post(admin_set_preferred_account),
             )
             .route("/accounts/oauth/prepare", post(admin_prepare_oauth_url))
+            .route("/accounts/codex/login/start", post(admin_start_codex_login))
+            .route(
+                "/accounts/codex/login/:sessionId",
+                get(admin_get_codex_login_status).delete(admin_cancel_codex_login),
+            )
+            .route("/connections", get(admin_list_account_connections))
             .route("/accounts/oauth/start", post(admin_start_oauth_login))
             .route("/accounts/oauth/complete", post(admin_complete_oauth_login))
             .route("/accounts/oauth/cancel", post(admin_cancel_oauth_login))
@@ -1223,6 +1235,83 @@ async fn admin_start_oauth_login(
         )
     })?;
     Ok(Json(to_account_response(&account, &current_id)))
+}
+
+fn codex_runtime_http_error(
+    error: crate::modules::codex_account_runtime::CodexAccountRuntimeError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let status = match error {
+        crate::modules::codex_account_runtime::CodexAccountRuntimeError::SessionNotFound => {
+            StatusCode::NOT_FOUND
+        }
+        crate::modules::codex_account_runtime::CodexAccountRuntimeError::Login(
+            crate::modules::codex_login::CodexLoginError::Loopback(_),
+        ) => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": {
+                "code": crate::modules::codex_account_runtime::error_code(&error),
+                "message": "Codex account operation failed"
+            }
+        })),
+    )
+}
+
+async fn admin_start_codex_login(
+    State(state): State<AppState>,
+) -> Result<
+    Json<crate::modules::codex_account_runtime::CodexLoginSessionStart>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    state
+        .codex_account_runtime
+        .start()
+        .await
+        .map(Json)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_get_codex_login_status(
+    State(state): State<AppState>,
+    Path(session_id): Path<uuid::Uuid>,
+) -> Result<
+    Json<crate::modules::codex_account_runtime::CodexLoginSessionStatus>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    state
+        .codex_account_runtime
+        .status(session_id)
+        .map(Json)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_cancel_codex_login(
+    State(state): State<AppState>,
+    Path(session_id): Path<uuid::Uuid>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .codex_account_runtime
+        .cancel(session_id)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_list_account_connections(
+    State(state): State<AppState>,
+) -> Result<
+    Json<Vec<crate::modules::codex_account_runtime::AccountConnectionSummary>>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    state
+        .codex_account_runtime
+        .list_connections()
+        .await
+        .map(Json)
+        .map_err(codex_runtime_http_error)
 }
 
 async fn admin_complete_oauth_login(
@@ -3992,20 +4081,12 @@ async fn test_provider_single_model(
 
     let base = provider.base_url.trim_end_matches('/');
 
-    // If base_url already contains "/v1/", the endpoint path is fully configured.
-    // Don't append additional version segments (e.g. BAILIAN: .../apps/anthropic).
-    let has_v1 = base.contains("/v1/");
-
     let resp = match provider.protocol {
         ProviderProtocol::AnthropicPassthrough => {
             // Anthropic-compatible endpoint: join base_url with /v1/messages path.
             // e.g. BAILIAN: https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages
             // e.g. BIGMODEL: https://open.bigmodel.cn/api/anthropic/v1/messages
-            let url = if has_v1 {
-                base.to_string()
-            } else {
-                format!("{}/v1/messages", base)
-            };
+            let url = crate::proxy::config::build_provider_api_url(base, "messages");
             let body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
@@ -4025,15 +4106,25 @@ async fn test_provider_single_model(
                 .await
         }
         ProviderProtocol::OpenAICompatible => {
-            let url = if has_v1 {
-                base.to_string()
+            let (endpoint, body) = if crate::proxy::config::uses_responses_api(model) {
+                (
+                    "responses",
+                    serde_json::json!({
+                        "model": model,
+                        "input": "hi",
+                        "max_output_tokens": 1
+                    }),
+                )
             } else {
-                format!("{}/v1/chat/completions", base)
+                (
+                    "chat/completions",
+                    serde_json::json!({
+                        "model": model,
+                        "messages": [{"role": "user", "content": "hi"}]
+                    }),
+                )
             };
-            let body = serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "hi"}]
-            });
+            let url = crate::proxy::config::build_provider_api_url(base, endpoint);
             client
                 .post(&url)
                 .header("content-type", "application/json")
