@@ -9,10 +9,8 @@
 pub fn get_context_limit_for_model(model: &str) -> u32 {
     if model.contains("pro") {
         2_097_152 // 2M for Pro
-    } else if model.contains("flash") {
-        1_048_576 // 1M for Flash
     } else {
-        1_048_576 // Default 1M
+        1_048_576 // 1M for Flash and default models
     }
 }
 

@@ -2,6 +2,7 @@
 import { useEffect } from 'react';
 import { useConfigStore } from '../../stores/useConfigStore';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 
 import { isLinux } from '../../utils/env';
 
@@ -41,7 +42,6 @@ export default function ThemeManager() {
                     );
 
                     // Sync Windows title bar theme (for minimize/maximize/close button colors)
-                    const { invoke } = await import('@tauri-apps/api/core');
                     invoke('set_window_theme', { theme }).catch(() => {
                         // Ignore errors on non-Windows platforms
                     });

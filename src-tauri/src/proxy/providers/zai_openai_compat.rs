@@ -410,9 +410,7 @@ pub async fn forward_claude_via_openai_compat_with_translator(
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx
-                            .send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
-                            .await;
+                        let _ = tx.send(Err(std::io::Error::other(e))).await;
                         break;
                     }
                 };

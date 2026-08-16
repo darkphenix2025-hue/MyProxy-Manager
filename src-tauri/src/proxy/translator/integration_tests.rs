@@ -404,8 +404,10 @@ mod tests {
     fn test_translator_config_global_enable() {
         use crate::proxy::translator::config::TranslatorConfig;
 
-        let mut config = TranslatorConfig::default();
-        config.enabled = true;
+        let config = TranslatorConfig {
+            enabled: true,
+            ..Default::default()
+        };
         assert!(config.is_format_enabled("openai"));
         assert!(config.is_format_enabled("claude"));
         assert!(config.is_format_enabled("codex"));
@@ -416,8 +418,10 @@ mod tests {
         use crate::proxy::translator::config::TranslatorConfig;
         use std::collections::HashMap;
 
-        let mut config = TranslatorConfig::default();
-        config.enabled = true;
+        let mut config = TranslatorConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let mut toggle = HashMap::new();
         toggle.insert("openai".to_string(), true);
         toggle.insert("claude".to_string(), false);
@@ -433,8 +437,10 @@ mod tests {
         use crate::proxy::translator::config::TranslatorConfig;
         use std::collections::HashMap;
 
-        let mut config = TranslatorConfig::default();
-        config.enabled = false;
+        let mut config = TranslatorConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let mut toggle = HashMap::new();
         toggle.insert("openai".to_string(), true);
         config.format_toggle = toggle;

@@ -13,7 +13,7 @@ pub fn gemini_to_claude_body(body: &Value, model: &str) -> Value {
             for part in parts {
                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                     if !system_text.is_empty() {
-                        system_text.push_str("\n");
+                        system_text.push('\n');
                     }
                     system_text.push_str(text);
                 }

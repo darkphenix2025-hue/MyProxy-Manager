@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::models::{
@@ -53,13 +53,13 @@ mod tests {
     }
 
     /// Helper to write corrupted content to accounts.json
-    fn write_corrupted_index(path: &PathBuf, content: &[u8]) {
+    fn write_corrupted_index(path: &Path, content: &[u8]) {
         let index_path = path.join("accounts.json");
         fs::write(&index_path, content).expect("Failed to write corrupted index");
     }
 
     /// Helper to create a valid account file in accounts/ directory
-    fn create_account_file(path: &PathBuf, account_id: &str, email: &str) {
+    fn create_account_file(path: &Path, account_id: &str, email: &str) {
         let accounts_dir = path.join("accounts");
         fs::create_dir_all(&accounts_dir).expect("Failed to create accounts dir");
 
@@ -225,7 +225,7 @@ mod tests {
         let account_files: Vec<_> = fs::read_dir(&accounts_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
             .collect();
         assert_eq!(
             account_files.len(),
@@ -349,7 +349,7 @@ mod tests {
             .filter(|e| {
                 e.file_name()
                     .to_str()
-                    .map_or(false, |name| name.starts_with("accounts.json.corrupt-"))
+                    .is_some_and(|name| name.starts_with("accounts.json.corrupt-"))
             })
             .collect();
 
@@ -357,7 +357,7 @@ mod tests {
 
         // Verify backup contains the original garbage content
         let backup_content =
-            fs::read(&backup_files[0].path()).expect("Should be able to read backup file");
+            fs::read(backup_files[0].path()).expect("Should be able to read backup file");
         assert_eq!(
             backup_content, garbage_content,
             "Backup should contain original corrupt content"
@@ -414,7 +414,7 @@ pub fn get_accounts_dir() -> Result<PathBuf, String> {
 }
 
 /// Load account index from a specific directory (internal helper)
-fn load_account_index_in_dir(data_dir: &PathBuf) -> Result<AccountIndex, String> {
+fn load_account_index_in_dir(data_dir: &Path) -> Result<AccountIndex, String> {
     let index_path = data_dir.join(ACCOUNTS_INDEX);
 
     if !index_path.exists() {
@@ -474,7 +474,7 @@ fn load_account_index_in_dir(data_dir: &PathBuf) -> Result<AccountIndex, String>
 }
 
 /// Save account index to a specific directory (internal helper)
-fn save_account_index_in_dir(data_dir: &PathBuf, index: &AccountIndex) -> Result<(), String> {
+fn save_account_index_in_dir(data_dir: &Path, index: &AccountIndex) -> Result<(), String> {
     let index_path = data_dir.join(ACCOUNTS_INDEX);
     // Use unique temp file name per write to avoid collision
     let temp_filename = format!("{}.tmp.{}", ACCOUNTS_INDEX, Uuid::new_v4());
@@ -501,7 +501,7 @@ fn save_account_index_in_dir(data_dir: &PathBuf, index: &AccountIndex) -> Result
 }
 
 /// Rebuild AccountIndex by scanning accounts/*.json files in specific directory
-fn rebuild_index_from_accounts_in_dir(data_dir: &PathBuf) -> Result<AccountIndex, String> {
+fn rebuild_index_from_accounts_in_dir(data_dir: &Path) -> Result<AccountIndex, String> {
     let accounts_dir = data_dir.join(ACCOUNTS_DIR);
     let mut summaries = Vec::new();
 
@@ -509,7 +509,7 @@ fn rebuild_index_from_accounts_in_dir(data_dir: &PathBuf) -> Result<AccountIndex
         if let Ok(entries) = fs::read_dir(&accounts_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "json") {
+                if path.extension().is_some_and(|ext| ext == "json") {
                     if let Some(account_id) = path.file_stem().and_then(|s| s.to_str()) {
                         match load_account_at_path(&path) {
                             Ok(account) => {
@@ -593,7 +593,7 @@ fn sanitize_index_content(raw: &[u8]) -> String {
 
 /// Best-effort save of recovered index without deadlocking
 fn try_save_recovered_index(
-    data_dir: &PathBuf,
+    data_dir: &Path,
     _index_path: &PathBuf,
     index: &AccountIndex,
     corrupt_content: Option<&[u8]>,
@@ -1484,7 +1484,7 @@ pub fn update_account_quota(account_id: &str, quota: QuotaData) -> Result<(), St
                     && account
                         .proxy_disabled_reason
                         .as_ref()
-                        .map_or(false, |r| r == "quota_protection")
+                        .is_some_and(|r| r == "quota_protection")
                 {
                     crate::modules::logger::log_info(&format!(
                         "[Quota] Migrating account {} from account-level to model-level protection",
@@ -1646,6 +1646,7 @@ pub fn export_accounts() -> Result<Vec<(String, String)>, String> {
 }
 
 /// Quota query with retry (moved from commands to modules for reuse)
+#[allow(clippy::collapsible_match)]
 pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppResult<QuotaData> {
     use crate::error::AppError;
     use crate::modules::oauth;
@@ -1675,7 +1676,7 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
 
         // Get display name (incidental to Token refresh)
         let name = if account.name.is_none()
-            || account.name.as_ref().map_or(false, |n| n.trim().is_empty())
+            || account.name.as_ref().is_some_and(|n| n.trim().is_empty())
         {
             match oauth::get_user_info(&token.access_token, Some(&account.id)).await {
                 Ok(user_info) => user_info.get_display_name(),
@@ -1690,7 +1691,7 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
     }
 
     // 0. Supplement display name (if missing or upper step failed)
-    if account.name.is_none() || account.name.as_ref().map_or(false, |n| n.trim().is_empty()) {
+    if account.name.is_none() || account.name.as_ref().is_some_and(|n| n.trim().is_empty()) {
         modules::logger::log_info(&format!(
             "Account {} missing display name, attempting to fetch...",
             account.email
@@ -1795,7 +1796,7 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
 
                 // Re-fetch display name
                 let name = if account.name.is_none()
-                    || account.name.as_ref().map_or(false, |n| n.trim().is_empty())
+                    || account.name.as_ref().is_some_and(|n| n.trim().is_empty())
                 {
                     match oauth::get_user_info(&token_res.access_token, Some(&account.id)).await {
                         Ok(user_info) => user_info.get_display_name(),

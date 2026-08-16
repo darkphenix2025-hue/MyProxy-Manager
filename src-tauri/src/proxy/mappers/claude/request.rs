@@ -40,7 +40,7 @@ impl SafetyThreshold {
     }
 
     /// Convert to Gemini API threshold string
-    pub fn to_gemini_threshold(&self) -> &'static str {
+    pub fn to_gemini_threshold(self) -> &'static str {
         match self {
             SafetyThreshold::Off => "OFF",
             SafetyThreshold::BlockLowAndAbove => "BLOCK_LOW_AND_ABOVE",
@@ -120,16 +120,14 @@ pub fn clean_cache_control_from_messages(messages: &mut [Message]) {
                             total_cleaned += 1;
                         }
                     }
-                    ContentBlock::ToolUse { cache_control, .. } => {
-                        if cache_control.is_some() {
-                            tracing::debug!(
+                    ContentBlock::ToolUse { cache_control, .. } if cache_control.is_some() => {
+                        tracing::debug!(
                                 "[Cache-Control-Cleaner] Removed cache_control from ToolUse block at message[{}].content[{}]",
                                 idx,
                                 block_idx
                             );
-                            *cache_control = None;
-                            total_cleaned += 1;
-                        }
+                        *cache_control = None;
+                        total_cleaned += 1;
                     }
                     _ => {}
                 }
@@ -192,7 +190,7 @@ fn sort_thinking_blocks_first(messages: &mut [Message]) {
                 let mut needs_reorder = false;
                 let mut saw_non_thinking = false;
 
-                for (_i, block) in blocks.iter().enumerate() {
+                for block in blocks.iter() {
                     match block {
                         ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {
                             if saw_non_thinking {
@@ -1168,30 +1166,28 @@ fn build_contents(
                                 // [NEW v3.3.17] Try session-based signature cache first (Layer 3)
                                 // This provides conversation-level isolation
                                 crate::proxy::SignatureCache::global().get_session_signature(session_id)
-                                    .map(|s| {
+                                    .inspect(|s| {
                                         tracing::info!(
                                             "[Claude-Request] Recovered signature from SESSION cache (session: {}, len: {})",
                                             session_id, s.len()
                                         );
-                                        s
                                     })
                             })
                             .or_else(|| {
                                 // Try tool-specific signature cache (Layer 1)
                                 crate::proxy::SignatureCache::global().get_tool_signature(id)
-                                    .map(|s| {
+                                    .inspect(|_s| {
                                         tracing::info!("[Claude-Request] Recovered signature from TOOL cache for tool_id: {}", id);
-                                        s
                                     })
                             })
                             .or_else(|| {
                                 // [DEPRECATED] Global store fallback - kept for backward compatibility
                                 let global_sig = get_thought_signature();
-                                if global_sig.is_some() {
+                                if let Some(sig) = &global_sig {
                                     tracing::warn!(
                                         "[Claude-Request] Using deprecated GLOBAL thought_signature fallback (length: {}). \
                                          This indicates session cache miss.",
-                                        global_sig.as_ref().unwrap().len()
+                                        sig.len()
                                     );
                                 }
                                 global_sig
@@ -1300,22 +1296,21 @@ fn build_contents(
                                 for block in arr {
                                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                         texts.push(text.to_string());
-                                    } else if block.get("source").is_some() {
-                                        if block.get("type").and_then(|v| v.as_str())
+                                    } else if block.get("source").is_some()
+                                        && block.get("type").and_then(|v| v.as_str())
                                             == Some("image")
-                                        {
-                                            let source = block.get("source").unwrap();
-                                            if let (Some(media_type), Some(data)) = (
-                                                source.get("media_type").and_then(|v| v.as_str()),
-                                                source.get("data").and_then(|v| v.as_str()),
-                                            ) {
-                                                extra_parts.push(json!({
-                                                    "inlineData": {
-                                                        "mimeType": media_type,
-                                                        "data": data
-                                                    }
-                                                }));
-                                            }
+                                    {
+                                        let source = block.get("source").unwrap();
+                                        if let (Some(media_type), Some(data)) = (
+                                            source.get("media_type").and_then(|v| v.as_str()),
+                                            source.get("data").and_then(|v| v.as_str()),
+                                        ) {
+                                            extra_parts.push(json!({
+                                                "inlineData": {
+                                                    "mimeType": media_type,
+                                                    "data": data
+                                                }
+                                            }));
                                         }
                                     }
                                 }
@@ -1440,7 +1435,7 @@ fn build_contents(
         } else {
             // [Crucial Check] 即使有 thought 块，也必须保证它位于 parts 的首位 (Index 0)
             // 且必须包含 thought: true 标记
-            let first_is_thought = parts.get(0).map_or(false, |p| {
+            let first_is_thought = parts.first().is_some_and(|p| {
                 (p.get("thought").is_some() || p.get("thoughtSignature").is_some())
                     && p.get("text").is_some() // 对于 v1internal，通常 text + thought: true 才是合规的思维块
             });
@@ -1592,7 +1587,7 @@ fn build_google_contents(
         }
     }
 
-    for (_i, msg) in messages.iter().enumerate() {
+    for msg in messages.iter() {
         let google_content = build_google_content(
             msg,
             claude_req,

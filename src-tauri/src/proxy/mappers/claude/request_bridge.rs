@@ -59,10 +59,8 @@ pub fn claude_to_openai_body(request: &ClaudeRequest) -> Value {
                     }));
                 } else {
                     // Multi-modal: convert to OpenAI content blocks
-                    let content_blocks: Vec<Value> = blocks
-                        .iter()
-                        .filter_map(|block| content_block_to_openai(block))
-                        .collect();
+                    let content_blocks: Vec<Value> =
+                        blocks.iter().filter_map(content_block_to_openai).collect();
 
                     if content_blocks.is_empty() {
                         messages.push(json!({
@@ -114,18 +112,16 @@ pub fn claude_to_openai_body(request: &ClaudeRequest) -> Value {
             .iter()
             .filter(|t| !t.is_web_search())
             .filter_map(|t| {
-                if let Some(ref schema) = t.input_schema {
-                    Some(json!({
+                t.input_schema.as_ref().map(|schema| {
+                    json!({
                         "type": "function",
                         "function": {
                             "name": t.get_name(),
                             "description": t.description.as_deref().unwrap_or(""),
                             "parameters": schema,
                         }
-                    }))
-                } else {
-                    None
-                }
+                    })
+                })
             })
             .collect();
         if !openai_tools.is_empty() {

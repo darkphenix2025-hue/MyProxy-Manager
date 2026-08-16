@@ -1,6 +1,6 @@
 use crate::modules::process;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Antigravity 版本信息
 #[derive(Debug, Clone)]
@@ -60,7 +60,7 @@ pub fn get_antigravity_version() -> Result<AntigravityVersion, String> {
 
 /// macOS: 从 Info.plist 读取版本
 #[cfg(target_os = "macos")]
-fn get_version_macos(exe_path: &PathBuf) -> Result<AntigravityVersion, String> {
+fn get_version_macos(exe_path: &Path) -> Result<AntigravityVersion, String> {
     use plist::Value;
 
     // exe_path 可能是 /Applications/Antigravity.app 或内部可执行文件
@@ -69,7 +69,7 @@ fn get_version_macos(exe_path: &PathBuf) -> Result<AntigravityVersion, String> {
     let app_path = if let Some(idx) = path_str.find(".app") {
         PathBuf::from(&path_str[..idx + 4])
     } else {
-        exe_path.clone()
+        exe_path.to_path_buf()
     };
 
     let info_plist_path = app_path.join("Contents/Info.plist");

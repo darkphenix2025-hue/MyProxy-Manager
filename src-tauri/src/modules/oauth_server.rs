@@ -217,7 +217,7 @@ async fn ensure_oauth_flow_prepared(
                 if code.is_none() && bytes_read > 0 {
                     crate::modules::logger::log_error(&format!(
                         "OAuth callback failed to parse code. Raw request (first 512 bytes): {}",
-                        &request.chars().take(512).collect::<String>()
+                        request.chars().take(512).collect::<String>()
                     ));
                 }
 
@@ -311,7 +311,7 @@ async fn ensure_oauth_flow_prepared(
                 if code.is_none() && bytes_read > 0 {
                     crate::modules::logger::log_error(&format!(
                         "OAuth callback failed to parse code (IPv6). Raw request: {}",
-                        &request.chars().take(512).collect::<String>()
+                        request.chars().take(512).collect::<String>()
                     ));
                 }
 

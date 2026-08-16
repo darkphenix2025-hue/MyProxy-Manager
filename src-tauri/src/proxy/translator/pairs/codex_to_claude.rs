@@ -190,7 +190,7 @@ pub fn claude_to_codex_response_non_stream(
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("resp-0");
-    let item_id = format!("item-{}", &response_id.chars().take(16).collect::<String>());
+    let item_id = format!("item-{}", response_id.chars().take(16).collect::<String>());
 
     let response = json!({
         "id": response_id,
@@ -231,6 +231,7 @@ pub fn claude_to_codex_response_non_stream(
 // ─── 流式响应转换 ───
 
 /// Claude 流 → Codex 流状态机。
+#[derive(Default)]
 pub struct ClaudeToCodexStreamState {
     pub response_id: Option<String>,
     pub item_id: Option<String>,
@@ -239,20 +240,6 @@ pub struct ClaudeToCodexStreamState {
     pub has_sent_created: bool,
     pub has_sent_item_added: bool,
     pub has_sent_content_added: bool,
-}
-
-impl Default for ClaudeToCodexStreamState {
-    fn default() -> Self {
-        Self {
-            response_id: None,
-            item_id: None,
-            text_buffer: String::new(),
-            reasoning_buffer: String::new(),
-            has_sent_created: false,
-            has_sent_item_added: false,
-            has_sent_content_added: false,
-        }
-    }
 }
 
 pub fn claude_to_codex_stream(
@@ -315,7 +302,7 @@ fn process_claude_event_for_codex(
     if state.response_id.is_none() {
         if let Some(id) = parsed.get("id").and_then(|v| v.as_str()) {
             state.response_id = Some(id.to_string());
-            state.item_id = Some(format!("item-{}", &id.chars().take(16).collect::<String>()));
+            state.item_id = Some(format!("item-{}", id.chars().take(16).collect::<String>()));
         } else {
             state.response_id = Some("resp-0".to_string());
             state.item_id = Some("item-0".to_string());

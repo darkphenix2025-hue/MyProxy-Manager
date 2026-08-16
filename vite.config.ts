@@ -8,6 +8,42 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep third-party dependencies out of the application entry chunk.
+        // Split the large, stable dependency families and locale resources without
+        // producing hundreds of tiny (or empty) package chunks.
+        manualChunks(id) {
+          if (id.includes("/src/locales/")) {
+            const locale = id.split("/src/locales/")[1]?.replace(/\.json$/, "");
+            return locale ? `locale-${locale}` : undefined;
+          }
+
+          if (!id.includes("node_modules")) return undefined;
+
+          const packagePath = id.split("node_modules/")[1];
+          const packageParts = packagePath.split("/");
+          const packageName = packagePath.startsWith("@")
+            ? packageParts.slice(0, 2).join("-")
+            : packageParts[0];
+
+          if (packageName === "react" || packageName === "react-dom" || packageName === "react-router" || packageName === "react-router-dom") {
+            return "vendor-react";
+          }
+          if (packageName === "antd" || packageName.startsWith("rc-")) {
+            return "vendor-antd";
+          }
+          if (packageName === "recharts" || packageName.startsWith("d3-")) {
+            return "vendor-charts";
+          }
+          if (packageName === "framer-motion") return "vendor-motion";
+          return undefined;
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

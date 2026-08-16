@@ -184,22 +184,12 @@ fn extract_codex_output_text(root: &Value) -> String {
 // ─── 流式响应转换 ───
 
 /// Codex SSE 流 → OpenAI 流状态机。
+#[derive(Default)]
 pub struct CodexToOpenAIStreamState {
     pub response_id: Option<String>,
     pub item_id: Option<String>,
     pub text_buffer: String,
     pub has_sent_role: bool,
-}
-
-impl Default for CodexToOpenAIStreamState {
-    fn default() -> Self {
-        Self {
-            response_id: None,
-            item_id: None,
-            text_buffer: String::new(),
-            has_sent_role: false,
-        }
-    }
 }
 
 pub fn codex_to_openai_stream(

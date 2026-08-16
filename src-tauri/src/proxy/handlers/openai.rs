@@ -286,10 +286,7 @@ pub async fn handle_chat_completions(
 
     for attempt in 0..max_attempts {
         // 将 OpenAI 工具转为 Value 数组以便探测联网
-        let tools_val: Option<Vec<Value>> = openai_req
-            .tools
-            .as_ref()
-            .map(|list| list.iter().cloned().collect());
+        let tools_val: Option<Vec<Value>> = openai_req.tools.as_ref().map(|list| list.to_vec());
         let config = crate::proxy::mappers::common_utils::resolve_request_config(
             &openai_req.model,
             &mapped_model,
@@ -832,8 +829,8 @@ pub async fn handle_chat_completions(
         }
 
         // 只有 403 (权限/地区限制) 和 401 (认证失效) 触发账号轮换
-        if status_code == 403 || status_code == 401 {
-            if apply_retry_strategy(
+        if (status_code == 403 || status_code == 401)
+            && apply_retry_strategy(
                 RetryStrategy::FixedDelay(Duration::from_millis(200)),
                 attempt,
                 max_attempts,
@@ -841,9 +838,8 @@ pub async fn handle_chat_completions(
                 &trace_id,
             )
             .await
-            {
-                continue;
-            }
+        {
+            continue;
         }
 
         // 只有 403 (权限/地区限制) 和 401 (认证失效) 触发账号轮换
@@ -1437,10 +1433,7 @@ pub async fn handle_completions(
     for attempt in 0..max_attempts {
         // 3. 模型配置解析
         // 将 OpenAI 工具转为 Value 数组以便探测联网
-        let tools_val: Option<Vec<Value>> = openai_req
-            .tools
-            .as_ref()
-            .map(|list| list.iter().cloned().collect());
+        let tools_val: Option<Vec<Value>> = openai_req.tools.as_ref().map(|list| list.to_vec());
         let config = crate::proxy::mappers::common_utils::resolve_request_config(
             &openai_req.model,
             &mapped_model,
@@ -2005,8 +1998,7 @@ async fn intercept_chat_to_image(
 
                 let sse_data = format!(
                     "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-                    chunk.to_string(),
-                    done_chunk.to_string()
+                    chunk, done_chunk
                 );
 
                 let body = Body::from(sse_data);
@@ -2041,7 +2033,7 @@ async fn intercept_chat_to_image(
                     .into_response())
             }
         }
-        Err(e) => Err(e.into()), // using Err directly is fine since return type handles it
+        Err(e) => Err(e), // using Err directly is fine since return type handles it
     }
 }
 
@@ -2936,7 +2928,7 @@ async fn forward_openai_compatible(
         crate::proxy::config::ProviderProtocol::GeminiV1Internal => "gemini",
     };
     out = out.header("X-Upstream-Protocol", upstream_protocol_str);
-    if let Some(model) = openai_req.model.split('/').last() {
+    if let Some(model) = openai_req.model.split('/').next_back() {
         out = out.header("X-Upstream-Model", model);
     }
     // Extract just the path from the full URL
@@ -3914,41 +3906,6 @@ fn openai_chat_to_responses_json(upstream: &Value, fallback_model: &str) -> Valu
     })
 }
 
-#[cfg(test)]
-mod provider_responses_tests {
-    use super::openai_chat_to_responses_json;
-    use serde_json::json;
-
-    #[test]
-    fn converts_non_stream_chat_response_without_losing_usage_or_tools() {
-        let upstream = json!({
-            "id": "chatcmpl-1",
-            "created": 123,
-            "model": "gpt-5.6-sol",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "done",
-                    "tool_calls": [{
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "lookup", "arguments": "{\"id\":1}"}
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-        });
-
-        let converted = openai_chat_to_responses_json(&upstream, "fallback");
-        assert_eq!(converted["object"], "response");
-        assert_eq!(converted["model"], "gpt-5.6-sol");
-        assert_eq!(converted["output"][0]["content"][0]["text"], "done");
-        assert_eq!(converted["output"][1]["name"], "lookup");
-        assert_eq!(converted["usage"]["total_tokens"], 15);
-    }
-}
-
 /// Forward request to a Gemini-compatible provider and convert the response
 /// to Codex (/v1/responses) SSE format.
 async fn forward_gemini_as_codex_sse(
@@ -4349,4 +4306,39 @@ async fn forward_gemini_as_codex_sse(
             )
                 .into_response()
         })
+}
+
+#[cfg(test)]
+mod provider_responses_tests {
+    use super::openai_chat_to_responses_json;
+    use serde_json::json;
+
+    #[test]
+    fn converts_non_stream_chat_response_without_losing_usage_or_tools() {
+        let upstream = json!({
+            "id": "chatcmpl-1",
+            "created": 123,
+            "model": "gpt-5.6-sol",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{\"id\":1}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+
+        let converted = openai_chat_to_responses_json(&upstream, "fallback");
+        assert_eq!(converted["object"], "response");
+        assert_eq!(converted["model"], "gpt-5.6-sol");
+        assert_eq!(converted["output"][0]["content"][0]["text"], "done");
+        assert_eq!(converted["output"][1]["name"], "lookup");
+        assert_eq!(converted["usage"]["total_tokens"], 15);
+    }
 }

@@ -248,6 +248,7 @@ pub fn claude_to_openai_response_non_stream(
 /// - `content_block_delta` → delta.text / delta.thinking
 /// - `message_delta` → 结束统计
 /// - `message_stop` → [DONE]
+#[derive(Default)]
 pub struct ClaudeToOpenAIStreamState {
     pub message_id: Option<String>,
     pub content_index: usize,
@@ -257,21 +258,6 @@ pub struct ClaudeToOpenAIStreamState {
     pub tool_call_name: Option<String>,
     pub tool_call_args: String,
     pub has_sent_role: bool,
-}
-
-impl Default for ClaudeToOpenAIStreamState {
-    fn default() -> Self {
-        Self {
-            message_id: None,
-            content_index: 0,
-            text_buffer: String::new(),
-            reasoning_buffer: String::new(),
-            tool_call_id: None,
-            tool_call_name: None,
-            tool_call_args: String::new(),
-            has_sent_role: false,
-        }
-    }
 }
 
 pub fn claude_to_openai_stream(

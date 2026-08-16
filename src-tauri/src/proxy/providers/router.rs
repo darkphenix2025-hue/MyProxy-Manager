@@ -157,7 +157,7 @@ impl ProviderRouter {
             );
             if let Some(&idx) = self.provider_id_index.get(pid) {
                 let provider = &self.providers[idx];
-                if prev_failed.map_or(true, |pf| provider.name != pf) {
+                if prev_failed.is_none_or(|pf| provider.name != pf) {
                     return ProviderSelection {
                         provider,
                         resolved_model: rest.to_string(),
@@ -175,7 +175,7 @@ impl ProviderRouter {
         let mut wildcard_matches: Vec<&UpstreamProvider> = Vec::new();
 
         for p in &self.providers {
-            if prev_failed.map_or(false, |pf| p.name == pf) {
+            if prev_failed.is_some_and(|pf| p.name == pf) {
                 continue;
             }
 
@@ -216,7 +216,7 @@ impl ProviderRouter {
             // No prefix match at all, use all providers as fallback
             self.providers
                 .iter()
-                .filter(|p| prev_failed.map_or(true, |pf| p.name != pf))
+                .filter(|p| prev_failed.is_none_or(|pf| p.name != pf))
                 .collect()
         } else {
             prefix_candidates
@@ -275,7 +275,7 @@ impl ProviderRouter {
             // No fallback provider, use the first available provider
             self.providers
                 .iter()
-                .find(|p| prev_failed.map_or(true, |pf| p.name != pf))
+                .find(|p| prev_failed.is_none_or(|pf| p.name != pf))
                 .unwrap_or(&self.providers[0])
         });
         ProviderSelection {

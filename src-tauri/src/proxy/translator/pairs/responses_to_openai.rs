@@ -400,9 +400,9 @@ fn process_responses_event_for_claude(
                 state.reasoning_buffer.push_str(delta);
             }
         }
-        "response.completed" => {
+        "response.completed"
             // 发送 Claude 结束序列
-            if !state.has_sent_stop {
+            if !state.has_sent_stop => {
                 // message_delta with usage
                 if let Some(usage) = parsed.get("response").and_then(|r| r.get("usage")) {
                     let ev = json!({
@@ -434,7 +434,6 @@ fn process_responses_event_for_claude(
                 outputs.push(buf.to_vec());
                 state.has_sent_stop = true;
             }
-        }
         _ => {
             // 未知事件，忽略
         }
