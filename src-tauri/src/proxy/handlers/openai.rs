@@ -2854,10 +2854,7 @@ async fn forward_openai_compatible(
         }
     };
 
-    let url = format!(
-        "{}/v1/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
+    let url = crate::proxy::config::build_provider_api_url(&provider.base_url, "chat/completions");
     let timeout_secs = provider
         .request_timeout_secs
         .unwrap_or(state.request_timeout)
@@ -3391,12 +3388,7 @@ async fn forward_openai_compat_as_codex_sse(
     use rand::Rng;
 
     // Build URL: {base_url}/v1/chat/completions
-    let base = provider.base_url.trim_end_matches('/');
-    let url = if base.ends_with("/v1") {
-        format!("{}/chat/completions", base)
-    } else {
-        format!("{}/v1/chat/completions", base)
-    };
+    let url = crate::proxy::config::build_provider_api_url(&provider.base_url, "chat/completions");
 
     let timeout_secs = state.request_timeout.max(5);
     let upstream_proxy = state.upstream_proxy.read().await.clone();

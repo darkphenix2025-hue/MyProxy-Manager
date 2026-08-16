@@ -912,18 +912,13 @@ async fn test_single_model(
     use crate::proxy::config::ProviderProtocol;
 
     let base = provider.base_url.trim_end_matches('/');
-    let has_v1 = base.contains("/v1/");
 
     let resp = match provider.protocol {
         ProviderProtocol::AnthropicPassthrough => {
             // Anthropic-compatible endpoint: join base_url with /v1/messages path.
             // e.g. BAILIAN: https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages
             // e.g. BIGMODEL: https://open.bigmodel.cn/api/anthropic/v1/messages
-            let url = if has_v1 {
-                base.to_string()
-            } else {
-                format!("{}/v1/messages", base)
-            };
+            let url = crate::proxy::config::build_provider_api_url(base, "messages");
             let body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
@@ -940,15 +935,25 @@ async fn test_single_model(
                 .await
         }
         ProviderProtocol::OpenAICompatible => {
-            let url = if has_v1 {
-                base.to_string()
+            let (endpoint, body) = if crate::proxy::config::uses_responses_api(model) {
+                (
+                    "responses",
+                    serde_json::json!({
+                        "model": model,
+                        "input": "hi",
+                        "max_output_tokens": 1
+                    }),
+                )
             } else {
-                format!("{}/v1/chat/completions", base)
+                (
+                    "chat/completions",
+                    serde_json::json!({
+                        "model": model,
+                        "messages": [{"role": "user", "content": "hi"}]
+                    }),
+                )
             };
-            let body = serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "hi"}]
-            });
+            let url = crate::proxy::config::build_provider_api_url(base, endpoint);
             client
                 .post(&url)
                 .header("content-type", "application/json")

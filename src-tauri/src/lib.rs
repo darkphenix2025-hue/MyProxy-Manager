@@ -379,6 +379,26 @@ pub fn run() {
                 info!("Tray disabled for this session");
             }
 
+            // The tray is available on every desktop launch, but a normal
+            // launch must still present the main window. The window-state
+            // plugin can restore a previously hidden window, so explicitly
+            // show and focus it here unless the process was started minimized.
+            let start_minimized = std::env::args().any(|arg| arg == "--minimized");
+            if !start_minimized {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.show()?;
+                    window.unminimize()?;
+                    window.set_focus()?;
+                    #[cfg(target_os = "macos")]
+                    app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                    info!("Main window shown and focused");
+                } else {
+                    warn!("Main window was not found during setup");
+                }
+            } else {
+                info!("Starting minimized; main window remains hidden");
+            }
+
             // 立即启动管理服务器 (8150)，以便 Web 端能访问
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

@@ -15,13 +15,13 @@ pub(crate) fn build_openai_compat_url_for_provider(
     base_url: &str,
     path: &str,
 ) -> Result<String, String> {
-    let base = base_url.trim_end_matches('/');
-    let path = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{}", path)
-    };
-    Ok(format!("{}{}", base, path))
+    let endpoint = path
+        .trim_start_matches('/')
+        .strip_prefix("v1/")
+        .unwrap_or(path);
+    Ok(crate::proxy::config::build_provider_api_url(
+        base_url, endpoint,
+    ))
 }
 
 /// Build a reqwest::Client for upstream OpenAI-compatible calls.
