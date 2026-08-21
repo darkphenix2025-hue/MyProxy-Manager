@@ -130,7 +130,13 @@ pub mod claude_to_openai {
         }
 
         // Thinking → reasoning_effort
-        if let Some(thinking) = root.get("thinking") {
+        if let Some(effort) = root
+            .get("output_config")
+            .and_then(|config| config.get("effort"))
+            .and_then(|value| value.as_str())
+        {
+            out["reasoning_effort"] = Value::String(effort.to_string());
+        } else if let Some(thinking) = root.get("thinking") {
             if let Some(thinking_type) = thinking.get("type").and_then(|v| v.as_str()) {
                 let effort = match thinking_type {
                     "enabled" => thinking

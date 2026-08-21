@@ -3,6 +3,7 @@ import { AppConfig } from '../types/config';
 import * as configService from '../services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauri } from '../utils/env';
+import { DEFAULT_HIDDEN_MENU_ITEMS } from '../components/navbar/constants';
 
 const SHOW_ALL_QUOTAS_KEY = 'myproxy_show_all_quotas';
 const LEGACY_SHOW_ALL_QUOTAS_KEY = 'antigravity_show_all_quotas';
@@ -93,7 +94,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         const { config } = get();
         if (!config) return;
 
-        const hiddenItems = config.hidden_menu_items || [];
+        const hiddenItems = config.hidden_menu_items ?? [...DEFAULT_HIDDEN_MENU_ITEMS];
         const isHidden = hiddenItems.includes(path);
 
         const newHiddenItems = isHidden
@@ -107,6 +108,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     isMenuItemHidden: (path: string) => {
         const { config } = get();
         if (!config) return false;
-        return (config.hidden_menu_items || []).includes(path);
+        const hiddenItems = config.hidden_menu_items ?? [...DEFAULT_HIDDEN_MENU_ITEMS];
+        return hiddenItems.includes(path);
     },
 }));

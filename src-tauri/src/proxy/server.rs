@@ -5,7 +5,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Json, Response},
-    routing::{any, delete, get, post},
+    routing::{any, delete, get, patch, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -90,7 +90,10 @@ pub fn take_pending_delete_accounts() -> Vec<String> {
 #[derive(Clone)]
 pub struct AppState {
     pub token_manager: Arc<TokenManager>,
-    pub custom_mapping: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    pub custom_mapping: Arc<tokio::sync::RwLock<crate::proxy::config::CustomMappingTable>>,
+    pub route_reasoning_effort: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    pub fallback_model: Arc<tokio::sync::RwLock<crate::proxy::config::FallbackModelConfig>>,
+    pub model_cooldown: Arc<crate::proxy::common::model_cooldown::ModelCooldownManager>,
     #[allow(dead_code)]
     pub request_timeout: u64, // API 请求超时(秒)
     #[allow(dead_code)]
@@ -120,10 +123,336 @@ pub struct AppState {
     pub upstream_trace_cache: crate::proxy::upstream_trace::UpstreamTraceCache, // Upstream request/response cache
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelRouteResolution {
+    pub model: String,
+    pub used_fallback: bool,
+    pub fallback_reasoning_effort: Option<String>,
+    pub provider_selection: Option<crate::proxy::providers::router::ProviderSelection>,
+    pub cooldown_error: Option<ModelCooldownError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelCooldownError {
+    pub code: String,
+    pub message: String,
+    pub requested_model: String,
+    pub fallback_model: Option<String>,
+}
+
 // 为 AppState 实现 FromRef，以便中间件提取 security 状态
 impl axum::extract::FromRef<AppState> for Arc<RwLock<crate::proxy::ProxySecurityConfig>> {
     fn from_ref(state: &AppState) -> Self {
         state.security.clone()
+    }
+}
+
+impl AppState {
+    /// Resolve a provider credential immediately before an outbound request.
+    /// API-key providers are returned unchanged; auth-file credentials are
+    /// refreshed by the Codex runtime and materialized only in memory.
+    pub async fn resolve_provider_auth(
+        &self,
+        provider: crate::proxy::config::UpstreamProvider,
+    ) -> Result<crate::proxy::config::UpstreamProvider, String> {
+        self.codex_account_runtime
+            .access_token_for_credential_if_configured(provider)
+            .await
+            .map_err(|error| format!("Provider credential is unavailable: {error}"))
+    }
+
+    /// Select a provider while excluding provider/protocol variants whose
+    /// native model is currently cooling down.
+    pub async fn select_provider_for_model(
+        &self,
+        model: &str,
+        prev_failed: Option<&str>,
+        protocol: crate::proxy::config::ProviderProtocol,
+    ) -> Option<crate::proxy::providers::router::ProviderSelection> {
+        let router = self.provider_router.read().await;
+        select_provider_with_cooldown(&router, &self.model_cooldown, model, prev_failed, protocol)
+    }
+
+    pub fn model_cooldown_error_response(&self, error: &ModelCooldownError) -> Response {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": {
+                    "code": error.code,
+                    "message": error.message,
+                    "requested_model": error.requested_model,
+                    "fallback_model": error.fallback_model,
+                }
+            })),
+        )
+            .into_response()
+    }
+
+    pub fn mark_provider_model_cooldown(
+        &self,
+        provider: &crate::proxy::config::UpstreamProvider,
+        model: &str,
+        retry_after_secs: Option<u64>,
+        reason: &str,
+    ) {
+        let native_model =
+            crate::proxy::providers::router::map_model_for_provider(model, &provider.model_mapping);
+        let key = crate::proxy::common::model_cooldown::CooldownKey {
+            provider: provider
+                .provider_id
+                .clone()
+                .unwrap_or_else(|| provider.name.clone()),
+            protocol: provider.protocol.as_str().to_string(),
+            model: native_model,
+        };
+        self.model_cooldown
+            .mark_cooldown_for(key, reason, retry_after_secs);
+    }
+
+    /// Resolve the custom route and apply the configured fallback only when
+    /// the resolved target has no valid provider/model match.
+    pub async fn resolve_model_for_protocol(
+        &self,
+        original_model: &str,
+        protocol: crate::proxy::config::ProviderProtocol,
+    ) -> ModelRouteResolution {
+        let custom_mapping = self.custom_mapping.read().await.clone();
+        let router = self.provider_router.read().await;
+        let mapped_candidate = crate::proxy::common::model_mapping::resolve_model_route_with_filter(
+            original_model,
+            &custom_mapping,
+            |target| {
+                select_provider_with_cooldown(
+                    &router,
+                    &self.model_cooldown,
+                    target,
+                    None,
+                    protocol.clone(),
+                )
+                .is_some()
+            },
+        );
+        let base_mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
+            original_model,
+            &custom_mapping,
+        );
+        // Keep the unfiltered target for diagnostics and fallback decisions.
+        // If every target of a matching rule is cooling down, replacing it
+        // with the built-in pass-through name would hide which route was
+        // actually exhausted.
+        let mapped_model = mapped_candidate
+            .clone()
+            .unwrap_or_else(|| base_mapped_model.clone());
+        let base_matches = router.has_model_match(&base_mapped_model);
+        let base_selection = if base_matches {
+            select_provider_with_cooldown(
+                &router,
+                &self.model_cooldown,
+                &base_mapped_model,
+                None,
+                protocol.clone(),
+            )
+        } else {
+            None
+        };
+        let source_matches = mapped_candidate
+            .as_deref()
+            .is_some_and(|model| router.has_model_match(model));
+        let source_selection = if source_matches {
+            select_provider_with_cooldown(
+                &router,
+                &self.model_cooldown,
+                &mapped_model,
+                None,
+                protocol.clone(),
+            )
+        } else {
+            None
+        };
+
+        if let Some(selection) = source_selection {
+            return ModelRouteResolution {
+                model: mapped_model,
+                used_fallback: false,
+                fallback_reasoning_effort: None,
+                provider_selection: Some(selection),
+                cooldown_error: None,
+            };
+        }
+
+        let source_was_cooled = base_matches && base_selection.is_none();
+
+        let fallback = self.fallback_model.read().await.clone();
+        if !fallback.enabled || fallback.model.trim().is_empty() {
+            if source_was_cooled {
+                return ModelRouteResolution {
+                    model: mapped_model,
+                    used_fallback: false,
+                    fallback_reasoning_effort: None,
+                    provider_selection: None,
+                    cooldown_error: Some(ModelCooldownError {
+                        code: "model_cooldown_exhausted".to_string(),
+                        message: "所有匹配模型均处于冷却状态，且未配置可用兜底模型".to_string(),
+                        requested_model: original_model.to_string(),
+                        fallback_model: None,
+                    }),
+                };
+            }
+            return ModelRouteResolution {
+                model: mapped_model,
+                used_fallback: false,
+                fallback_reasoning_effort: None,
+                provider_selection: None,
+                cooldown_error: None,
+            };
+        }
+
+        let fallback_target = fallback.model.trim();
+        let fallback_target =
+            if fallback_target.contains('/') || fallback.provider_id.trim().is_empty() {
+                fallback_target.to_string()
+            } else {
+                format!("{}/{}", fallback.provider_id.trim(), fallback_target)
+            };
+        let fallback_base_model = crate::proxy::common::model_mapping::resolve_model_route(
+            &fallback_target,
+            &custom_mapping,
+        );
+        // A fallback can itself be a weighted/custom route. Apply the same
+        // availability filter before choosing its target; otherwise a random
+        // pick could select a cooled target even while another fallback
+        // target is healthy.
+        let fallback_candidate =
+            crate::proxy::common::model_mapping::resolve_model_route_with_filter(
+                &fallback_target,
+                &custom_mapping,
+                |target| {
+                    select_provider_with_cooldown(
+                        &router,
+                        &self.model_cooldown,
+                        target,
+                        None,
+                        protocol.clone(),
+                    )
+                    .is_some()
+                },
+            );
+        let fallback_model = fallback_candidate.unwrap_or(fallback_base_model);
+        let fallback_selection = if router.has_model_match(&fallback_model) {
+            select_provider_with_cooldown(
+                &router,
+                &self.model_cooldown,
+                &fallback_model,
+                None,
+                protocol,
+            )
+        } else {
+            None
+        };
+
+        if let Some(selection) = fallback_selection {
+            let fallback_reasoning_effort =
+                crate::proxy::common::route_reasoning::canonical_effort(&fallback.reasoning_effort);
+            tracing::info!(
+                "[FallbackModel] '{}' did not match a provider; routing to '{}'",
+                original_model,
+                fallback_model
+            );
+            return ModelRouteResolution {
+                model: fallback_model,
+                used_fallback: true,
+                fallback_reasoning_effort,
+                provider_selection: Some(selection),
+                cooldown_error: None,
+            };
+        }
+
+        if router.has_model_match(&fallback_model) {
+            return ModelRouteResolution {
+                model: mapped_model,
+                used_fallback: false,
+                fallback_reasoning_effort: None,
+                provider_selection: None,
+                cooldown_error: Some(ModelCooldownError {
+                    code: "fallback_model_cooldown".to_string(),
+                    message: format!(
+                        "请求模型 '{}' 的所有候选均处于冷却状态，兜底模型 '{}' 也处于冷却状态",
+                        original_model, fallback_model
+                    ),
+                    requested_model: original_model.to_string(),
+                    fallback_model: Some(fallback_model),
+                }),
+            };
+        }
+
+        if source_was_cooled {
+            return ModelRouteResolution {
+                model: mapped_model,
+                used_fallback: false,
+                fallback_reasoning_effort: None,
+                provider_selection: None,
+                cooldown_error: Some(ModelCooldownError {
+                    code: "fallback_model_unavailable".to_string(),
+                    message: format!(
+                        "请求模型 '{}' 的所有候选均处于冷却状态，配置的兜底模型 '{}' 无法路由",
+                        original_model, fallback_model
+                    ),
+                    requested_model: original_model.to_string(),
+                    fallback_model: Some(fallback_model),
+                }),
+            };
+        }
+
+        tracing::warn!(
+            "[FallbackModel] configured target '{}' does not match any provider; keeping '{}'",
+            fallback_model,
+            mapped_model
+        );
+        ModelRouteResolution {
+            model: mapped_model,
+            used_fallback: false,
+            fallback_reasoning_effort: None,
+            provider_selection: None,
+            cooldown_error: None,
+        }
+    }
+}
+
+fn select_provider_with_cooldown(
+    router: &crate::proxy::providers::router::ProviderRouter,
+    cooldown: &crate::proxy::common::model_cooldown::ModelCooldownManager,
+    model: &str,
+    prev_failed: Option<&str>,
+    protocol: crate::proxy::config::ProviderProtocol,
+) -> Option<crate::proxy::providers::router::ProviderSelection> {
+    let mut excluded = HashSet::new();
+    loop {
+        let selection = router.select_for_protocol_excluding(
+            model,
+            prev_failed,
+            protocol.clone(),
+            &excluded,
+        )?;
+        let native_model = crate::proxy::providers::router::map_model_for_provider(
+            &selection.resolved_model,
+            &selection.provider.model_mapping,
+        );
+        let key = crate::proxy::common::model_cooldown::CooldownKey {
+            provider: selection
+                .provider
+                .provider_id
+                .clone()
+                .unwrap_or_else(|| selection.provider.name.clone()),
+            protocol: selection.provider.protocol.as_str().to_string(),
+            model: native_model,
+        };
+        if cooldown.is_cooled_down(&key) {
+            excluded.insert(crate::proxy::providers::router::provider_route_key(
+                &selection.provider,
+            ));
+            continue;
+        }
+        return Some(selection);
     }
 }
 
@@ -217,7 +546,10 @@ fn to_account_response(
 #[derive(Clone)]
 pub struct AxumServer {
     shutdown_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
-    custom_mapping: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    custom_mapping: Arc<tokio::sync::RwLock<crate::proxy::config::CustomMappingTable>>,
+    route_reasoning_effort: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    fallback_model: Arc<tokio::sync::RwLock<crate::proxy::config::FallbackModelConfig>>,
+    model_cooldown: Arc<crate::proxy::common::model_cooldown::ModelCooldownManager>,
     proxy_state: Arc<tokio::sync::RwLock<crate::proxy::config::UpstreamProxyConfig>>,
     upstream: Arc<crate::proxy::upstream::client::UpstreamClient>,
     security_state: Arc<RwLock<crate::proxy::ProxySecurityConfig>>,
@@ -232,6 +564,8 @@ pub struct AxumServer {
     pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>, // [NEW] 暴露代理池管理器供命令调用
     pub translator_config: Arc<RwLock<crate::proxy::translator::config::TranslatorConfig>>, // 新协议转换单元灰度配置
     provider_router: Arc<RwLock<crate::proxy::providers::router::ProviderRouter>>,
+    codex_account_runtime:
+        Arc<crate::modules::codex_account_runtime::ProductionCodexAccountRuntime>,
 }
 
 impl AxumServer {
@@ -240,6 +574,18 @@ impl AxumServer {
             let mut m = self.custom_mapping.write().await;
             *m = config.custom_mapping.clone();
         }
+        {
+            let mut effort = self.route_reasoning_effort.write().await;
+            *effort = config.route_reasoning_effort.clone();
+        }
+        {
+            let mut fallback = self.fallback_model.write().await;
+            *fallback = config.fallback_model.clone();
+        }
+        self.model_cooldown.update_settings(
+            config.model_cooldown.enabled,
+            config.model_cooldown.duration_secs,
+        );
         tracing::debug!("模型映射 (Custom) 已全量热更新");
     }
 
@@ -325,12 +671,37 @@ impl AxumServer {
         self.proxy_state.read().await.clone()
     }
 
+    pub fn get_active_model_cooldowns(
+        &self,
+    ) -> Vec<crate::proxy::common::model_cooldown::ActiveCooldown> {
+        self.model_cooldown.get_active_cooldowns()
+    }
+
+    pub fn clear_model_cooldowns(&self) -> usize {
+        self.model_cooldown.clear()
+    }
+
+    /// Resolve a provider's auth-file credential before an outbound request.
+    /// API-key providers are returned unchanged.
+    pub async fn resolve_provider_auth(
+        &self,
+        provider: crate::proxy::config::UpstreamProvider,
+    ) -> Result<crate::proxy::config::UpstreamProvider, String> {
+        self.codex_account_runtime
+            .access_token_for_credential_if_configured(provider)
+            .await
+            .map_err(|error| format!("Provider credential is unavailable: {error}"))
+    }
+
     /// 启动 Axum 服务器
     pub async fn start(
         host: String,
         port: u16,
         token_manager: Arc<TokenManager>,
-        custom_mapping: std::collections::HashMap<String, String>,
+        custom_mapping: crate::proxy::config::CustomMappingTable,
+        route_reasoning_effort: std::collections::HashMap<String, String>,
+        fallback_model: crate::proxy::config::FallbackModelConfig,
+        model_cooldown: crate::proxy::config::ModelCooldownConfig,
         _request_timeout: u64,
         upstream_proxy: crate::proxy::config::UpstreamProxyConfig,
         user_agent_override: Option<String>,
@@ -350,6 +721,15 @@ impl AxumServer {
         translator_config: crate::proxy::translator::config::TranslatorConfig, // 新协议转换单元灰度配置
     ) -> Result<(Self, tokio::task::JoinHandle<()>), String> {
         let custom_mapping_state = Arc::new(tokio::sync::RwLock::new(custom_mapping));
+        let route_reasoning_effort_state =
+            Arc::new(tokio::sync::RwLock::new(route_reasoning_effort));
+        let fallback_model_state = Arc::new(tokio::sync::RwLock::new(fallback_model));
+        let model_cooldown_state = Arc::new(
+            crate::proxy::common::model_cooldown::ModelCooldownManager::new(
+                model_cooldown.enabled,
+                model_cooldown.duration_secs,
+            ),
+        );
         let proxy_state = Arc::new(tokio::sync::RwLock::new(upstream_proxy.clone()));
         let proxy_pool_state = Arc::new(tokio::sync::RwLock::new(proxy_pool_config));
         let proxy_pool_manager =
@@ -381,6 +761,9 @@ impl AxumServer {
         let state = AppState {
             token_manager: token_manager.clone(),
             custom_mapping: custom_mapping_state.clone(),
+            route_reasoning_effort: route_reasoning_effort_state.clone(),
+            fallback_model: fallback_model_state.clone(),
+            model_cooldown: model_cooldown_state.clone(),
             request_timeout: 300, // 5分钟超时
             thought_signature_map: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
@@ -410,7 +793,7 @@ impl AxumServer {
             account_service: Arc::new(crate::modules::account_service::AccountService::new(
                 integration.clone(),
             )),
-            codex_account_runtime,
+            codex_account_runtime: codex_account_runtime.clone(),
             security: security_state.clone(),
             cloudflared_state: cloudflared_state.clone(),
             is_running: is_running_state.clone(),
@@ -593,6 +976,7 @@ impl AxumServer {
                 "/proxy/pool/binding/:accountId",
                 get(admin_get_account_proxy_binding),
             )
+            .route("/proxy/providers/models", post(admin_fetch_provider_models))
             .route("/proxy/providers/test", post(admin_test_provider_models))
             .route(
                 "/proxy/health-check/trigger",
@@ -622,6 +1006,34 @@ impl AxumServer {
                 get(admin_get_codex_login_status).delete(admin_cancel_codex_login),
             )
             .route("/connections", get(admin_list_account_connections))
+            .route(
+                "/connections/:credentialId/status",
+                patch(admin_set_codex_connection_enabled),
+            )
+            .route(
+                "/connections/:credentialId/refresh",
+                post(admin_refresh_codex_auth_file),
+            )
+            .route(
+                "/connections/:credentialId/models",
+                get(admin_list_codex_models),
+            )
+            .route(
+                "/connections/:credentialId/quota",
+                get(admin_get_codex_quota),
+            )
+            .route(
+                "/connections/:credentialId/export",
+                post(admin_export_codex_auth_file),
+            )
+            .route(
+                "/connections/:credentialId",
+                delete(admin_delete_codex_auth_file),
+            )
+            .route(
+                "/connections/codex/import",
+                post(admin_import_codex_auth_file),
+            )
             .route("/accounts/oauth/start", post(admin_start_oauth_login))
             .route("/accounts/oauth/complete", post(admin_complete_oauth_login))
             .route("/accounts/oauth/cancel", post(admin_cancel_oauth_login))
@@ -648,6 +1060,11 @@ impl AxumServer {
             .route("/proxy/cloudflared/stop", post(admin_cloudflared_stop))
             .route("/system/open-folder", post(admin_open_folder))
             .route("/proxy/stats", get(admin_get_proxy_stats))
+            .route("/proxy/model-cooldowns", get(admin_get_model_cooldowns))
+            .route(
+                "/proxy/model-cooldowns",
+                delete(admin_clear_model_cooldowns),
+            )
             .route("/logs", get(admin_get_proxy_logs_filtered))
             .route("/logs/count", get(admin_get_proxy_logs_count_filtered))
             .route("/logs/clear", post(admin_clear_proxy_logs))
@@ -825,6 +1242,9 @@ impl AxumServer {
         let server_instance = Self {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
             custom_mapping: custom_mapping_state.clone(),
+            route_reasoning_effort: route_reasoning_effort_state,
+            fallback_model: fallback_model_state,
+            model_cooldown: model_cooldown_state,
             proxy_state,
             upstream: state.upstream.clone(),
             security_state,
@@ -838,6 +1258,7 @@ impl AxumServer {
             proxy_pool_manager,
             translator_config: translator_config_state,
             provider_router,
+            codex_account_runtime,
         };
 
         // 在新任务中启动服务器
@@ -1240,9 +1661,24 @@ async fn admin_start_oauth_login(
 fn codex_runtime_http_error(
     error: crate::modules::codex_account_runtime::CodexAccountRuntimeError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let status = match error {
+    let status = match &error {
         crate::modules::codex_account_runtime::CodexAccountRuntimeError::SessionNotFound => {
             StatusCode::NOT_FOUND
+        }
+        crate::modules::codex_account_runtime::CodexAccountRuntimeError::CredentialNotFound => {
+            StatusCode::NOT_FOUND
+        }
+        crate::modules::codex_account_runtime::CodexAccountRuntimeError::CredentialDisabled => {
+            StatusCode::CONFLICT
+        }
+        crate::modules::codex_account_runtime::CodexAccountRuntimeError::ModelDiscovery(_) => {
+            StatusCode::BAD_GATEWAY
+        }
+        crate::modules::codex_account_runtime::CodexAccountRuntimeError::QuotaDiscovery(_) => {
+            StatusCode::BAD_GATEWAY
+        }
+        crate::modules::codex_account_runtime::CodexAccountRuntimeError::AccountIdUnavailable => {
+            StatusCode::CONFLICT
         }
         crate::modules::codex_account_runtime::CodexAccountRuntimeError::Login(
             crate::modules::codex_login::CodexLoginError::Loopback(_),
@@ -1254,7 +1690,7 @@ fn codex_runtime_http_error(
         Json(serde_json::json!({
             "error": {
                 "code": crate::modules::codex_account_runtime::error_code(&error),
-                "message": "Codex account operation failed"
+                "message": error.to_string()
             }
         })),
     )
@@ -1309,6 +1745,101 @@ async fn admin_list_account_connections(
     state
         .codex_account_runtime
         .list_connections()
+        .await
+        .map(Json)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_set_codex_connection_enabled(
+    State(state): State<AppState>,
+    Path(credential_id): Path<String>,
+    Json(payload): Json<crate::modules::codex_account_runtime::CodexEnabledRequest>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .codex_account_runtime
+        .set_enabled(&credential_id, payload.enabled)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_refresh_codex_auth_file(
+    State(state): State<AppState>,
+    Path(credential_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .codex_account_runtime
+        .refresh_credential(&credential_id)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_delete_codex_auth_file(
+    State(state): State<AppState>,
+    Path(credential_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .codex_account_runtime
+        .delete_credential(&credential_id)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_import_codex_auth_file(
+    State(state): State<AppState>,
+    Json(payload): Json<crate::modules::codex_account_runtime::CodexImportRequest>,
+) -> Result<
+    Json<crate::modules::codex_account_runtime::AccountConnectionSummary>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    state
+        .codex_account_runtime
+        .import_auth_file(payload)
+        .await
+        .map(Json)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_export_codex_auth_file(
+    State(state): State<AppState>,
+    Path(credential_id): Path<String>,
+    Json(payload): Json<crate::modules::codex_account_runtime::CodexExportRequest>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .codex_account_runtime
+        .export_auth_file(&credential_id, &payload.path)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_list_codex_models(
+    State(state): State<AppState>,
+    Path(credential_id): Path<String>,
+) -> Result<
+    Json<Vec<crate::modules::codex_account_runtime::CodexModelSummary>>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    state
+        .codex_account_runtime
+        .list_models(&credential_id)
+        .await
+        .map(Json)
+        .map_err(codex_runtime_http_error)
+}
+
+async fn admin_get_codex_quota(
+    State(state): State<AppState>,
+    Path(credential_id): Path<String>,
+) -> Result<
+    Json<crate::modules::codex_account_runtime::CodexQuotaSummary>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    state
+        .codex_account_runtime
+        .get_quota(&credential_id)
         .await
         .map(Json)
         .map_err(codex_runtime_http_error)
@@ -1513,6 +2044,18 @@ async fn admin_save_config(
         let mut mapping = state.custom_mapping.write().await;
         *mapping = new_config.clone().proxy.custom_mapping;
     }
+    {
+        let mut effort = state.route_reasoning_effort.write().await;
+        *effort = new_config.clone().proxy.route_reasoning_effort;
+    }
+    {
+        let mut fallback = state.fallback_model.write().await;
+        *fallback = new_config.clone().proxy.fallback_model;
+    }
+    state.model_cooldown.update_settings(
+        new_config.proxy.model_cooldown.enabled,
+        new_config.proxy.model_cooldown.duration_secs,
+    );
 
     // 更新上游代理
     {
@@ -1710,6 +2253,14 @@ async fn admin_update_model_mapping(
         let mut mapping = state.custom_mapping.write().await;
         *mapping = config.custom_mapping.clone();
     }
+    {
+        let mut effort = state.route_reasoning_effort.write().await;
+        *effort = config.route_reasoning_effort.clone();
+    }
+    {
+        let mut fallback = state.fallback_model.write().await;
+        *fallback = config.fallback_model.clone();
+    }
 
     // 2. 持久化到硬盘 (修复 #1149)
     // 加载当前配置，更新 mapping，然后保存
@@ -1721,6 +2272,8 @@ async fn admin_update_model_mapping(
     })?;
 
     app_config.proxy.custom_mapping = config.custom_mapping;
+    app_config.proxy.route_reasoning_effort = config.route_reasoning_effort;
+    app_config.proxy.fallback_model = config.fallback_model;
 
     crate::modules::config::save_app_config(&app_config).map_err(|e| {
         (
@@ -1972,6 +2525,15 @@ async fn admin_get_proxy_stats(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let stats = state.monitor.get_stats().await;
     Ok(Json(stats))
+}
+
+async fn admin_get_model_cooldowns(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.model_cooldown.get_active_cooldowns())
+}
+
+async fn admin_clear_model_cooldowns(State(state): State<AppState>) -> impl IntoResponse {
+    let cleared = state.model_cooldown.clear();
+    Json(serde_json::json!({ "cleared": cleared }))
 }
 
 async fn admin_get_data_dir_path() -> impl IntoResponse {
@@ -2350,11 +2912,10 @@ async fn admin_get_token_stats_by_model(
 }
 
 async fn admin_get_token_stats_model_trend_hourly(
+    Query(p): Query<StatsPeriodQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let res = tokio::task::spawn_blocking(|| {
-        token_stats::get_model_trend_hourly(24) // Default 24 hours
-    })
-    .await;
+    let hours = p.hours.unwrap_or(24);
+    let res = tokio::task::spawn_blocking(move || token_stats::get_model_trend_hourly(hours)).await;
 
     match res {
         Ok(Ok(stats)) => Ok(Json(stats)),
@@ -2372,11 +2933,10 @@ async fn admin_get_token_stats_model_trend_hourly(
 }
 
 async fn admin_get_token_stats_model_trend_daily(
+    Query(p): Query<StatsPeriodQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let res = tokio::task::spawn_blocking(|| {
-        token_stats::get_model_trend_daily(7) // Default 7 days
-    })
-    .await;
+    let days = p.days.unwrap_or(7);
+    let res = tokio::task::spawn_blocking(move || token_stats::get_model_trend_daily(days)).await;
 
     match res {
         Ok(Ok(stats)) => Ok(Json(stats)),
@@ -2394,11 +2954,11 @@ async fn admin_get_token_stats_model_trend_daily(
 }
 
 async fn admin_get_token_stats_account_trend_hourly(
+    Query(p): Query<StatsPeriodQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let res = tokio::task::spawn_blocking(|| {
-        token_stats::get_account_trend_hourly(24) // Default 24 hours
-    })
-    .await;
+    let hours = p.hours.unwrap_or(24);
+    let res =
+        tokio::task::spawn_blocking(move || token_stats::get_account_trend_hourly(hours)).await;
 
     match res {
         Ok(Ok(stats)) => Ok(Json(stats)),
@@ -2416,11 +2976,10 @@ async fn admin_get_token_stats_account_trend_hourly(
 }
 
 async fn admin_get_token_stats_account_trend_daily(
+    Query(p): Query<StatsPeriodQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let res = tokio::task::spawn_blocking(|| {
-        token_stats::get_account_trend_daily(7) // Default 7 days
-    })
-    .await;
+    let days = p.days.unwrap_or(7);
+    let res = tokio::task::spawn_blocking(move || token_stats::get_account_trend_daily(days)).await;
 
     match res {
         Ok(Ok(stats)) => Ok(Json(stats)),
@@ -2438,19 +2997,16 @@ async fn admin_get_token_stats_account_trend_daily(
 }
 
 async fn admin_clear_token_stats() -> impl IntoResponse {
-    let res = tokio::task::spawn_blocking(|| {
-        // Clear databases (brute force)
-        if let Ok(path) = token_stats::get_db_path() {
-            let _ = std::fs::remove_file(path);
-        }
-        let _ = token_stats::init_db();
-    })
-    .await;
+    let res = tokio::task::spawn_blocking(token_stats::clear_stats).await;
 
     match res {
-        Ok(_) => {
+        Ok(Ok(())) => {
             logger::log_info("[API] 已清除所有 Token 统计数据");
             StatusCode::OK
+        }
+        Ok(Err(e)) => {
+            logger::log_error(&format!("[API] 清除 Token 统计数据失败: {}", e));
+            StatusCode::INTERNAL_SERVER_ERROR
         }
         Err(e) => {
             logger::log_error(&format!("[API] 清除 Token 统计数据失败: {}", e));
@@ -3980,46 +4536,96 @@ async fn admin_get_droid_config_content(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct FetchProviderModelsRequest {
+    provider: crate::proxy::config::UpstreamProvider,
+    #[serde(default, rename = "use_openai_protocol", alias = "useOpenaiProtocol")]
+    use_openai_protocol: bool,
+}
+
+async fn admin_fetch_provider_models(
+    State(state): State<AppState>,
+    Json(payload): Json<FetchProviderModelsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let upstream_proxy = state.upstream_proxy.read().await.clone();
+    let provider = crate::proxy::provider_discovery::provider_for_model_discovery(
+        &payload.provider,
+        payload.use_openai_protocol,
+    );
+    let provider = state
+        .codex_account_runtime
+        .access_token_for_credential_if_configured(provider)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse { error }),
+            )
+        })?;
+    let models = crate::proxy::provider_discovery::discover_provider_models_with_proxy(
+        &provider,
+        &upstream_proxy,
+    )
+    .await
+    .map_err(|error| (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error })))?;
+
+    Ok(Json(models))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TestProviderRequest {
     provider: crate::proxy::config::UpstreamProvider,
+    #[serde(default)]
+    protocol: Option<crate::proxy::config::ProviderProtocol>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 async fn admin_test_provider_models(
     State(state): State<AppState>,
     Json(payload): Json<TestProviderRequest>,
 ) -> impl IntoResponse {
-    let provider = payload.provider;
-
-    if provider.api_key.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Provider API key is empty".into(),
-            }),
-        ));
-    }
-
-    let models: Vec<String> = provider
-        .available_models
-        .as_ref()
-        .map(|s| {
-            s.split(',')
-                .map(|m| m.trim().to_string())
-                .filter(|m| !m.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
+    let TestProviderRequest {
+        provider: configured_provider,
+        protocol,
+        model,
+    } = payload;
+    let models =
+        crate::proxy::provider_testing::collect_test_models(&configured_provider, model.as_deref());
 
     if models.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "No models configured for this provider".into(),
+                error: if model
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    "Requested model is not configured for this provider".into()
+                } else {
+                    "No models configured for this provider".into()
+                },
             }),
         ));
     }
 
-    let timeout_secs = provider.request_timeout_secs.unwrap_or(30).min(30);
+    let variants = crate::proxy::provider_testing::collect_test_variants(
+        &configured_provider,
+        protocol.as_ref(),
+    );
+    if variants.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No enabled protocols configured for this provider".into(),
+            }),
+        ));
+    }
+
+    let timeout_secs = configured_provider
+        .request_timeout_secs
+        .unwrap_or(30)
+        .min(30);
     let upstream_proxy = state.upstream_proxy.read().await.clone();
 
     let client = match build_test_provider_client(&upstream_proxy, timeout_secs) {
@@ -4034,17 +4640,39 @@ async fn admin_test_provider_models(
 
     let mut results = Vec::new();
 
-    for model in &models {
-        let start = std::time::Instant::now();
-        let result = test_provider_single_model(&client, &provider, model).await;
-        let latency_ms = start.elapsed().as_millis() as u64;
+    for variant in variants {
+        let protocol = variant.protocol.as_str();
+        let provider = match state
+            .codex_account_runtime
+            .access_token_for_credential_if_configured(variant)
+            .await
+        {
+            Ok(provider) => provider,
+            Err(error) => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse { error }),
+                ));
+            }
+        };
 
-        results.push(serde_json::json!({
-            "model": model,
-            "success": result.is_ok(),
-            "latencyMs": latency_ms,
-            "error": result.err(),
-        }));
+        for model in &models {
+            let start = std::time::Instant::now();
+            let result = if provider.api_key.trim().is_empty() && provider.credential_id.is_none() {
+                Err("Provider API key is empty".to_string())
+            } else {
+                test_provider_single_model(&client, &provider, model).await
+            };
+            let latency_ms = start.elapsed().as_millis() as u64;
+
+            results.push(serde_json::json!({
+                "model": model,
+                "protocol": protocol,
+                "success": result.is_ok(),
+                "latencyMs": latency_ms,
+                "error": result.err(),
+            }));
+        }
     }
 
     Ok(Json(serde_json::json!({ "results": results })))
@@ -4126,6 +4754,33 @@ async fn test_provider_single_model(
             client
                 .post(&url)
                 .header("content-type", "application/json")
+                .bearer_auth(&provider.api_key)
+                .json(&body)
+                .send()
+                .await
+        }
+        ProviderProtocol::CodexResponses => {
+            let url = format!("{base}/responses");
+            let body = serde_json::json!({
+                "model": model,
+                "input": "hi",
+                "stream": false,
+                "max_output_tokens": 1
+            });
+            tracing::debug!("[TestProvider] POST {} model={}", url, model);
+            let mut request = client
+                .post(&url)
+                .header("accept", "application/json")
+                .header("content-type", "application/json")
+                .header("originator", "codex_cli_rs")
+                .header(
+                    "user-agent",
+                    "codex_cli_rs/0.144.1 (MyProxy-Manager; auth-file)",
+                );
+            if let Some(account_id) = provider.account_id.as_deref() {
+                request = request.header("ChatGPT-Account-Id", account_id);
+            }
+            request
                 .bearer_auth(&provider.api_key)
                 .json(&body)
                 .send()

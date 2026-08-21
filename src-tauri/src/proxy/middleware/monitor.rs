@@ -10,8 +10,50 @@ use serde_json::Value;
 use std::time::Instant;
 use tauri::Emitter;
 
-const MAX_REQUEST_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
-const MAX_REQUEST_DURATION_MS: u64 = 30_000;
+const RESPONSE_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn stream_read_timeout(_request_started_at: Instant) -> std::time::Duration {
+    STREAM_IDLE_TIMEOUT
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+async fn next_stream_item_with_timeout<S>(
+    stream: &mut S,
+    timeout: std::time::Duration,
+) -> Result<Option<S::Item>, ()>
+where
+    S: futures::Stream + Unpin,
+{
+    tokio::time::timeout(timeout, stream.next())
+        .await
+        .map_err(|_| ())
+}
+
+async fn next_stream_item_with_idle_timeout<S>(stream: &mut S) -> Result<Option<S::Item>, ()>
+where
+    S: futures::Stream + Unpin,
+{
+    next_stream_item_with_timeout(stream, stream_read_timeout(Instant::now())).await
+}
+
+fn stream_contains_terminal_message_stop(data: &[u8]) -> bool {
+    String::from_utf8_lossy(data).lines().any(|line| {
+        let line = line.trim();
+        if line == "event: message_stop" {
+            return true;
+        }
+
+        line.strip_prefix("data:")
+            .and_then(|payload| serde_json::from_str::<Value>(payload.trim()).ok())
+            .and_then(|event| event.get("type").and_then(Value::as_str).map(str::to_owned))
+            .as_deref()
+            == Some("message_stop")
+    })
+}
 
 /// Extension type for propagating trace_id across the request lifecycle.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -43,9 +85,75 @@ fn mapped_model_for_log(route_model: Option<&str>, response_model: Option<&str>)
     }
 }
 
+fn extract_message_start_id(event: &Value) -> Option<String> {
+    if event.get("type").and_then(Value::as_str) != Some("message_start") {
+        return None;
+    }
+
+    event
+        .get("message")
+        .and_then(|message| message.get("id"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn usage_token(usage: &Value, names: &[&str]) -> Option<u32> {
+    names
+        .iter()
+        .find_map(|name| usage.get(*name).and_then(Value::as_u64))
+        .map(|value| value.min(u32::MAX as u64) as u32)
+}
+
+/// Merge cumulative usage fields without clearing values captured by an
+/// earlier SSE event. Anthropic sends input usage at message_start and output
+/// usage at message_delta, while OpenAI and Gemini commonly send both at once.
+fn merge_usage_tokens(log: &mut ProxyRequestLog, usage: &Value) {
+    let input = usage_token(
+        usage,
+        &["prompt_tokens", "input_tokens", "promptTokenCount"],
+    );
+    let output = usage_token(
+        usage,
+        &["completion_tokens", "output_tokens", "candidatesTokenCount"],
+    );
+
+    if let Some(input) = input {
+        let cache_creation = usage_token(usage, &["cache_creation_input_tokens"]).unwrap_or(0);
+        let cache_read = usage_token(usage, &["cache_read_input_tokens"]).unwrap_or(0);
+        log.input_tokens = Some(
+            input
+                .saturating_add(cache_creation)
+                .saturating_add(cache_read),
+        );
+    }
+    if let Some(output) = output {
+        log.output_tokens = Some(output);
+    }
+
+    if input.is_none()
+        && output.is_none()
+        && log.input_tokens.is_none()
+        && log.output_tokens.is_none()
+    {
+        log.output_tokens = usage_token(usage, &["total_tokens", "totalTokenCount"]);
+    }
+}
+
 fn complete_upstream_response(log: &mut ProxyRequestLog, response: String) {
     if log.upstream_request_body.is_some() && log.upstream_response_body.is_none() {
         log.upstream_response_body = Some(response);
+    }
+}
+
+fn mark_missing_upstream_response(log: &mut ProxyRequestLog) {
+    if log.provider_name.is_some()
+        && log.upstream_request_body.is_some()
+        && log.upstream_response_body.is_none()
+    {
+        log.upstream_response_body = Some(
+            "[Upstream response not captured: no response bytes were recorded from the provider]"
+                .into(),
+        );
     }
 }
 
@@ -246,13 +354,16 @@ pub async fn monitor_middleware(
         None
     };
     let route_metadata = if let Some(ref requested_model) = model {
-        let mapped = crate::proxy::common::model_mapping::resolve_model_route(
-            requested_model,
-            &*state.custom_mapping.read().await,
-        );
-        let router = state.provider_router.read().await;
-        if !router.is_empty() {
-            let selection = router.select(&mapped, None);
+        let preferred_protocol = match protocol.as_deref() {
+            Some("anthropic") => crate::proxy::config::ProviderProtocol::AnthropicPassthrough,
+            Some("gemini") => crate::proxy::config::ProviderProtocol::GeminiV1Internal,
+            _ => crate::proxy::config::ProviderProtocol::OpenAICompatible,
+        };
+        let route_resolution = state
+            .resolve_model_for_protocol(requested_model, preferred_protocol)
+            .await;
+        if let Some(selection) = route_resolution.provider_selection {
+            let mapped = route_resolution.model;
             let provider = selection.provider;
             let upstream_url = if provider.base_url.is_empty() {
                 None
@@ -273,13 +384,14 @@ pub async fn monitor_middleware(
                     match provider.protocol {
                         crate::proxy::config::ProviderProtocol::AnthropicPassthrough => "anthropic",
                         crate::proxy::config::ProviderProtocol::OpenAICompatible => "openai",
+                        crate::proxy::config::ProviderProtocol::CodexResponses => "codex",
                         crate::proxy::config::ProviderProtocol::GeminiV1Internal => "gemini",
                     }
                     .to_string(),
                 ),
             ))
         } else {
-            Some((mapped, None, None, None, None))
+            Some((route_resolution.model, None, None, None, None))
         }
     } else {
         None
@@ -313,6 +425,8 @@ pub async fn monitor_middleware(
                 error: None,
                 request_body: None,
                 response_body: None,
+                raw_response_body: None,
+                message_start_id: None,
                 input_tokens: None,
                 output_tokens: None,
                 protocol: protocol_clone,
@@ -331,7 +445,7 @@ pub async fn monitor_middleware(
         });
     }
 
-    let response = match tokio::time::timeout(MAX_REQUEST_DURATION, next.run(request)).await {
+    let response = match tokio::time::timeout(RESPONSE_HEADER_TIMEOUT, next.run(request)).await {
         Ok(response) => response,
         Err(_) => Response::builder()
             .status(axum::http::StatusCode::GATEWAY_TIMEOUT)
@@ -344,10 +458,7 @@ pub async fn monitor_middleware(
 
     // user_token_identity 已在上面从请求 extensions 中提取
 
-    let duration = start
-        .elapsed()
-        .as_millis()
-        .min(MAX_REQUEST_DURATION_MS as u128) as u64;
+    let duration = elapsed_ms(start);
     let status = response.status().as_u16();
 
     let content_type = response
@@ -369,7 +480,12 @@ pub async fn monitor_middleware(
         .headers()
         .get("X-Provider-Name")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or_else(|| {
+            route_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.1.clone())
+        });
 
     // Extract mapped model from X-Mapped-Model header if present
     let response_mapped_model = response
@@ -387,14 +503,24 @@ pub async fn monitor_middleware(
         .headers()
         .get("X-Upstream-Protocol")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or_else(|| {
+            route_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.4.clone())
+        });
 
     // Extract upstream model from X-Upstream-Model header if present
     let upstream_model = response
         .headers()
         .get("X-Upstream-Model")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or_else(|| {
+            route_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.2.clone())
+        });
 
     // Extract upstream URL — prefer X-Upstream-Path (just the API path), fall back to extracting path from full URL.
     // Note: X-Upstream-Path may be empty when the caller already built the full URL (e.g. OpenAI→Anthropic conversion),
@@ -421,7 +547,75 @@ pub async fn monitor_middleware(
                         Some(url.to_string())
                     }
                 })
+        })
+        .or_else(|| {
+            route_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.3.clone())
         });
+
+    // A provider rate-limit is a route-level signal, not just a request
+    // error. Record it before the response body is consumed so the next
+    // request can exclude this exact provider/protocol/model combination.
+    if status == axum::http::StatusCode::TOO_MANY_REQUESTS.as_u16() {
+        let cooldown_provider_name = provider_name.clone().or_else(|| {
+            route_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.1.clone())
+        });
+        let cooldown_upstream_protocol = upstream_protocol.clone().or_else(|| {
+            route_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.4.clone())
+        });
+        let cooldown_upstream_model = upstream_model.clone().or_else(|| {
+            route_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.2.clone())
+        });
+        if let (Some(provider_name), Some(upstream_protocol), Some(upstream_model)) = (
+            cooldown_provider_name.as_deref(),
+            cooldown_upstream_protocol.as_deref(),
+            cooldown_upstream_model.as_deref(),
+        ) {
+            let router = state.provider_router.read().await;
+            let (provider_key, protocol_key) = router
+                .get_by_name(provider_name)
+                .map(|provider| {
+                    (
+                        provider
+                            .provider_id
+                            .clone()
+                            .unwrap_or_else(|| provider.name.clone()),
+                        // A logical provider may expose several protocol
+                        // variants under the same name. The response header
+                        // identifies the actual variant used for this call.
+                        normalize_upstream_protocol(upstream_protocol),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        provider_name.to_string(),
+                        normalize_upstream_protocol(upstream_protocol),
+                    )
+                });
+            drop(router);
+
+            let retry_after_secs = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            let key = crate::proxy::common::model_cooldown::CooldownKey {
+                provider: provider_key,
+                protocol: protocol_key,
+                model: upstream_model.to_string(),
+            };
+            state
+                .model_cooldown
+                .mark_cooldown_for(key, "upstream HTTP 429", retry_after_secs);
+        }
+    }
 
     // Client IP has been extracted at the beginning of the function
 
@@ -451,6 +645,8 @@ pub async fn monitor_middleware(
         error: None,
         request_body: request_body_str,
         response_body: None,
+        raw_response_body: None,
+        message_start_id: None,
         input_tokens: None,
         output_tokens: None,
         protocol,
@@ -473,10 +669,10 @@ pub async fn monitor_middleware(
             let mut all_stream_data = Vec::new();
             let mut last_few_bytes = Vec::new();
             let mut stream_timed_out = false;
+            let mut message_start_id: Option<String> = None;
 
             loop {
-                let remaining = MAX_REQUEST_DURATION.saturating_sub(start.elapsed());
-                let chunk_res = match tokio::time::timeout(remaining, stream.next()).await {
+                let chunk_res = match next_stream_item_with_idle_timeout(&mut stream).await {
                     Ok(Some(chunk_res)) => chunk_res,
                     Ok(None) => break,
                     Err(_) => {
@@ -495,14 +691,23 @@ pub async fn monitor_middleware(
                             last_few_bytes.drain(0..last_few_bytes.len() - 8192);
                         }
                     }
-                    let _ = tx.send(Ok::<_, axum::Error>(chunk)).await;
+                    if tx.send(Ok::<_, axum::Error>(chunk)).await.is_err()
+                        || stream_contains_terminal_message_stop(&all_stream_data)
+                    {
+                        break;
+                    }
                 } else if let Err(e) = chunk_res {
+                    log.error = Some(format!("Stream error: {}", e));
                     let _ = tx.send(Err(axum::Error::new(e))).await;
+                    break;
                 }
             }
 
             if stream_timed_out {
-                log.error = Some("Request timed out after 30 seconds".to_string());
+                log.error = Some(format!(
+                    "Stream idle timeout after {} seconds",
+                    STREAM_IDLE_TIMEOUT.as_secs()
+                ));
             }
 
             if let Some(final_trace) = state.upstream_trace_cache.take(&llm_trace_id).await {
@@ -513,6 +718,19 @@ pub async fn monitor_middleware(
                     log.upstream_response_body = final_trace.response_body;
                 }
             }
+
+            // Preserve the exact SSE payload sent through the client-facing
+            // response stream. `response_body` below is the accumulated,
+            // human-readable JSON summary and must remain separate from this
+            // raw transport representation.
+            log.raw_response_body = if all_stream_data.len() <= MAX_RESPONSE_LOG_SIZE {
+                Some(String::from_utf8_lossy(&all_stream_data).into_owned())
+            } else {
+                Some(format!(
+                    "[Response too large (>100MB): raw SSE omitted; {} bytes]",
+                    all_stream_data.len()
+                ))
+            };
 
             // Parse and consolidate stream data into readable format
             if let Ok(full_response) = std::str::from_utf8(&all_stream_data) {
@@ -602,22 +820,22 @@ pub async fn monitor_middleware(
 
                         // Claude/Anthropic format: content_block_start, content_block_delta, etc.
                         let msg_type = json.get("type").and_then(|t| t.as_str());
+                        if let Some(error_message) = json
+                            .get("error")
+                            .and_then(|error| error.get("message"))
+                            .and_then(Value::as_str)
+                        {
+                            log.error = Some(error_message.to_string());
+                        }
+                        if message_start_id.is_none() {
+                            message_start_id = extract_message_start_id(&json);
+                        }
                         match msg_type {
                             Some("message_start") => {
-                                // [FIX] Extract input_tokens from message_start event
                                 if let Some(usage) =
                                     json.get("message").and_then(|m| m.get("usage"))
                                 {
-                                    if let Some(input_tokens) =
-                                        usage.get("input_tokens").and_then(|v| v.as_u64())
-                                    {
-                                        log.input_tokens = Some(input_tokens as u32);
-                                    }
-                                    if let Some(output_tokens) =
-                                        usage.get("output_tokens").and_then(|v| v.as_u64())
-                                    {
-                                        log.output_tokens = Some(output_tokens as u32);
-                                    }
+                                    merge_usage_tokens(&mut log, usage);
                                 }
                             }
                             Some("content_block_start") => {
@@ -680,39 +898,6 @@ pub async fn monitor_middleware(
                                     }
                                 }
                             }
-                            Some("message_delta") => {
-                                // [FIX] Extract usage from root level AND delta level
-                                // Anthropic SSE puts usage at root of message_delta, not inside delta
-                                if let Some(usage) = json
-                                    .get("usage")
-                                    .or_else(|| json.get("delta").and_then(|d| d.get("usage")))
-                                {
-                                    if let Some(input_tokens) =
-                                        usage.get("input_tokens").and_then(|v| v.as_u64())
-                                    {
-                                        log.input_tokens = Some(input_tokens as u32);
-                                    }
-                                    if let Some(output_tokens) =
-                                        usage.get("output_tokens").and_then(|v| v.as_u64())
-                                    {
-                                        log.output_tokens = Some(output_tokens as u32);
-                                    }
-                                    if let Some(cache_creation) = usage
-                                        .get("cache_creation_input_tokens")
-                                        .and_then(|v| v.as_u64())
-                                    {
-                                        log.input_tokens =
-                                            log.input_tokens.map(|v| v + cache_creation as u32);
-                                    }
-                                    if let Some(cache_read) = usage
-                                        .get("cache_read_input_tokens")
-                                        .and_then(|v| v.as_u64())
-                                    {
-                                        log.input_tokens =
-                                            log.input_tokens.map(|v| v + cache_read as u32);
-                                    }
-                                }
-                            }
                             _ => {}
                         }
 
@@ -740,28 +925,10 @@ pub async fn monitor_middleware(
                         if let Some(usage) = json
                             .get("usage")
                             .or(json.get("usageMetadata"))
+                            .or_else(|| json.get("delta").and_then(|d| d.get("usage")))
                             .or(json.get("response").and_then(|r| r.get("usage")))
                         {
-                            log.input_tokens = usage
-                                .get("prompt_tokens")
-                                .or(usage.get("input_tokens"))
-                                .or(usage.get("promptTokenCount"))
-                                .and_then(|v| v.as_u64())
-                                .map(|v| v as u32);
-                            log.output_tokens = usage
-                                .get("completion_tokens")
-                                .or(usage.get("output_tokens"))
-                                .or(usage.get("candidatesTokenCount"))
-                                .and_then(|v| v.as_u64())
-                                .map(|v| v as u32);
-
-                            if log.input_tokens.is_none() && log.output_tokens.is_none() {
-                                log.output_tokens = usage
-                                    .get("total_tokens")
-                                    .or(usage.get("totalTokenCount"))
-                                    .and_then(|v| v.as_u64())
-                                    .map(|v| v as u32);
-                            }
+                            merge_usage_tokens(&mut log, usage);
                         }
                     }
                 }
@@ -827,18 +994,7 @@ pub async fn monitor_middleware(
                                     .or(json.get("usageMetadata"))
                                     .or(json.get("response").and_then(|r| r.get("usage")))
                                 {
-                                    log.input_tokens = usage
-                                        .get("prompt_tokens")
-                                        .or(usage.get("input_tokens"))
-                                        .or(usage.get("promptTokenCount"))
-                                        .and_then(|v| v.as_u64())
-                                        .map(|v| v as u32);
-                                    log.output_tokens = usage
-                                        .get("completion_tokens")
-                                        .or(usage.get("output_tokens"))
-                                        .or(usage.get("candidatesTokenCount"))
-                                        .and_then(|v| v.as_u64())
-                                        .map(|v| v as u32);
+                                    merge_usage_tokens(&mut log, usage);
                                     break;
                                 }
                             }
@@ -850,6 +1006,10 @@ pub async fn monitor_middleware(
             if log.status >= 400 {
                 log.error = Some("Stream Error or Failed".to_string());
             }
+
+            log.message_start_id = message_start_id;
+            mark_missing_upstream_response(&mut log);
+            log.duration = elapsed_ms(start);
 
             // Record User Token Usage
             record_user_token_usage(&user_token_identity, &log, user_agent.clone());
@@ -870,43 +1030,34 @@ pub async fn monitor_middleware(
             Ok(bytes) => {
                 if let Ok(s) = std::str::from_utf8(&bytes) {
                     if let Ok(json) = serde_json::from_str::<Value>(s) {
-                        // 支持 OpenAI "usage" 或 Gemini "usageMetadata"
-                        if let Some(usage) = json.get("usage").or(json.get("usageMetadata")) {
-                            log.input_tokens = usage
-                                .get("prompt_tokens")
-                                .or(usage.get("input_tokens"))
-                                .or(usage.get("promptTokenCount"))
-                                .and_then(|v| v.as_u64())
-                                .map(|v| v as u32);
-                            log.output_tokens = usage
-                                .get("completion_tokens")
-                                .or(usage.get("output_tokens"))
-                                .or(usage.get("candidatesTokenCount"))
-                                .and_then(|v| v.as_u64())
-                                .map(|v| v as u32);
-
-                            if log.input_tokens.is_none() && log.output_tokens.is_none() {
-                                log.output_tokens = usage
-                                    .get("total_tokens")
-                                    .or(usage.get("totalTokenCount"))
-                                    .and_then(|v| v.as_u64())
-                                    .map(|v| v as u32);
-                            }
+                        log.message_start_id = json
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned);
+                        if let Some(usage) =
+                            json.get("usage").or(json.get("usageMetadata")).or(json
+                                .get("response")
+                                .and_then(|response| response.get("usage")))
+                        {
+                            merge_usage_tokens(&mut log, usage);
                         }
                     }
                     log.response_body = Some(s.to_string());
                     complete_upstream_response(&mut log, s.to_string());
+                    mark_missing_upstream_response(&mut log);
                 } else {
                     log.response_body = Some("[Binary Response Data]".to_string());
                     complete_upstream_response(
                         &mut log,
                         format!("[Binary Response Data: {} bytes]", bytes.len()),
                     );
+                    mark_missing_upstream_response(&mut log);
                 }
 
                 if log.status >= 400 {
                     log.error = log.response_body.clone();
                 }
+                log.duration = elapsed_ms(start);
 
                 // Record User Token Usage
                 record_user_token_usage(&user_token_identity, &log, user_agent.clone());
@@ -919,6 +1070,8 @@ pub async fn monitor_middleware(
             }
             Err(_) => {
                 log.response_body = Some("[Response too large (>100MB)]".to_string());
+                mark_missing_upstream_response(&mut log);
+                log.duration = elapsed_ms(start);
 
                 // Record User Token Usage (even if too large)
                 record_user_token_usage(&user_token_identity, &log, user_agent.clone());
@@ -932,6 +1085,8 @@ pub async fn monitor_middleware(
         }
     } else {
         log.response_body = Some(format!("[{}]", content_type));
+        mark_missing_upstream_response(&mut log);
+        log.duration = elapsed_ms(start);
 
         // Record User Token Usage
         record_user_token_usage(&user_token_identity, &log, user_agent);
@@ -944,10 +1099,26 @@ pub async fn monitor_middleware(
     }
 }
 
+fn normalize_upstream_protocol(protocol: &str) -> String {
+    match protocol {
+        "openai" | "openai_compat" | "openai_responses" => "open_a_i_compatible".to_string(),
+        "anthropic" => "anthropic_passthrough".to_string(),
+        "codex" | "codex_responses" => "codex_responses".to_string(),
+        "gemini" | "gemini_v1" => "gemini_v1_internal".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{complete_upstream_response, mapped_model_for_log, mark_unobserved_provider_call};
+    use super::{
+        complete_upstream_response, extract_message_start_id, mapped_model_for_log,
+        mark_missing_upstream_response, mark_unobserved_provider_call, merge_usage_tokens,
+        next_stream_item_with_timeout, stream_contains_terminal_message_stop, stream_read_timeout,
+        STREAM_IDLE_TIMEOUT,
+    };
     use crate::proxy::monitor::ProxyRequestLog;
+    use bytes::Bytes;
 
     #[test]
     fn mapped_model_keeps_route_id_and_uses_final_upstream_model() {
@@ -987,5 +1158,120 @@ mod tests {
             .unwrap()
             .contains("not sent or not captured"));
         assert!(log.upstream_response_body.is_some());
+    }
+
+    #[test]
+    fn selected_provider_with_request_but_missing_response_is_diagnosable() {
+        let mut log = ProxyRequestLog {
+            provider_name: Some("configured-provider".to_string()),
+            upstream_request_body: Some("request".to_string()),
+            ..Default::default()
+        };
+
+        mark_missing_upstream_response(&mut log);
+
+        assert!(log
+            .upstream_response_body
+            .as_deref()
+            .unwrap()
+            .contains("not captured"));
+    }
+
+    #[test]
+    fn extracts_message_start_id_from_anthropic_event() {
+        let event = serde_json::json!({
+            "type": "message_start",
+            "message": { "id": "msg_01abc" }
+        });
+
+        assert_eq!(
+            extract_message_start_id(&event),
+            Some("msg_01abc".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_non_message_start_events_and_missing_ids() {
+        let other_event = serde_json::json!({
+            "type": "content_block_delta",
+            "delta": { "text": "hello" }
+        });
+        let missing_id = serde_json::json!({
+            "type": "message_start",
+            "message": {}
+        });
+
+        assert_eq!(extract_message_start_id(&other_event), None);
+        assert_eq!(extract_message_start_id(&missing_id), None);
+    }
+
+    #[test]
+    fn streaming_read_timeout_does_not_shrink_after_thirty_seconds() {
+        let request_started_at = std::time::Instant::now() - std::time::Duration::from_secs(31);
+
+        assert_eq!(stream_read_timeout(request_started_at), STREAM_IDLE_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn streaming_read_still_times_out_when_upstream_is_idle() {
+        let (_sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
+        let read = next_stream_item_with_timeout(&mut stream, std::time::Duration::from_millis(10));
+
+        assert!(read.await.is_err());
+    }
+
+    #[test]
+    fn terminal_message_stop_can_end_a_provider_stream_without_waiting_for_socket_close() {
+        let complete = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let data_only = b"data: {\"type\":\"message_stop\"}\n\n";
+        let incomplete =
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n";
+
+        assert!(stream_contains_terminal_message_stop(complete));
+        assert!(stream_contains_terminal_message_stop(data_only));
+        assert!(!stream_contains_terminal_message_stop(incomplete));
+    }
+
+    #[test]
+    fn anthropic_output_delta_does_not_erase_input_tokens_from_message_start() {
+        let mut log = ProxyRequestLog {
+            input_tokens: Some(120),
+            ..Default::default()
+        };
+        let usage = serde_json::json!({ "output_tokens": 35 });
+
+        merge_usage_tokens(&mut log, &usage);
+
+        assert_eq!(log.input_tokens, Some(120));
+        assert_eq!(log.output_tokens, Some(35));
+    }
+
+    #[test]
+    fn usage_merging_understands_openai_anthropic_and_gemini_names() {
+        let cases = [
+            (
+                serde_json::json!({"prompt_tokens": 10, "completion_tokens": 2}),
+                10,
+                2,
+            ),
+            (
+                serde_json::json!({"input_tokens": 11, "output_tokens": 3}),
+                11,
+                3,
+            ),
+            (
+                serde_json::json!({"promptTokenCount": 12, "candidatesTokenCount": 4}),
+                12,
+                4,
+            ),
+        ];
+
+        for (usage, expected_input, expected_output) in cases {
+            let mut log = ProxyRequestLog::default();
+            merge_usage_tokens(&mut log, &usage);
+            assert_eq!(log.input_tokens, Some(expected_input));
+            assert_eq!(log.output_tokens, Some(expected_output));
+        }
     }
 }

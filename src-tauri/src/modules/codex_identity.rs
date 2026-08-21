@@ -1,3 +1,5 @@
+use base64::Engine;
+
 const MAX_IDENTITY_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -109,6 +111,49 @@ impl CodexIdentityClient {
             serde_json::from_slice(&bytes).map_err(|_| CodexIdentityError::InvalidResponse)?;
         response.into_verified()
     }
+
+    /// Extract the identity claims included in the OAuth `id_token`.
+    ///
+    /// Codex includes the ChatGPT account and organization claims in this
+    /// token when `id_token_add_organizations=true` is requested. The token
+    /// has already been obtained from the OAuth token endpoint; this method
+    /// only reads metadata for account display and fingerprinting. Upstream
+    /// requests continue to use the access token, never these claims.
+    pub fn verify_id_token(
+        &self,
+        id_token: &str,
+    ) -> Result<VerifiedCodexIdentity, CodexIdentityError> {
+        let mut segments = id_token.split('.');
+        let header = segments.next().filter(|value| !value.is_empty());
+        let payload = segments.next().filter(|value| !value.is_empty());
+        let signature = segments.next().filter(|value| !value.is_empty());
+        if header.is_none() || payload.is_none() || signature.is_none() || segments.next().is_some()
+        {
+            return Err(CodexIdentityError::InvalidResponse);
+        }
+
+        let Some(payload) = payload else {
+            return Err(CodexIdentityError::InvalidResponse);
+        };
+        let payload = decode_jwt_segment(payload)?;
+        let claims: UserInfoResponse =
+            serde_json::from_slice(&payload).map_err(|_| CodexIdentityError::InvalidResponse)?;
+        claims.into_verified()
+    }
+}
+
+fn decode_jwt_segment(segment: &str) -> Result<Vec<u8>, CodexIdentityError> {
+    let remainder = segment.len() % 4;
+    if remainder == 1 {
+        return Err(CodexIdentityError::InvalidResponse);
+    }
+    let mut padded = segment.to_string();
+    if remainder != 0 {
+        padded.extend(std::iter::repeat_n('=', 4 - remainder));
+    }
+    base64::engine::general_purpose::URL_SAFE
+        .decode(padded)
+        .map_err(|_| CodexIdentityError::InvalidResponse)
 }
 
 fn validate_endpoint(value: &str, allow_http: bool) -> Result<url::Url, CodexIdentityError> {
@@ -300,6 +345,58 @@ mod tests {
             authorization.lock().unwrap().as_deref(),
             Some("Bearer access-canary")
         );
+    }
+
+    #[test]
+    fn verifies_codex_identity_from_id_token_claims_without_userinfo() {
+        let client =
+            CodexIdentityClient::for_test_http("http://127.0.0.1:1/userinfo".to_string()).unwrap();
+        let id_token = test_id_token(json!({
+            "sub": "user-subject",
+            "email": "user@example.com",
+            "name": "Example User",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-123",
+                "chatgpt_plan_type": "plus",
+                "organizations": [
+                    {"id": "workspace-secondary", "is_default": false},
+                    {"id": "workspace-primary", "is_default": true}
+                ]
+            }
+        }));
+
+        let identity = client.verify_id_token(&id_token).unwrap();
+
+        assert_eq!(identity.subject, "account-123");
+        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
+        assert_eq!(identity.display_name.as_deref(), Some("Example User"));
+        assert_eq!(identity.workspace.as_deref(), Some("workspace-primary"));
+        assert_eq!(identity.plan.as_deref(), Some("plus"));
+    }
+
+    #[test]
+    fn rejects_malformed_codex_id_token() {
+        let client =
+            CodexIdentityClient::for_test_http("http://127.0.0.1:1/userinfo".to_string()).unwrap();
+
+        assert!(matches!(
+            client.verify_id_token("not-a-jwt"),
+            Err(CodexIdentityError::InvalidResponse)
+        ));
+    }
+
+    fn test_id_token(claims: serde_json::Value) -> String {
+        use base64::Engine;
+
+        let encode = |value: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&value).unwrap())
+        };
+        format!(
+            "{}.{}.signature",
+            encode(json!({"alg": "RS256", "typ": "JWT"})),
+            encode(claims)
+        )
     }
 
     #[tokio::test]

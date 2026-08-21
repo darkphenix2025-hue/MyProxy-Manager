@@ -4,7 +4,9 @@ use crate::modules::codex_auth::{
     CodexOAuthConfig,
 };
 use crate::modules::codex_loopback::{CodexLoopbackError, CodexLoopbackListener};
-use crate::modules::codex_tokens::{CodexTokenClient, CodexTokenError, CodexTokenVault};
+use crate::modules::codex_tokens::{
+    CodexRefreshCoordinator, CodexTokenClient, CodexTokenError, CodexTokenVault,
+};
 use crate::modules::secret_store::SecretStore;
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +54,7 @@ pub struct CodexLoginService<S: SecretStore> {
     sessions: std::sync::Arc<CodexAuthSessionManager>,
     token_client: CodexTokenClient,
     vault: CodexTokenVault<S>,
+    refresh: CodexRefreshCoordinator<S>,
     listeners: std::sync::Arc<dashmap::DashMap<uuid::Uuid, tokio_util::sync::CancellationToken>>,
     start_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     lifecycle_lock: std::sync::Arc<parking_lot::Mutex<()>>,
@@ -61,13 +64,43 @@ impl<S: SecretStore> CodexLoginService<S> {
     pub fn planned_secret_ref(&self, session_id: uuid::Uuid) -> Result<SecretRef, CodexLoginError> {
         self.vault.planned_ref(session_id).map_err(Into::into)
     }
+
+    pub async fn refresh_if_expiring(
+        &self,
+        secret_ref: &SecretRef,
+        now: i64,
+        refresh_skew_seconds: i64,
+    ) -> Result<(), CodexLoginError> {
+        self.refresh
+            .refresh_if_expiring(secret_ref, now, refresh_skew_seconds)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn refresh_now(
+        &self,
+        secret_ref: &SecretRef,
+        now: i64,
+    ) -> Result<(), CodexLoginError> {
+        self.refresh
+            .refresh_now(secret_ref, now)
+            .await
+            .map_err(Into::into)
+    }
+
     pub fn new(config: CodexOAuthConfig, store: S) -> Result<Self, CodexLoginError> {
         let token_client = CodexTokenClient::new(&config.token_endpoint)?;
+        let refresh = CodexRefreshCoordinator::new(
+            config.client_id.clone(),
+            token_client.clone(),
+            store.clone(),
+        );
         Ok(Self {
             config,
             sessions: std::sync::Arc::new(CodexAuthSessionManager::default()),
             token_client,
             vault: CodexTokenVault::new(store),
+            refresh,
             listeners: std::sync::Arc::new(dashmap::DashMap::new()),
             start_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             lifecycle_lock: std::sync::Arc::new(parking_lot::Mutex::new(())),
@@ -80,11 +113,17 @@ impl<S: SecretStore> CodexLoginService<S> {
         token_client: CodexTokenClient,
         store: S,
     ) -> Self {
+        let refresh = CodexRefreshCoordinator::new(
+            config.client_id.clone(),
+            token_client.clone(),
+            store.clone(),
+        );
         Self {
             config,
             sessions: std::sync::Arc::new(CodexAuthSessionManager::default()),
             token_client,
             vault: CodexTokenVault::new(store),
+            refresh,
             listeners: std::sync::Arc::new(dashmap::DashMap::new()),
             start_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             lifecycle_lock: std::sync::Arc::new(parking_lot::Mutex::new(())),

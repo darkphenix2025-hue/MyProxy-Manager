@@ -228,6 +228,7 @@ pub async fn forward_anthropic_json(
     };
 
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let client_wants_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
     let mut out = Response::builder().status(status);
     if let Some(ct) = resp.headers().get(header::CONTENT_TYPE) {
@@ -235,9 +236,24 @@ pub async fn forward_anthropic_json(
     }
 
     // Stream response body to the client (covers SSE and non-SSE).
-    let stream = resp.bytes_stream().map(|chunk| match chunk {
-        Ok(b) => Ok::<Bytes, std::io::Error>(b),
-        Err(e) => Ok(Bytes::from(format!("Upstream stream error: {}", e))),
+    let stream = resp.bytes_stream().scan(false, move |errored, chunk| {
+        if *errored {
+            return std::future::ready(None);
+        }
+
+        let result = match chunk {
+            Ok(bytes) => Ok::<Bytes, std::io::Error>(bytes),
+            Err(error) => {
+                *errored = true;
+                tracing::error!("Anthropic upstream stream error: {}", error);
+                if client_wants_stream {
+                    Ok(crate::proxy::stream_error::anthropic_sse_error(&error))
+                } else {
+                    Err(std::io::Error::other(error))
+                }
+            }
+        };
+        std::future::ready(Some(result))
     });
 
     out.body(Body::from_stream(stream)).unwrap_or_else(|_| {
@@ -358,6 +374,7 @@ pub async fn forward_anthropic_with_provider(
     };
 
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let client_wants_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
     let mut out = Response::builder().status(status);
     if let Some(ct) = resp.headers().get(header::CONTENT_TYPE) {
@@ -378,9 +395,34 @@ pub async fn forward_anthropic_with_provider(
         out = out.header("X-Upstream-URL", target_path);
     }
 
-    let stream = resp.bytes_stream().map(|chunk| match chunk {
-        Ok(b) => Ok::<Bytes, std::io::Error>(b),
-        Err(e) => Ok(Bytes::from(format!("Upstream stream error: {}", e))),
+    let provider_name_for_stream = provider_name.to_string();
+    let upstream_stream = crate::proxy::upstream_trace::capture_response_stream(
+        Box::pin(resp.bytes_stream()),
+        state.upstream_trace_cache.clone(),
+        llm_trace_id.map(str::to_owned),
+    );
+    let stream = upstream_stream.scan(false, move |errored, chunk| {
+        if *errored {
+            return std::future::ready(None);
+        }
+
+        let result = match chunk {
+            Ok(bytes) => Ok::<Bytes, std::io::Error>(bytes),
+            Err(error) => {
+                *errored = true;
+                tracing::error!(
+                    provider = %provider_name_for_stream,
+                    "Anthropic-compatible upstream stream error: {}",
+                    error
+                );
+                if client_wants_stream {
+                    Ok(crate::proxy::stream_error::anthropic_sse_error(&error))
+                } else {
+                    Err(std::io::Error::other(error))
+                }
+            }
+        };
+        std::future::ready(Some(result))
     });
 
     out.body(Body::from_stream(stream)).unwrap_or_else(|_| {

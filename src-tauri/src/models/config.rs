@@ -2,6 +2,12 @@ use crate::modules::cloudflared::CloudflaredConfig;
 use crate::proxy::ProxyConfig;
 use serde::{Deserialize, Serialize};
 
+pub const MENU_VISIBILITY_DEFAULTS_VERSION: u8 = 1;
+
+pub fn default_hidden_menu_items() -> Vec<String> {
+    vec!["/token-stats".to_string(), "/user-token".to_string()]
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -28,8 +34,14 @@ pub struct AppConfig {
     pub circuit_breaker: CircuitBreakerConfig, // [NEW] Circuit breaker configuration
     #[serde(default)]
     pub hidden_menu_items: Vec<String>, // Hidden menu item path list
+    #[serde(default = "default_menu_visibility_version")]
+    pub menu_visibility_version: u8,
     #[serde(default)]
     pub cloudflared: CloudflaredConfig, // [NEW] Cloudflared configuration
+}
+
+fn default_menu_visibility_version() -> u8 {
+    MENU_VISIBILITY_DEFAULTS_VERSION
 }
 
 /// Scheduled warmup configuration
@@ -186,7 +198,8 @@ impl AppConfig {
             quota_protection: QuotaProtectionConfig::default(),
             pinned_quota_models: PinnedQuotaModelsConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
-            hidden_menu_items: Vec::new(),
+            hidden_menu_items: default_hidden_menu_items(),
+            menu_visibility_version: MENU_VISIBILITY_DEFAULTS_VERSION,
             cloudflared: CloudflaredConfig::default(),
         }
     }
@@ -195,5 +208,20 @@ impl AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    #[test]
+    fn new_config_hides_optional_token_menus_by_default() {
+        let config = AppConfig::new();
+
+        assert_eq!(
+            config.hidden_menu_items,
+            vec!["/token-stats".to_string(), "/user-token".to_string()]
+        );
     }
 }

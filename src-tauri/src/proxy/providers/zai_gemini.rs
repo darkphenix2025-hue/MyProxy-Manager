@@ -164,15 +164,41 @@ pub async fn forward_gemini_v1internal_with_provider(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.bytes().await.unwrap_or_default();
-        return (status, String::from_utf8_lossy(&error_body).to_string()).into_response();
+        let error_body = String::from_utf8_lossy(&error_body).into_owned();
+        if let Some(trace_id) = llm_trace_id {
+            state
+                .upstream_trace_cache
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None,
+                        response_body: Some(error_body.clone()),
+                    },
+                )
+                .await;
+        }
+        return Response::builder()
+            .status(status)
+            .header("x-provider-name", &provider.name)
+            .header("x-upstream-protocol", "gemini")
+            .header("x-upstream-model", &mapped_model)
+            .header("x-upstream-url", &provider.base_url)
+            .body(Body::from(error_body))
+            .unwrap_or_else(|_| {
+                (status, "Failed to build provider error response").into_response()
+            });
     }
 
     // Stream the response
     if actual_stream {
         // Always use streaming internally, convert to OpenAI SSE
-        let gemini_stream = response.bytes_stream();
+        let gemini_stream = crate::proxy::upstream_trace::capture_response_stream(
+            Box::pin(response.bytes_stream()),
+            state.upstream_trace_cache.clone(),
+            llm_trace_id.map(str::to_owned),
+        );
         let openai_stream = create_openai_sse_stream(
-            Box::pin(gemini_stream),
+            gemini_stream,
             openai_req.model.clone(),
             String::new(), // session_id not available in provider path
             message_count,
@@ -226,7 +252,7 @@ pub async fn forward_gemini_v1internal_with_provider(
 
         // Write response body to upstream trace cache for non-streaming requests
         if let Some(trace_id) = llm_trace_id {
-            let response_body_str = serde_json::to_string(&openai_resp).ok();
+            let response_body_str = Some(String::from_utf8_lossy(&bytes).into_owned());
             state
                 .upstream_trace_cache
                 .put(
@@ -473,15 +499,41 @@ pub async fn forward_gemini_via_openai_compat(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.bytes().await.unwrap_or_default();
-        return (status, String::from_utf8_lossy(&error_body).to_string()).into_response();
+        let error_body = String::from_utf8_lossy(&error_body).into_owned();
+        if let Some(trace_id) = llm_trace_id {
+            state
+                .upstream_trace_cache
+                .put(
+                    trace_id,
+                    crate::proxy::upstream_trace::UpstreamTrace {
+                        request_body: None,
+                        response_body: Some(error_body.clone()),
+                    },
+                )
+                .await;
+        }
+        return Response::builder()
+            .status(status)
+            .header("x-provider-name", &provider.name)
+            .header("x-upstream-protocol", "openai")
+            .header("x-upstream-model", &mapped_model)
+            .header("x-upstream-url", &url)
+            .body(Body::from(error_body))
+            .unwrap_or_else(|_| {
+                (status, "Failed to build provider error response").into_response()
+            });
     }
 
     if client_wants_stream {
         // Stream: convert OpenAI SSE to Gemini SSE
-        let openai_stream = response.bytes_stream();
+        let openai_stream = crate::proxy::upstream_trace::capture_response_stream(
+            Box::pin(response.bytes_stream()),
+            state.upstream_trace_cache.clone(),
+            llm_trace_id.map(str::to_owned),
+        );
         let gemini_stream = async_stream::stream! {
             use futures::StreamExt;
-            let mut pinned = Box::pin(openai_stream);
+            let mut pinned = openai_stream;
             loop {
                 match pinned.next().await {
                     Some(Ok(bytes)) => {
@@ -534,7 +586,7 @@ pub async fn forward_gemini_via_openai_compat(
 
         // Write response body to upstream trace cache for non-streaming requests
         if let Some(trace_id) = llm_trace_id {
-            let response_body_str = serde_json::to_string(&openai_value).ok();
+            let response_body_str = Some(String::from_utf8_lossy(&bytes).into_owned());
             state
                 .upstream_trace_cache
                 .put(

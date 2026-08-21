@@ -81,24 +81,24 @@ pub async fn handle_audio_transcription(
 
     // 4. ProviderRouter dispatch (new)
     // Resolve model route first so route table mappings apply before provider selection
-    let audio_mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
-        &model,
-        &*state.custom_mapping.read().await,
-    );
-    let router = state.provider_router.read().await;
-    let selection = if !router.is_empty() {
-        let sel = router.select(&audio_mapped_model, None);
-        if router.is_empty() || sel.provider.name.is_empty() {
-            None
-        } else {
-            Some((sel.resolved_model.clone(), sel.provider.clone()))
-        }
-    } else {
-        None
-    };
-    drop(router);
+    let route_resolution = state
+        .resolve_model_for_protocol(
+            &model,
+            crate::proxy::config::ProviderProtocol::OpenAICompatible,
+        )
+        .await;
+    if let Some(error) = route_resolution.cooldown_error.as_ref() {
+        return Ok(state.model_cooldown_error_response(error));
+    }
+    let selection = route_resolution
+        .provider_selection
+        .map(|selection| (selection.resolved_model, selection.provider));
 
     if let Some((resolved_model, provider)) = selection {
+        let provider = state
+            .resolve_provider_auth(provider)
+            .await
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
         match provider.protocol {
             ProviderProtocol::OpenAICompatible => {
                 let max_attempts = 2;
@@ -124,6 +124,19 @@ pub async fn handle_audio_transcription(
                             return Ok(resp);
                         }
                         resp => {
+                            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                                let retry_after = resp
+                                    .headers()
+                                    .get("retry-after")
+                                    .and_then(|value| value.to_str().ok())
+                                    .and_then(|value| value.trim().parse::<u64>().ok());
+                                state.mark_provider_model_cooldown(
+                                    &provider,
+                                    &resolved_model,
+                                    retry_after,
+                                    "upstream HTTP 429",
+                                );
+                            }
                             last_error = format!(
                                 "Provider {} attempt {} failed with status {}",
                                 provider.name,
@@ -141,7 +154,9 @@ pub async fn handle_audio_transcription(
 
                 return Err((StatusCode::BAD_GATEWAY, last_error));
             }
-            ProviderProtocol::GeminiV1Internal | ProviderProtocol::AnthropicPassthrough => {
+            ProviderProtocol::CodexResponses
+            | ProviderProtocol::GeminiV1Internal
+            | ProviderProtocol::AnthropicPassthrough => {
                 // Fall through to TokenManager path
             }
         }

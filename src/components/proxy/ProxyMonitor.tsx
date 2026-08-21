@@ -52,251 +52,530 @@ const TruncatableText: React.FC<TruncatableTextProps> = ({ text, maxLength, clas
     );
 };
 
-/** 行级 Diff 对比组件 — 同步滚动，高亮差异行 */
-const DiffView: React.FC<{ left: string; right: string; leftLabel: string; rightLabel: string }> = ({ left, right, leftLabel, rightLabel }) => {
+/** 对齐两侧报文并按行突出差异，兼容 JSON、SSE 和普通文本。 */
+type DiffPayloadMode = 'json' | 'sse-json' | 'raw' | 'empty';
+type DiffRowKind = 'same' | 'changed' | 'left-only' | 'right-only';
+type DiffCompareMode = 'semantic' | 'line';
+
+interface PreparedDiffPayload {
+    lines: string[];
+    semanticEntries: DiffPathEntry[];
+    mode: DiffPayloadMode;
+    totalLines: number;
+    truncated: boolean;
+    semanticTotal: number;
+    semanticTruncated: boolean;
+    structured: boolean;
+    isSse: boolean;
+}
+
+interface DiffPathEntry {
+    path: string;
+    value: string;
+    depth: number;
+}
+
+interface DiffRow {
+    kind: DiffRowKind;
+    left?: string;
+    right?: string;
+    leftNumber?: number;
+    rightNumber?: number;
+}
+
+interface DiffViewProps {
+    left: string;
+    right: string;
+    leftLabel: string;
+    rightLabel: string;
+    normalizeSse?: boolean;
+}
+
+const MAX_DIFF_LINES = 12000;
+const MAX_DIFF_FIELDS = 8000;
+
+const isSsePayload = (body: string): boolean => /^(?:event:|data:)/m.test(body);
+
+const isDiffRecord = (value: unknown): value is Record<string, unknown> => (
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+);
+
+const formatDiffScalar = (value: unknown): string => {
+    if (typeof value === 'string') return JSON.stringify(value);
+    if (value === null) return 'null';
+    return JSON.stringify(value) ?? String(value);
+};
+
+/**
+ * Flatten JSON into stable paths. Object keys are sorted so key ordering does
+ * not create false differences; array indexes are retained for positional
+ * content such as messages and tool calls.
+ */
+const flattenDiffValue = (value: unknown): DiffPathEntry[] => {
+    const entries: DiffPathEntry[] = [];
+
+    const visit = (current: unknown, path: string, depth: number): void => {
+        if (Array.isArray(current)) {
+            if (current.length === 0) {
+                entries.push({ path, value: '[]', depth });
+                return;
+            }
+            current.forEach((item, index) => visit(item, `${path}[${index}]`, depth + 1));
+            return;
+        }
+
+        if (isDiffRecord(current)) {
+            const keys = Object.keys(current).sort((left, right) => left.localeCompare(right));
+            if (keys.length === 0) {
+                entries.push({ path, value: '{}', depth });
+                return;
+            }
+            keys.forEach(key => visit(current[key], `${path}.${key}`, depth + 1));
+            return;
+        }
+
+        entries.push({ path, value: formatDiffScalar(current), depth });
+    };
+
+    visit(value, '$', 0);
+    return entries;
+};
+
+const prepareDiffPayload = (body: string, normalizeSse = false): PreparedDiffPayload => {
+    if (!body) {
+        return {
+            lines: [],
+            semanticEntries: [],
+            mode: 'empty',
+            totalLines: 0,
+            truncated: false,
+            semanticTotal: 0,
+            semanticTruncated: false,
+            structured: false,
+            isSse: false,
+        };
+    }
+
+    const sse = isSsePayload(body);
+    let displayBody = body;
+    let mode: DiffPayloadMode = 'raw';
+    let parsedValue: unknown;
+    let structured = false;
+    if (normalizeSse && sse) {
+        parsedValue = aggregateSseResponse(parseSseEvents(body));
+        displayBody = JSON.stringify(parsedValue, null, 2);
+        mode = 'sse-json';
+        structured = true;
+    } else {
+        try {
+            parsedValue = JSON.parse(body);
+            displayBody = JSON.stringify(parsedValue, null, 2);
+            mode = 'json';
+            structured = true;
+        } catch {
+            displayBody = body.replace(/\r\n?/g, '\n');
+        }
+    }
+
+    const allLines = displayBody.split('\n');
+    const truncated = allLines.length > MAX_DIFF_LINES;
+    const lines = truncated
+        ? [
+            ...allLines.slice(0, MAX_DIFF_LINES),
+            `… 已截断 ${allLines.length - MAX_DIFF_LINES} 行 …`,
+        ]
+        : allLines;
+    const allSemanticEntries = structured ? flattenDiffValue(parsedValue) : [];
+    const semanticTruncated = allSemanticEntries.length > MAX_DIFF_FIELDS;
+
+    return {
+        lines,
+        semanticEntries: semanticTruncated
+            ? allSemanticEntries.slice(0, MAX_DIFF_FIELDS)
+            : allSemanticEntries,
+        mode,
+        totalLines: allLines.length,
+        truncated,
+        semanticTotal: allSemanticEntries.length,
+        semanticTruncated,
+        structured,
+        isSse: sse,
+    };
+};
+
+/**
+ * Build a lightweight, ordered line diff. Exact matching lines are used as
+ * anchors, so large SSE payloads do not require an O(n²) LCS matrix.
+ */
+const buildLineDiff = (leftLines: ReadonlyArray<string>, rightLines: ReadonlyArray<string>): DiffRow[] => {
+    const rightPositions = new Map<string, number[]>();
+    rightLines.forEach((line, index) => {
+        const positions = rightPositions.get(line) ?? [];
+        positions.push(index);
+        rightPositions.set(line, positions);
+    });
+
+    const positionCursors = new Map<string, number>();
+    const anchors: Array<{ leftIndex: number; rightIndex: number }> = [];
+    let nextRightIndex = 0;
+
+    leftLines.forEach((line, leftIndex) => {
+        const positions = rightPositions.get(line);
+        if (!positions) return;
+
+        let cursor = positionCursors.get(line) ?? 0;
+        while (cursor < positions.length && positions[cursor] < nextRightIndex) cursor += 1;
+        if (cursor >= positions.length) return;
+
+        const rightIndex = positions[cursor];
+        positionCursors.set(line, cursor + 1);
+        anchors.push({ leftIndex, rightIndex });
+        nextRightIndex = rightIndex + 1;
+    });
+
+    const rows: DiffRow[] = [];
+    const appendSegment = (
+        leftStart: number,
+        leftEnd: number,
+        rightStart: number,
+        rightEnd: number,
+    ): void => {
+        const leftLength = leftEnd - leftStart;
+        const rightLength = rightEnd - rightStart;
+        const pairedLength = Math.min(leftLength, rightLength);
+
+        for (let offset = 0; offset < pairedLength; offset += 1) {
+            const leftNumber = leftStart + offset + 1;
+            const rightNumber = rightStart + offset + 1;
+            const left = leftLines[leftNumber - 1];
+            const right = rightLines[rightNumber - 1];
+            rows.push({
+                kind: left === right ? 'same' : 'changed',
+                left,
+                right,
+                leftNumber,
+                rightNumber,
+            });
+        }
+
+        for (let offset = pairedLength; offset < leftLength; offset += 1) {
+            const leftNumber = leftStart + offset + 1;
+            rows.push({
+                kind: 'left-only',
+                left: leftLines[leftNumber - 1],
+                leftNumber,
+            });
+        }
+
+        for (let offset = pairedLength; offset < rightLength; offset += 1) {
+            const rightNumber = rightStart + offset + 1;
+            rows.push({
+                kind: 'right-only',
+                right: rightLines[rightNumber - 1],
+                rightNumber,
+            });
+        }
+    };
+
+    let leftCursor = 0;
+    let rightCursor = 0;
+    anchors.forEach(({ leftIndex, rightIndex }) => {
+        appendSegment(leftCursor, leftIndex, rightCursor, rightIndex);
+        rows.push({
+            kind: 'same',
+            left: leftLines[leftIndex],
+            right: rightLines[rightIndex],
+            leftNumber: leftIndex + 1,
+            rightNumber: rightIndex + 1,
+        });
+        leftCursor = leftIndex + 1;
+        rightCursor = rightIndex + 1;
+    });
+    appendSegment(leftCursor, leftLines.length, rightCursor, rightLines.length);
+
+    return rows;
+};
+
+interface SemanticDiffRow {
+    kind: DiffRowKind;
+    path: string;
+    left?: DiffPathEntry;
+    right?: DiffPathEntry;
+}
+
+/** Align structured payloads by JSON path instead of physical line position. */
+const buildSemanticDiff = (
+    leftEntries: ReadonlyArray<DiffPathEntry>,
+    rightEntries: ReadonlyArray<DiffPathEntry>,
+): SemanticDiffRow[] => {
+    const leftByPath = new Map(leftEntries.map(entry => [entry.path, entry]));
+    const rightByPath = new Map(rightEntries.map(entry => [entry.path, entry]));
+    const paths = [...leftEntries.map(entry => entry.path)];
+
+    rightEntries.forEach(entry => {
+        if (!leftByPath.has(entry.path)) paths.push(entry.path);
+    });
+
+    return paths.map(path => {
+        const left = leftByPath.get(path);
+        const right = rightByPath.get(path);
+        let kind: DiffRowKind;
+        if (!left) {
+            kind = 'right-only';
+        } else if (!right) {
+            kind = 'left-only';
+        } else {
+            kind = left.value === right.value ? 'same' : 'changed';
+        }
+        return { kind, path, left, right };
+    });
+};
+
+const diffModeLabel = (mode: DiffPayloadMode): string => {
+    if (mode === 'json') return 'JSON 格式化';
+    if (mode === 'sse-json') return 'SSE 合并 JSON';
+    if (mode === 'raw') return '原文逐行';
+    return '无报文';
+};
+
+/** 行级双栏 Diff：保留原文内容，并对 JSON/SSE/文本统一做可读对比。 */
+const DiffView: React.FC<DiffViewProps> = ({ left, right, leftLabel, rightLabel, normalizeSse = false }) => {
     const leftRef = useRef<HTMLDivElement>(null);
     const rightRef = useRef<HTMLDivElement>(null);
     const syncingRef = useRef(false);
+    const [showOnlyChanges, setShowOnlyChanges] = useState(false);
+    const [compareMode, setCompareMode] = useState<DiffCompareMode>('semantic');
+    const rawLeftPayload = useMemo(() => prepareDiffPayload(left), [left]);
+    const rawRightPayload = useMemo(() => prepareDiffPayload(right), [right]);
+    const hasSsePayload = rawLeftPayload.isSse || rawRightPayload.isSse;
+    const [showNormalized, setShowNormalized] = useState(normalizeSse);
 
-    const onSyncScroll = (source: 'left' | 'right') => (e: React.UIEvent<HTMLDivElement>) => {
+    useEffect(() => {
+        setShowNormalized(normalizeSse);
+        setCompareMode('semantic');
+        setShowOnlyChanges(false);
+    }, [left, right, normalizeSse]);
+
+    const useSseNormalization = normalizeSse && hasSsePayload && showNormalized;
+    const leftPayload = useMemo(
+        () => prepareDiffPayload(left, useSseNormalization),
+        [left, useSseNormalization],
+    );
+    const rightPayload = useMemo(
+        () => prepareDiffPayload(right, useSseNormalization),
+        [right, useSseNormalization],
+    );
+    const lineRows = useMemo(
+        () => buildLineDiff(leftPayload.lines, rightPayload.lines),
+        [leftPayload.lines, rightPayload.lines],
+    );
+    const semanticRows = useMemo(
+        () => buildSemanticDiff(leftPayload.semanticEntries, rightPayload.semanticEntries),
+        [leftPayload.semanticEntries, rightPayload.semanticEntries],
+    );
+    const hasStructuredPayload = leftPayload.structured || rightPayload.structured;
+    const effectiveCompareMode: DiffCompareMode = hasStructuredPayload ? compareMode : 'line';
+
+    const onSyncScroll = (source: 'left' | 'right') => (event: React.UIEvent<HTMLDivElement>) => {
         if (syncingRef.current) return;
         syncingRef.current = true;
         const target = source === 'left' ? rightRef.current : leftRef.current;
-        const sourceEl = e.currentTarget;
         if (target) {
-            target.scrollTop = sourceEl.scrollTop;
-            target.scrollLeft = sourceEl.scrollLeft;
+            target.scrollTop = event.currentTarget.scrollTop;
+            target.scrollLeft = event.currentTarget.scrollLeft;
         }
         requestAnimationFrame(() => { syncingRef.current = false; });
     };
 
-    const leftJson = useMemo(() => { try { return JSON.parse(left || '{}'); } catch { return {}; } }, [left]);
-    const rightJson = useMemo(() => { try { return JSON.parse(right || '{}'); } catch { return {}; } }, [right]);
+    const stats = useMemo(() => {
+        const rows = effectiveCompareMode === 'semantic' ? semanticRows : lineRows;
+        return {
+            changed: rows.filter(row => row.kind === 'changed').length,
+            leftOnly: rows.filter(row => row.kind === 'left-only').length,
+            rightOnly: rows.filter(row => row.kind === 'right-only').length,
+            same: rows.filter(row => row.kind === 'same').length,
+        };
+    }, [effectiveCompareMode, lineRows, semanticRows]);
 
-    // Collect all keys from both sides, preferring left order (preserve original)
-    const allKeys = useMemo(() => {
-        const keySet = new Set<string>();
-        const keys: string[] = [];
-        if (typeof leftJson === 'object' && !Array.isArray(leftJson) && leftJson) {
-            Object.keys(leftJson).forEach(k => { if (!keySet.has(k)) { keySet.add(k); keys.push(k); } });
-        }
-        if (typeof rightJson === 'object' && !Array.isArray(rightJson) && rightJson) {
-            Object.keys(rightJson).forEach(k => { if (!keySet.has(k)) { keySet.add(k); keys.push(k); } });
-        }
-        return keys;
-    }, [leftJson, rightJson]);
+    const visibleLineRows = showOnlyChanges
+        ? lineRows.filter(row => row.kind !== 'same')
+        : lineRows;
+    const visibleSemanticRows = showOnlyChanges
+        ? semanticRows.filter(row => row.kind !== 'same')
+        : semanticRows;
 
-    // Deep equality check
-    const deepEqual = (a: any, b: any): boolean => {
-        if (a === b) return true;
-        if (typeof a !== typeof b) return false;
-        if (a === null || b === null) return a === b;
-        if (Array.isArray(a)) {
-            if (!Array.isArray(b) || a.length !== b.length) return false;
-            return a.every((item, i) => deepEqual(item, b[i]));
+    const rowClassName = (row: Pick<DiffRow, 'kind'>, side: 'left' | 'right'): string => {
+        if (row.kind === 'same') return 'bg-transparent';
+        if (row.kind === 'changed') return 'bg-amber-50 dark:bg-amber-900/20';
+        if (row.kind === 'left-only') {
+            return side === 'left'
+                ? 'bg-red-100/70 dark:bg-red-900/30'
+                : 'bg-gray-100/70 dark:bg-base-200/70 opacity-60';
         }
-        if (typeof a === 'object') {
-            const aKeys = Object.keys(a);
-            const bKeys = Object.keys(b);
-            if (aKeys.length !== bKeys.length) return false;
-            return aKeys.every(k => k in b && deepEqual(a[k], b[k]));
-        }
-        return false;
+        return side === 'right'
+            ? 'bg-green-100/70 dark:bg-green-900/30'
+            : 'bg-gray-100/70 dark:bg-base-200/70 opacity-60';
     };
 
-    // Build diff rows
-    type DiffResult = { type: 'same' | 'changed' | 'left-only' | 'right-only' };
-    type DiffRow = { key: string; leftVal: any; rightVal: any; result: DiffResult };
-
-    const buildDiffRows = useMemo(() => {
-        const rows: DiffRow[] = [];
-        for (const key of allKeys) {
-            const hasLeft = key in leftJson;
-            const hasRight = key in rightJson;
-            if (hasLeft && hasRight) {
-                const lv = leftJson[key];
-                const rv = rightJson[key];
-                rows.push({
-                    key,
-                    leftVal: lv,
-                    rightVal: rv,
-                    result: deepEqual(lv, rv) ? { type: 'same' } : { type: 'changed' },
-                });
-            } else if (hasLeft) {
-                rows.push({ key, leftVal: leftJson[key], rightVal: undefined, result: { type: 'left-only' } });
-            } else {
-                rows.push({ key, leftVal: undefined, rightVal: rightJson[key], result: { type: 'right-only' } });
-            }
-        }
-        return rows;
-    }, [allKeys, leftJson, rightJson]);
-
-    const stats = useMemo(() => ({
-        changed: buildDiffRows.filter(r => r.result.type === 'changed').length,
-        leftOnly: buildDiffRows.filter(r => r.result.type === 'left-only').length,
-        rightOnly: buildDiffRows.filter(r => r.result.type === 'right-only').length,
-    }), [buildDiffRows]);
-
-    // Shared expanded state for arrays, keyed by row index
-    const [expandedKeys, setExpandedKeys] = useState<Set<number>>(new Set());
-
-    const toggleExpanded = (idx: number) => setExpandedKeys(prev => {
-        const next = new Set(prev);
-        next.has(idx) ? next.delete(idx) : next.add(idx);
-        return next;
-    });
-
-    const isExpanded = (idx: number) => expandedKeys.has(idx);
-
-    // Render a JSON value with syntax highlighting
-    const renderJsonValue = (val: any, depth: number = 0): React.ReactNode => {
-        if (val === null || val === undefined) return <span className="text-orange-500">null</span>;
-        if (typeof val === 'string') return <span className="text-green-700 dark:text-green-400">{JSON.stringify(val)}</span>;
-        if (typeof val === 'number') return <span className="text-blue-600 dark:text-blue-400">{val}</span>;
-        if (typeof val === 'boolean') return <span className="text-purple-600 dark:text-purple-400">{String(val)}</span>;
-        if (Array.isArray(val)) {
-            if (val.length === 0) return <span className="text-gray-400">[]</span>;
-            return <span className="text-gray-500 dark:text-gray-400">[{val.length} items]</span>;
-        }
-        if (typeof val === 'object') {
-            const keys = Object.keys(val);
-            if (keys.length === 0) return <span className="text-gray-400">{'{}'}</span>;
-            if (depth > 1) return <span className="text-gray-500 dark:text-gray-400">{'{'}{keys.length} keys{'}'}</span>;
-            return (
-                <>
-                    {'{'}
-                    {keys.map((k, idx) => (
-                        <span key={k}>
-                            {'\n'}{'  '.repeat(depth + 1)}<span className="text-blue-700 dark:text-blue-400">"{k}"</span>: {renderJsonValue(val[k], depth + 1)}{idx < keys.length - 1 ? ',' : ''}
-                        </span>
-                    ))}
-                    {'\n'}{'  '.repeat(depth)}{'}'}
-                </>
-            );
-        }
-        return null;
-    };
-
-    // Expandable array renderer with per-item diff comparison
-    const RenderArray: React.FC<{ arr: any[]; otherArr?: any[]; rowIdx: number; depth: number }> = ({ arr, otherArr, rowIdx, depth }) => {
-        const expanded = isExpanded(rowIdx);
-
-        return (
-            <span>
-                <span className="cursor-pointer select-none text-gray-400" onClick={() => toggleExpanded(rowIdx)}>
-                    [
-                </span>
-                {!expanded && (
-                    <span className="cursor-pointer select-none text-gray-500 dark:text-gray-400" onClick={() => toggleExpanded(rowIdx)}>
-                        {'...'} {arr.length} items]
-                    </span>
-                )}
-                {expanded && (
-                    <>
-                        {arr.map((item, i) => {
-                            const isObj = item && typeof item === 'object' && !Array.isArray(item);
-                            const otherItem = otherArr && i < otherArr.length ? otherArr[i] : undefined;
-                            const hasOther = otherArr !== undefined && i < (otherArr?.length ?? 0);
-                            const itemSame = hasOther && deepEqual(item, otherItem);
-                            const itemBg = !hasOther ? 'bg-red-100/50 dark:bg-red-900/30' : itemSame ? '' : 'bg-yellow-50/50 dark:bg-yellow-900/10';
-
-                            return (
-                                <span key={i} className={itemBg}>
-                                    {'\n'}{'  '.repeat(depth + 1)}
-                                    {isObj ? (
-                                        <>
-                                            <span className="text-gray-500 dark:text-gray-400 text-[8px] mr-1">[{i}]</span>
-                                            {!itemSame && !hasOther && <span className="text-red-500 text-[8px] mr-1">removed</span>}
-                                            {!itemSame && hasOther && <span className="text-yellow-600 dark:text-yellow-400 text-[8px] mr-1">diff</span>}
-                                            {'{'}
-                                            {Object.keys(item).map(k => (
-                                                <span key={k}>
-                                                    {'\n'}{'  '.repeat(depth + 2)}<span className="text-blue-700 dark:text-blue-400">"{k}"</span>: {renderJsonValue(item[k], depth + 2)}
-                                                </span>
-                                            ))}
-                                            {'\n'}{'  '.repeat(depth + 1)}{'}'}{i < arr.length - 1 ? ',' : ''}
-                                        </>
-                                    ) : (
-                                        <>
-                                            {renderJsonValue(item, depth + 1)}{i < arr.length - 1 ? ',' : ''}
-                                        </>
-                                    )}
+    const renderPane = (side: 'left' | 'right', payload: PreparedDiffPayload, ref: React.RefObject<HTMLDivElement | null>) => (
+        <div
+            ref={ref}
+            className="min-w-0 flex-1 overflow-auto bg-gray-50 dark:bg-base-300"
+            onScroll={onSyncScroll(side)}
+        >
+            {visibleLineRows.length === 0 ? (
+                <div className="p-4 text-center text-[10px] italic text-gray-400">没有可显示的差异</div>
+            ) : (
+                <div className="min-w-max text-[10px] font-mono leading-relaxed">
+                    {visibleLineRows.map((row, index) => {
+                        const value = side === 'left' ? row.left : row.right;
+                        const lineNumber = side === 'left' ? row.leftNumber : row.rightNumber;
+                        const missing = value === undefined;
+                        const marker = row.kind === 'changed'
+                            ? '~'
+                            : side === 'left' && row.kind === 'left-only'
+                                ? '−'
+                                : side === 'right' && row.kind === 'right-only'
+                                    ? '+'
+                                    : ' ';
+                        return (
+                            <div key={`${side}-${index}`} className={`flex min-h-[22px] border-b border-gray-200/60 dark:border-base-content/5 ${rowClassName(row, side)}`}>
+                                <span className="w-10 shrink-0 select-none border-r border-gray-200/70 dark:border-base-content/10 px-1.5 py-0.5 text-right text-[9px] text-gray-400">
+                                    {lineNumber ?? '·'}
                                 </span>
-                            );
-                        })}
-                        {'\n'}{'  '.repeat(depth)}]
-                    </>
-                )}
-            </span>
-        );
-    };
+                                <span className={`w-5 shrink-0 select-none px-1 py-0.5 text-center font-bold ${marker === '+' ? 'text-green-600' : marker === '−' ? 'text-red-600' : marker === '~' ? 'text-amber-600' : 'text-gray-300'}`}>
+                                    {marker}
+                                </span>
+                                <span className={`whitespace-pre-wrap break-all px-2 py-0.5 ${missing ? 'italic text-gray-400' : 'text-gray-700 dark:text-gray-200'}`}>
+                                    {missing ? '（无对应行）' : value || ' '}
+                                </span>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+            {payload.truncated && (
+                <div className="border-t border-amber-200 bg-amber-50 px-2 py-1 text-[9px] text-amber-700 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
+                    仅显示前 {MAX_DIFF_LINES} 行，完整内容请在原始报文页查看。
+                </div>
+            )}
+        </div>
+    );
 
-    const rowBg = (t: DiffResult) => {
-        switch (t.type) {
-            case 'same': return 'bg-transparent';
-            case 'changed': return 'bg-yellow-100/60 dark:bg-yellow-900/20';
-            case 'left-only': return 'bg-red-50 dark:bg-red-900/20';
-            case 'right-only': return 'bg-green-50 dark:bg-green-900/20';
-        }
-    };
+    const renderSemanticPane = (side: 'left' | 'right', ref: React.RefObject<HTMLDivElement | null>) => (
+        <div
+            ref={ref}
+            className="min-w-0 flex-1 overflow-auto bg-gray-50 dark:bg-base-300"
+            onScroll={onSyncScroll(side)}
+        >
+            {visibleSemanticRows.length === 0 ? (
+                <div className="p-4 text-center text-[10px] italic text-gray-400">没有可显示的差异</div>
+            ) : (
+                <div className="min-w-[560px] text-[10px] font-mono leading-relaxed">
+                    {visibleSemanticRows.map((row, index) => {
+                        const entry = side === 'left' ? row.left : row.right;
+                        const missing = entry === undefined;
+                        const marker = row.kind === 'changed'
+                            ? '~'
+                            : side === 'left' && row.kind === 'left-only'
+                                ? '−'
+                                : side === 'right' && row.kind === 'right-only'
+                                    ? '+'
+                                    : ' ';
+                        return (
+                            <div key={`${side}-${row.path}-${index}`} className={`flex min-h-[22px] border-b border-gray-200/60 dark:border-base-content/5 ${rowClassName(row, side)}`}>
+                                <span className="flex w-64 shrink-0 items-start gap-1 border-r border-gray-200/70 px-2 py-0.5 text-gray-500 dark:border-base-content/10 dark:text-gray-400">
+                                    <span className="w-5 shrink-0 select-none text-center font-bold text-gray-300">{marker}</span>
+                                    <span className="break-all" title={row.path}>{row.path}</span>
+                                </span>
+                                <span className={`min-w-0 flex-1 whitespace-pre-wrap break-all px-2 py-0.5 ${missing ? 'italic text-gray-400' : 'text-gray-700 dark:text-gray-200'}`}>
+                                    {missing ? '（该路径不存在）' : entry.value || ' '}
+                                </span>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
+    );
 
     return (
-        <div>
-            <div className="flex items-center gap-2 mb-1">
-                <span className="text-[10px] font-bold text-gray-500">{leftLabel}</span>
+        <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400">{leftLabel}</span>
                 <span className="text-[9px] text-gray-400">vs</span>
                 <span className="text-[10px] font-bold text-green-600 dark:text-green-400">{rightLabel}</span>
-                <span className="ml-auto text-[9px] text-gray-400">
-                    {stats.changed} key差异 · {stats.leftOnly} 仅左侧 · {stats.rightOnly} 仅右侧
+                <span className="text-[9px] text-gray-400">
+                    {diffModeLabel(leftPayload.mode)} / {diffModeLabel(rightPayload.mode)}
                 </span>
+                {hasStructuredPayload && (
+                    <div className="inline-flex rounded-md border border-gray-200 bg-white/70 p-0.5 dark:border-base-300 dark:bg-base-200/70">
+                        <button
+                            type="button"
+                            aria-pressed={effectiveCompareMode === 'semantic'}
+                            className={`rounded px-1.5 py-1 text-[9px] ${effectiveCompareMode === 'semantic'
+                                ? 'bg-orange-500 text-white shadow-sm'
+                                : 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-base-300'
+                                }`}
+                            onClick={() => setCompareMode('semantic')}
+                        >
+                            结构化字段
+                        </button>
+                        <button
+                            type="button"
+                            aria-pressed={effectiveCompareMode === 'line'}
+                            className={`rounded px-1.5 py-1 text-[9px] ${effectiveCompareMode === 'line'
+                                ? 'bg-orange-500 text-white shadow-sm'
+                                : 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-base-300'
+                                }`}
+                            onClick={() => setCompareMode('line')}
+                        >
+                            逐行对比
+                        </button>
+                    </div>
+                )}
+                <span className="ml-auto text-[9px] text-gray-500 dark:text-gray-400">
+                    {stats.changed} 处修改 · {stats.leftOnly} 处仅左侧 · {stats.rightOnly} 处仅右侧
+                </span>
+                {normalizeSse && hasSsePayload && (
+                    <button
+                        type="button"
+                        className="rounded border border-purple-200 bg-purple-50 px-2 py-1 text-[9px] text-purple-700 hover:text-purple-900 dark:border-purple-900/40 dark:bg-purple-900/20 dark:text-purple-300"
+                        onClick={() => setShowNormalized(value => !value)}
+                    >
+                        {showNormalized ? '查看原始 SSE' : '查看合并 JSON'}
+                    </button>
+                )}
+                <button
+                    type="button"
+                    className="rounded border border-gray-200 bg-white px-2 py-1 text-[9px] text-gray-600 hover:text-blue-600 dark:border-base-300 dark:bg-base-200 dark:text-gray-300"
+                    onClick={() => setShowOnlyChanges(value => !value)}
+                >
+                    {showOnlyChanges ? '显示全部行' : '只看差异'}
+                </button>
             </div>
-            <div className="flex rounded-lg border border-gray-200 dark:border-base-300 overflow-hidden bg-gray-50 dark:bg-base-300 max-h-[600px]">
-                {/* Left panel */}
-                <div className="flex-1 overflow-auto border-r border-gray-200 dark:border-base-300" ref={leftRef} onScroll={onSyncScroll('left')}>
-                    <div className="text-[9px] font-mono whitespace-pre">
-                        {buildDiffRows.map((row, i) => (
-                            <div key={i} className={`px-2 py-0.5 ${rowBg(row.result)} ${row.result.type === 'right-only' ? 'opacity-30' : ''}`}>
-                                {row.result.type === 'right-only' ? (
-                                    <span className="text-gray-400 italic">(not present)</span>
-                                ) : (
-                                    <span>
-                                        <span className="text-blue-700 dark:text-blue-400">"{row.key}"</span>
-                                        <span className="text-gray-400">: </span>
-                                        {Array.isArray(row.leftVal) ? (
-                                            <RenderArray arr={row.leftVal} otherArr={row.result.type === 'changed' && Array.isArray(row.rightVal) ? row.rightVal : undefined} rowIdx={i} depth={0} />
-                                        ) : (
-                                            renderJsonValue(row.leftVal, 0)
-                                        )}
-                                        {row.result.type === 'left-only' && <span className="text-red-500 ml-1 font-bold">[-]</span>}
-                                    </span>
-                                )}
-                            </div>
-                        ))}
-                    </div>
-                </div>
-                {/* Right panel */}
-                <div className="flex-1 overflow-auto" ref={rightRef} onScroll={onSyncScroll('right')}>
-                    <div className="text-[9px] font-mono whitespace-pre">
-                        {buildDiffRows.map((row, i) => (
-                            <div key={i} className={`px-2 py-0.5 ${rowBg(row.result)} ${row.result.type === 'left-only' ? 'opacity-30' : ''}`}>
-                                {row.result.type === 'left-only' ? (
-                                    <span className="text-gray-400 italic">(not present)</span>
-                                ) : (
-                                    <span>
-                                        <span className="text-blue-700 dark:text-blue-400">"{row.key}"</span>
-                                        <span className="text-gray-400">: </span>
-                                        {Array.isArray(row.rightVal) ? (
-                                            <RenderArray arr={row.rightVal} otherArr={row.result.type === 'changed' && Array.isArray(row.leftVal) ? row.leftVal : undefined} rowIdx={i} depth={0} />
-                                        ) : (
-                                            renderJsonValue(row.rightVal, 0)
-                                        )}
-                                        {row.result.type === 'right-only' && <span className="text-green-500 ml-1 font-bold">[+]</span>}
-                                    </span>
-                                )}
-                            </div>
-                        ))}
-                    </div>
-                </div>
+            <div className="flex items-center gap-2 text-[9px] text-gray-400">
+                <span>{effectiveCompareMode === 'semantic' ? `左侧 ${leftPayload.semanticTotal} 个字段` : `左侧 ${leftPayload.totalLines} 行`}</span>
+                <span>·</span>
+                <span>{effectiveCompareMode === 'semantic' ? `右侧 ${rightPayload.semanticTotal} 个字段` : `右侧 ${rightPayload.totalLines} 行`}</span>
+                <span>·</span>
+                <span>{effectiveCompareMode === 'semantic' ? `${stats.same} 个字段相同` : `${stats.same} 行相同`}</span>
+                {effectiveCompareMode === 'semantic' && (leftPayload.semanticTruncated || rightPayload.semanticTruncated) && (
+                    <span className="text-amber-600 dark:text-amber-300">字段过多，仅显示前 {MAX_DIFF_FIELDS} 个</span>
+                )}
+            </div>
+            <div className="flex max-h-[600px] min-h-[180px] overflow-hidden rounded-lg border border-gray-200 dark:border-base-300">
+                {effectiveCompareMode === 'semantic' ? (
+                    <>
+                        {renderSemanticPane('left', leftRef)}
+                        {renderSemanticPane('right', rightRef)}
+                    </>
+                ) : (
+                    <>
+                        {renderPane('left', leftPayload, leftRef)}
+                        {renderPane('right', rightPayload, rightRef)}
+                    </>
+                )}
             </div>
         </div>
     );
@@ -493,6 +772,595 @@ const JsonTreeView: React.FC<{ data: any; title?: string }> = ({ data, title }) 
     );
 };
 
+interface ParsedSseEvent {
+    eventType: string;
+    data: unknown;
+    eventId?: string;
+}
+
+const parseSseEvents = (body: string): ParsedSseEvent[] => {
+    const normalized = body.replace(/\r\n?/g, '\n');
+    return normalized
+        .split(/\n\n+/)
+        .map(block => block.trim())
+        .filter(Boolean)
+        .map(block => {
+            let eventType = '';
+            let eventId: string | undefined;
+            const dataLines: string[] = [];
+
+            for (const line of block.split('\n')) {
+                if (line.startsWith('event:')) {
+                    eventType = line.slice(6).trim();
+                } else if (line.startsWith('id:')) {
+                    eventId = line.slice(3).trim();
+                } else if (line.startsWith('data:')) {
+                    dataLines.push(line.slice(5).replace(/^ /, ''));
+                }
+            }
+
+            const dataText = dataLines.join('\n');
+            let data: unknown = dataText;
+            try {
+                data = JSON.parse(dataText);
+            } catch {
+                // Keep non-JSON SSE data such as [DONE] visible as text.
+            }
+
+            const inferredType = data && typeof data === 'object' && 'type' in data
+                ? String((data as { type?: unknown }).type || '')
+                : '';
+            return {
+                eventType: eventType || inferredType || 'data',
+                data,
+                eventId,
+            };
+        });
+};
+
+type JsonRecord = Record<string, unknown>;
+
+interface ConsolidatedToolCall {
+    id: string;
+    type: 'function';
+    function: {
+        name: string;
+        arguments: string;
+    };
+}
+
+interface SseAggregationState {
+    content: string;
+    thinking: string;
+    thinkingSignature: string;
+    toolCalls: Map<string, ConsolidatedToolCall>;
+    toolOrder: string[];
+    toolKeysByIndex: Map<number, string>;
+    responseId?: string;
+    model?: string;
+    status?: string;
+    stopReason?: string;
+    stopSequence?: string | null;
+    inputTokens?: number;
+    outputTokens?: number;
+    completed: boolean;
+    error?: unknown;
+    incompleteDetails?: unknown;
+    sawContentDelta: boolean;
+    sawThinkingDelta: boolean;
+}
+
+const asJsonRecord = (value: unknown): JsonRecord | undefined => (
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as JsonRecord
+        : undefined
+);
+
+const asString = (value: unknown): string | undefined => (
+    typeof value === 'string' ? value : undefined
+);
+
+const asNumber = (value: unknown): number | undefined => (
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined
+);
+
+const appendText = (current: string, value: unknown): string => (
+    typeof value === 'string' ? current + value : current
+);
+
+const createSseAggregationState = (): SseAggregationState => ({
+    content: '',
+    thinking: '',
+    thinkingSignature: '',
+    toolCalls: new Map(),
+    toolOrder: [],
+    toolKeysByIndex: new Map(),
+    completed: false,
+    sawContentDelta: false,
+    sawThinkingDelta: false,
+});
+
+const ensureToolCall = (
+    state: SseAggregationState,
+    key: string,
+    initial?: Partial<ConsolidatedToolCall>,
+): ConsolidatedToolCall => {
+    const existing = state.toolCalls.get(key);
+    if (existing) return existing;
+
+    const toolCall: ConsolidatedToolCall = {
+        id: initial?.id || '',
+        type: 'function',
+        function: {
+            name: initial?.function?.name || '',
+            arguments: initial?.function?.arguments || '',
+        },
+    };
+    state.toolCalls.set(key, toolCall);
+    state.toolOrder.push(key);
+    return toolCall;
+};
+
+const mergeUsage = (state: SseAggregationState, usageValue: unknown): void => {
+    const usage = asJsonRecord(usageValue);
+    if (!usage) return;
+
+    const input = asNumber(usage.input_tokens)
+        ?? asNumber(usage.prompt_tokens)
+        ?? asNumber(usage.promptTokenCount);
+    const output = asNumber(usage.output_tokens)
+        ?? asNumber(usage.completion_tokens)
+        ?? asNumber(usage.candidatesTokenCount);
+    const cacheCreation = asNumber(usage.cache_creation_input_tokens) ?? 0;
+    const cacheRead = asNumber(usage.cache_read_input_tokens) ?? 0;
+
+    if (input !== undefined) state.inputTokens = input + cacheCreation + cacheRead;
+    if (output !== undefined) state.outputTokens = output;
+    if (input === undefined && output === undefined) {
+        const total = asNumber(usage.total_tokens) ?? asNumber(usage.totalTokenCount);
+        if (total !== undefined) state.outputTokens = total;
+    }
+};
+
+const setResponseMetadata = (state: SseAggregationState, responseValue: unknown): JsonRecord | undefined => {
+    const response = asJsonRecord(responseValue);
+    if (!response) return undefined;
+
+    state.responseId = asString(response.id) ?? state.responseId;
+    state.model = asString(response.model) ?? state.model;
+    state.status = asString(response.status) ?? state.status;
+    mergeUsage(state, response.usage);
+    return response;
+};
+
+const mergeResponsesToolItem = (
+    state: SseAggregationState,
+    itemValue: unknown,
+    allowOutputFallback: boolean,
+): void => {
+    const item = asJsonRecord(itemValue);
+    if (!item) return;
+
+    const itemType = asString(item.type);
+    if (itemType === 'function_call' || itemType === 'mcp_call') {
+        const itemId = asString(item.id);
+        const callId = asString(item.call_id);
+        const key = itemId ?? callId ?? `tool-${state.toolOrder.length}`;
+        const toolCall = ensureToolCall(state, key);
+        toolCall.id = callId ?? itemId ?? toolCall.id;
+        toolCall.function.name = asString(item.name) ?? toolCall.function.name;
+        const argumentsValue = asString(item.arguments);
+        if (argumentsValue !== undefined) toolCall.function.arguments = argumentsValue;
+        return;
+    }
+
+    if (itemType === 'reasoning') {
+        state.thinkingSignature = asString(item.encrypted_content) ?? state.thinkingSignature;
+    }
+
+    if (allowOutputFallback) {
+        const content = Array.isArray(item.content) ? item.content : [];
+        for (const partValue of content) {
+            const part = asJsonRecord(partValue);
+            if (!part) continue;
+            if (part.type === 'output_text' && !state.sawContentDelta) {
+                state.content = appendText(state.content, part.text);
+            }
+            if (part.type === 'summary_text' && !state.sawThinkingDelta) {
+                state.thinking = appendText(state.thinking, part.text);
+            }
+        }
+    }
+};
+
+const mergeOpenAiToolCalls = (state: SseAggregationState, choices: unknown[]): void => {
+    for (const choiceValue of choices) {
+        const choice = asJsonRecord(choiceValue);
+        const delta = asJsonRecord(choice?.delta);
+        const toolCalls = Array.isArray(delta?.tool_calls) ? delta.tool_calls : [];
+        for (const toolValue of toolCalls) {
+            const tool = asJsonRecord(toolValue);
+            const index = asNumber(tool?.index);
+            const key = index !== undefined ? `chat-${index}` : `chat-${state.toolOrder.length}`;
+            const functionValue = asJsonRecord(tool?.function);
+            const toolCall = ensureToolCall(state, key);
+            toolCall.id = asString(tool?.id) ?? toolCall.id;
+            toolCall.function.name = asString(functionValue?.name) ?? toolCall.function.name;
+            toolCall.function.arguments = appendText(toolCall.function.arguments, functionValue?.arguments);
+        }
+    }
+};
+
+const mergeAnthropicContentBlock = (
+    state: SseAggregationState,
+    event: ParsedSseEvent,
+): void => {
+    const data = asJsonRecord(event.data);
+    if (!data) return;
+
+    const index = asNumber(data.index);
+    const delta = asJsonRecord(data.delta);
+    const deltaType = asString(delta?.type);
+    if (deltaType === 'text_delta') {
+        state.content = appendText(state.content, delta?.text);
+        state.sawContentDelta = true;
+    } else if (deltaType === 'thinking_delta') {
+        state.thinking = appendText(state.thinking, delta?.thinking);
+        state.sawThinkingDelta = true;
+    } else if (deltaType === 'signature_delta') {
+        state.thinkingSignature = asString(delta?.signature) ?? state.thinkingSignature;
+    } else if (deltaType === 'input_json_delta') {
+        const key = index !== undefined
+            ? state.toolKeysByIndex.get(index) ?? `anthropic-${index}`
+            : `anthropic-${state.toolOrder.length}`;
+        const toolCall = ensureToolCall(state, key);
+        toolCall.function.arguments = appendText(toolCall.function.arguments, delta?.partial_json);
+        if (index !== undefined) state.toolKeysByIndex.set(index, key);
+    } else {
+        state.content = appendText(state.content, delta?.text);
+        state.thinking = appendText(state.thinking, delta?.thinking);
+        state.thinkingSignature = asString(delta?.signature) ?? state.thinkingSignature;
+    }
+};
+
+const aggregateSseResponse = (events: ReadonlyArray<ParsedSseEvent>): JsonRecord => {
+    const state = createSseAggregationState();
+
+    for (const event of events) {
+        if (event.data === '[DONE]') {
+            state.completed = true;
+            continue;
+        }
+        const data = asJsonRecord(event.data);
+        if (!data) continue;
+
+        const eventType = event.eventType || asString(data.type) || '';
+        const response = setResponseMetadata(state, data.response);
+        mergeUsage(state, data.usage ?? data.usageMetadata);
+        state.responseId = asString(data.id) ?? state.responseId;
+        state.model = asString(data.model) ?? state.model;
+
+        const choices = Array.isArray(data.choices) ? data.choices : [];
+        if (choices.length > 0) {
+            mergeOpenAiToolCalls(state, choices);
+            for (const choiceValue of choices) {
+                const choice = asJsonRecord(choiceValue);
+                const delta = asJsonRecord(choice?.delta);
+                state.content = appendText(state.content, delta?.content);
+                state.thinking = appendText(state.thinking, delta?.reasoning_content);
+                state.sawContentDelta = state.sawContentDelta || typeof delta?.content === 'string';
+                state.sawThinkingDelta = state.sawThinkingDelta || typeof delta?.reasoning_content === 'string';
+                state.stopReason = asString(choice?.finish_reason) ?? state.stopReason;
+            }
+        }
+
+        switch (eventType) {
+            case 'response.created':
+                setResponseMetadata(state, response);
+                break;
+            case 'response.output_item.added':
+            case 'response.output_item.done':
+                mergeResponsesToolItem(state, data.item, eventType.endsWith('.done'));
+                break;
+            case 'response.output_text.delta':
+                state.content = appendText(state.content, data.delta);
+                state.sawContentDelta = typeof data.delta === 'string' || state.sawContentDelta;
+                break;
+            case 'response.output_text.done':
+                if (!state.sawContentDelta) state.content = appendText(state.content, data.text);
+                break;
+            case 'response.reasoning.delta':
+            case 'response.reasoning_summary_text.delta':
+                state.thinking = appendText(state.thinking, data.delta);
+                state.sawThinkingDelta = typeof data.delta === 'string' || state.sawThinkingDelta;
+                break;
+            case 'response.reasoning_summary_text.done':
+                if (!state.sawThinkingDelta) state.thinking = appendText(state.thinking, data.text);
+                break;
+            case 'response.function_call_arguments.delta':
+            case 'response.mcp_call_arguments.delta': {
+                const key = asString(data.item_id) ?? asString(data.call_id) ?? `responses-${state.toolOrder.length}`;
+                const toolCall = ensureToolCall(state, key);
+                toolCall.function.arguments = appendText(toolCall.function.arguments, data.delta);
+                break;
+            }
+            case 'response.function_call_arguments.done':
+            case 'response.mcp_call_arguments.done': {
+                const key = asString(data.item_id) ?? asString(data.call_id) ?? `responses-${state.toolOrder.length}`;
+                const toolCall = ensureToolCall(state, key);
+                toolCall.function.arguments = asString(data.arguments) ?? toolCall.function.arguments;
+                toolCall.function.name = asString(data.name) ?? toolCall.function.name;
+                break;
+            }
+            case 'response.completed':
+                state.status = asString(response?.status) ?? 'completed';
+                state.completed = true;
+                if (response?.output && !state.sawContentDelta && !state.sawThinkingDelta) {
+                    const output = Array.isArray(response.output) ? response.output : [];
+                    output.forEach(item => mergeResponsesToolItem(state, item, true));
+                }
+                break;
+            case 'response.incomplete':
+                state.status = asString(response?.status) ?? 'incomplete';
+                state.incompleteDetails = response?.incomplete_details;
+                state.stopReason = asString(asJsonRecord(response?.incomplete_details)?.reason) ?? state.stopReason;
+                state.completed = true;
+                break;
+            case 'response.failed':
+                state.status = asString(response?.status) ?? 'failed';
+                state.error = data.error ?? response?.error;
+                state.completed = true;
+                break;
+            case 'message_start': {
+                const message = asJsonRecord(data.message);
+                state.responseId = asString(message?.id) ?? state.responseId;
+                state.model = asString(message?.model) ?? state.model;
+                mergeUsage(state, message?.usage);
+                break;
+            }
+            case 'content_block_start': {
+                const index = asNumber(data.index);
+                const block = asJsonRecord(data.content_block);
+                if (block?.type === 'tool_use') {
+                    const key = asString(block.id) ?? `anthropic-${index ?? state.toolOrder.length}`;
+                    const toolCall = ensureToolCall(state, key);
+                    toolCall.id = asString(block.id) ?? toolCall.id;
+                    toolCall.function.name = asString(block.name) ?? toolCall.function.name;
+                    if (index !== undefined) state.toolKeysByIndex.set(index, key);
+                }
+                break;
+            }
+            case 'content_block_delta':
+                mergeAnthropicContentBlock(state, event);
+                break;
+            case 'message_delta': {
+                const delta = asJsonRecord(data.delta);
+                state.stopReason = asString(delta?.stop_reason) ?? state.stopReason;
+                if (delta && ('stop_sequence' in delta)) {
+                    const stopSequence = delta.stop_sequence;
+                    if (stopSequence === null || typeof stopSequence === 'string') {
+                        state.stopSequence = stopSequence;
+                    }
+                }
+                state.completed = state.completed || state.stopReason !== undefined;
+                break;
+            }
+            case 'message_stop':
+                state.completed = true;
+                break;
+            default: {
+                const delta = asJsonRecord(data.delta);
+                if (delta) {
+                    state.content = appendText(state.content, delta.text);
+                    state.thinking = appendText(state.thinking, delta.thinking);
+                    state.thinkingSignature = asString(delta.signature) ?? state.thinkingSignature;
+                }
+                const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+                for (const candidateValue of candidates) {
+                    const candidate = asJsonRecord(candidateValue);
+                    const content = asJsonRecord(candidate?.content);
+                    const parts = Array.isArray(content?.parts) ? content.parts : [];
+                    for (const partValue of parts) {
+                        const part = asJsonRecord(partValue);
+                        state.content = appendText(state.content, part?.text);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    const consolidated: JsonRecord = {};
+    if (state.thinking) consolidated.thinking = state.thinking;
+    if (state.thinkingSignature) consolidated.thinking_signature = state.thinkingSignature;
+    if (state.content) consolidated.content = state.content;
+
+    const toolCalls = state.toolOrder
+        .map(key => state.toolCalls.get(key))
+        .filter((toolCall): toolCall is ConsolidatedToolCall => toolCall !== undefined);
+    if (toolCalls.length > 0) consolidated.tool_calls = toolCalls;
+    if (state.inputTokens !== undefined) consolidated.input_tokens = state.inputTokens;
+    if (state.outputTokens !== undefined) consolidated.output_tokens = state.outputTokens;
+    if (state.responseId) consolidated.response_id = state.responseId;
+    if (state.model) consolidated.model = state.model;
+    if (state.status) consolidated.status = state.status;
+    if (state.stopReason) consolidated.stop_reason = state.stopReason;
+    if (state.stopSequence !== undefined) consolidated.stop_sequence = state.stopSequence;
+    if (state.incompleteDetails !== undefined) consolidated.incomplete_details = state.incompleteDetails;
+    if (state.error !== undefined) consolidated.error = state.error;
+    if (state.completed) consolidated.completed = true;
+
+    if (Object.keys(consolidated).length > 0) return consolidated;
+    const lastEvent = events.length > 0 ? events[events.length - 1] : undefined;
+    return { data: lastEvent?.data ?? null };
+};
+
+type SseViewMode = 'structured' | 'json' | 'raw';
+
+const formatPayloadSize = (length: number): string => {
+    if (length < 1024) return `${length} B`;
+    if (length < 1024 * 1024) return `${(length / 1024).toFixed(1)} KB`;
+    return `${(length / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const summarizeSseEvent = (event: ParsedSseEvent): string => {
+    const data = event.data && typeof event.data === 'object'
+        ? event.data as Record<string, unknown>
+        : null;
+    const response = data?.response && typeof data.response === 'object'
+        ? data.response as Record<string, unknown>
+        : null;
+    const item = data?.item && typeof data.item === 'object'
+        ? data.item as Record<string, unknown>
+        : null;
+    const responseModel = typeof response?.model === 'string' ? response.model : undefined;
+    const responseStatus = typeof response?.status === 'string' ? response.status : undefined;
+    const delta = typeof data?.delta === 'string' ? data.delta : '';
+
+    switch (event.eventType) {
+        case 'response.created':
+            return responseModel ? `模型 ${responseModel}` : '响应已创建';
+        case 'response.output_text.delta':
+            return `文本增量：${delta.replace(/\s+/g, ' ').slice(0, 100)}`;
+        case 'response.reasoning_summary_text.delta':
+            return `推理增量：${delta.replace(/\s+/g, ' ').slice(0, 100)}`;
+        case 'response.output_item.added':
+        case 'response.output_item.done':
+            if (typeof item?.type !== 'string') return '输出项目';
+            return `输出项目：${item.type}${typeof item.name === 'string' ? ` · ${item.name}` : ''}`;
+        case 'response.function_call_arguments.delta':
+            return `工具参数增量：${delta.slice(0, 100)}`;
+        case 'response.completed':
+            return responseStatus ? `状态：${responseStatus}` : '响应已完成';
+        case 'response.incomplete':
+            if (response?.incomplete_details && typeof response.incomplete_details === 'object') {
+                const details = response.incomplete_details as Record<string, unknown>;
+                return typeof details.reason === 'string' ? `未完成：${details.reason}` : '响应未完成';
+            }
+            return '响应未完成';
+        default:
+            if (typeof event.data === 'string') return event.data.slice(0, 100);
+            return '查看事件 JSON';
+    }
+};
+
+/** 将 SSE 按事件折叠展示，避免把数百 KB 的原始流直接铺满详情页。 */
+const SsePayloadView: React.FC<{ body: string; title?: string }> = ({ body, title }) => {
+    const events = useMemo(() => parseSseEvents(body), [body]);
+    const consolidatedJson = useMemo(() => aggregateSseResponse(events), [events]);
+    const jsonBody = useMemo(() => JSON.stringify(consolidatedJson, null, 2), [consolidatedJson]);
+    const rawLineCount = useMemo(() => body.split(/\r\n?|\n/).length, [body]);
+    const [expanded, setExpanded] = useState<Set<number>>(new Set());
+    const [viewMode, setViewMode] = useState<SseViewMode>('json');
+
+    const allExpanded = events.length > 0 && expanded.size === events.length;
+    const toggleEvent = (index: number) => setExpanded(prev => {
+        const next = new Set(prev);
+        next.has(index) ? next.delete(index) : next.add(index);
+        return next;
+    });
+
+    return (
+        <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-green-200 dark:border-green-900/40 bg-green-50/70 dark:bg-green-900/10 px-2.5 py-2">
+                <span className="text-[10px] font-bold text-green-700 dark:text-green-300">
+                    {title || '上游 SSE'}
+                </span>
+                <span className="text-[9px] text-green-700/70 dark:text-green-300/70">
+                    已解析 {events.length} 个事件 · 原始大小 {formatPayloadSize(body.length)}
+                </span>
+                <div className="ml-auto flex items-center gap-1">
+                    {viewMode === 'structured' && events.length > 0 && (
+                        <button
+                            type="button"
+                            className="text-[9px] rounded bg-white/80 dark:bg-base-200 px-1.5 py-1 text-gray-600 dark:text-gray-300 hover:text-blue-600"
+                            onClick={() => setExpanded(allExpanded ? new Set() : new Set(events.map((_, i) => i)))}
+                        >
+                            {allExpanded ? '全部折叠' : '全部展开'}
+                        </button>
+                    )}
+                    <div className="inline-flex rounded-md border border-gray-200 dark:border-base-300 bg-white/70 dark:bg-base-200/70 p-0.5">
+                        {([
+                            ['json', 'JSON'],
+                            ['structured', '结构化 SSE'],
+                            ['raw', '原始 SSE'],
+                        ] as const).map(([mode, label]) => (
+                            <button
+                                key={mode}
+                                type="button"
+                                aria-pressed={viewMode === mode}
+                                className={`rounded px-1.5 py-1 text-[9px] transition-colors ${viewMode === mode
+                                    ? 'bg-blue-600 text-white shadow-sm'
+                                    : 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-base-300'
+                                    }`}
+                                onClick={() => setViewMode(mode)}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            </div>
+
+            {viewMode === 'json' ? (
+                <div className="rounded-md border border-gray-800 bg-gray-950 overflow-hidden">
+                    <div className="flex items-center justify-between border-b border-gray-800 px-3 py-1.5 text-[9px] text-gray-400">
+                        <span>JSON · 已将 SSE 增量合并为累计结果</span>
+                        <span>{Object.keys(consolidatedJson).length} 个字段</span>
+                    </div>
+                    <pre className="max-h-[600px] overflow-auto px-3 py-2 text-[10px] leading-relaxed text-gray-200 whitespace-pre-wrap break-words select-text">
+                        {jsonBody}
+                    </pre>
+                </div>
+            ) : viewMode === 'structured' ? (
+                <div className="max-h-[600px] overflow-auto space-y-1 pr-1">
+                    {events.map((event, index) => {
+                        const isOpen = expanded.has(index);
+                        return (
+                            <div key={`${event.eventType}-${index}`} className="rounded-md border border-gray-200 dark:border-base-300 overflow-hidden">
+                                <button
+                                    type="button"
+                                    className="w-full flex items-center gap-2 px-2.5 py-2 text-left bg-gray-50 dark:bg-base-200 hover:bg-gray-100 dark:hover:bg-base-300"
+                                    onClick={() => toggleEvent(index)}
+                                    aria-expanded={isOpen}
+                                >
+                                    <span className="w-6 shrink-0 text-[9px] font-mono text-gray-400">#{index + 1}</span>
+                                    <span className="shrink-0 rounded bg-blue-100 dark:bg-blue-900/40 px-1.5 py-0.5 text-[9px] font-mono text-blue-700 dark:text-blue-300">
+                                        {event.eventType}
+                                    </span>
+                                    <span className="min-w-0 truncate text-[9px] text-gray-600 dark:text-gray-300">
+                                        {summarizeSseEvent(event)}
+                                    </span>
+                                    <span className="ml-auto shrink-0 text-gray-400">{isOpen ? '▾' : '▸'}</span>
+                                </button>
+                                {isOpen && (
+                                    <div className="border-t border-gray-200 dark:border-base-300 bg-white dark:bg-base-100 p-2 overflow-auto max-h-[520px]">
+                                        {typeof event.data === 'string' ? (
+                                            <pre className="whitespace-pre-wrap break-all text-[10px] font-mono text-gray-700 dark:text-gray-300">{event.data}</pre>
+                                        ) : (
+                                            <JsonTreeView data={event.data} title={`${event.eventType} JSON`} />
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            ) : (
+                <div className="rounded-md border border-gray-800 bg-gray-950 overflow-hidden">
+                    <div className="flex items-center justify-between border-b border-gray-800 px-3 py-1.5 text-[9px] text-gray-400">
+                        <span>原始 SSE · 保留 event/data 行和换行</span>
+                        <span>{rawLineCount} 行</span>
+                    </div>
+                    <pre className="max-h-[600px] overflow-auto px-3 py-2 text-[10px] leading-relaxed text-gray-200 whitespace-pre select-text">
+                        {body}
+                    </pre>
+                </div>
+            )}
+        </div>
+    );
+};
+
 interface ProxyRequestLog {
     id: string;
     timestamp: number;
@@ -505,6 +1373,8 @@ interface ProxyRequestLog {
     error?: string;
     request_body?: string;
     response_body?: string;
+    raw_response_body?: string; // 客户端实际收到的原始响应；流式响应时为原始 SSE
+    message_start_id?: string;
     input_tokens?: number;
     output_tokens?: number;
     account_email?: string;
@@ -553,7 +1423,7 @@ const LogTable: React.FC<LogTableProps> = ({
         if (!proto) return null;
         const p = proto.toLowerCase();
         const label = p === 'openai' ? 'OpenAI' : p === 'anthropic' ? 'Claude' : p === 'gemini' ? 'Gemini' : proto;
-        const color = p === 'openai' ? 'bg-green-500' : p === 'anthropic' ? 'bg-orange-500' : p === 'gemini' ? 'bg-blue-500' : 'bg-gray-400';
+        const color = p === 'openai' ? 'bg-green-500' : p === 'anthropic' ? 'bg-orange-500' : p === 'gemini' || p === 'codex' || p === 'codex_responses' ? 'bg-blue-500' : 'bg-gray-400';
         return <span className={`badge badge-xs text-white border-none ${color}`}>{label}</span>;
     };
 
@@ -1477,7 +2347,8 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                 const logSummary = {
                     ...newLog,
                     request_body: undefined,
-                    response_body: undefined
+                    response_body: undefined,
+                    raw_response_body: undefined,
                 };
 
                 // Check if a log with same ID already exists
@@ -1660,8 +2531,9 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
         try {
             await invoke('clear_proxy_logs');
             setLogs([]);
-            setStats({ total_requests: 0, success_count: 0, error_count: 0 });
             setTotalCount(0);
+            const currentStats = await invoke<ProxyStats>('get_proxy_stats');
+            setStats(currentStats);
         } catch (e) {
             console.error("Failed to clear logs", e);
         }
@@ -1669,6 +2541,9 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
 
     const renderCollapsibleBody = (body?: string, title?: string) => {
         if (!body) return <span className="text-gray-400 italic">{t('monitor.details.payload_empty')}</span>;
+        if (/^(?:event:|data:)/m.test(body)) {
+            return <SsePayloadView body={body} title={title} />;
+        }
         try {
             const obj = JSON.parse(body);
             return <JsonTreeView data={obj} title={title} />;
@@ -1685,6 +2560,10 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
             return body;
         }
     };
+
+    // For streamed responses prefer the exact client-facing SSE; for ordinary
+    // responses response_body is already the payload sent to the client.
+    const clientResponseBody = selectedLog?.raw_response_body ?? selectedLog?.response_body;
 
     return (
         <div className={`flex flex-col bg-white dark:bg-base-100 rounded-xl shadow-sm border border-gray-100 dark:border-base-200 overflow-hidden ${className || 'flex-1'}`}>
@@ -1890,6 +2769,12 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                             <span className="text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/40 px-2.5 py-1 rounded-md border border-green-200 dark:border-green-800/50 font-bold">Out: {formatCompactNumber(selectedLog.output_tokens ?? 0)}</span>
                                         </div>
                                     </div>
+                                    {selectedLog.message_start_id && (
+                                        <div className="space-y-1.5">
+                                            <span className="block text-gray-500 dark:text-gray-400 uppercase font-black text-[10px] tracking-widest">message_start.id</span>
+                                            <span className="font-mono font-semibold text-gray-900 dark:text-base-content break-all text-xs">{selectedLog.message_start_id}</span>
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="mt-5 pt-5 border-t border-gray-200 dark:border-base-300">
                                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1921,7 +2806,8 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                                 <span className={`inline-block px-2.5 py-1 rounded-md font-mono font-black text-xs uppercase ${selectedLog.upstream_protocol === 'openai' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/50' :
                                                     selectedLog.upstream_protocol === 'anthropic' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-400 border border-orange-200 dark:border-orange-800/50' :
                                                         selectedLog.upstream_protocol === 'gemini' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400 border border-blue-200 dark:border-blue-800/50' :
-                                                            'bg-gray-100 text-gray-700 dark:bg-gray-900/40 dark:text-gray-400'
+                                                            selectedLog.upstream_protocol.toLowerCase() === 'codex' || selectedLog.upstream_protocol.toLowerCase() === 'codex_responses' ? 'bg-blue-500 text-white border border-blue-500 dark:bg-blue-500 dark:text-white dark:border-blue-500' :
+                                                                'bg-gray-100 text-gray-700 dark:bg-gray-900/40 dark:text-gray-400'
                                                     }`}>
                                                     {selectedLog.upstream_protocol}
                                                 </span>
@@ -2033,13 +2919,16 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                         </div>
                                         <div>
                                             <div className="flex items-center justify-between mb-2">
-                                                <h3 className="text-xs font-bold uppercase text-gray-400 flex items-center gap-2">{t('monitor.details.response_payload')}</h3>
+                                                <h3 className="text-xs font-bold uppercase text-gray-400 flex items-center gap-2">
+                                                    <ArrowRight size={12} className="text-blue-500 rotate-180" />
+                                                    响应（客户端实际收到）
+                                                </h3>
                                                 <button
                                                     type="button"
                                                     className="btn btn-ghost btn-xs gap-1"
                                                     onClick={async () => {
-                                                        if (!selectedLog.response_body) return;
-                                                        const success = await copyToClipboard(getCopyPayload(selectedLog.response_body));
+                                                        if (!clientResponseBody) return;
+                                                        const success = await copyToClipboard(getCopyPayload(clientResponseBody));
                                                         if (success) {
                                                             setCopiedRequestId(selectedLog.id ? `${selectedLog.id}-response` : null);
                                                             setTimeout(() => {
@@ -2049,7 +2938,7 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                                             }, 2000);
                                                         }
                                                     }}
-                                                    disabled={!selectedLog.response_body}
+                                                    disabled={!clientResponseBody}
                                                     title={copiedRequestId === `${selectedLog.id}-response` ? t('proxy.config.btn_copied') : t('proxy.config.btn_copy')}
                                                     aria-label={t('proxy.config.btn_copy')}
                                                 >
@@ -2063,7 +2952,12 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                                     </span>
                                                 </button>
                                             </div>
-                                            <div className="bg-gray-50 dark:bg-base-300 rounded-lg p-3 border border-gray-100 dark:border-base-300 overflow-hidden">{renderCollapsibleBody(selectedLog.response_body, t('monitor.details.response_payload'))}</div>
+                                            <div className="bg-gray-50 dark:bg-base-300 rounded-lg p-3 border border-blue-100 dark:border-blue-900/30 overflow-hidden">
+                                                {renderCollapsibleBody(
+                                                    clientResponseBody,
+                                                    selectedLog.raw_response_body ? '客户端实际响应（SSE）' : t('monitor.details.response_payload')
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
                                 )}
@@ -2112,7 +3006,7 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                                 <span className="text-xs italic">无供应商交互记录（非供应商通道或未启用报文记录）</span>
                                             </div>
                                         )}
-                                        {selectedLog.upstream_response_body && (
+                                        {(selectedLog.upstream_request_body || selectedLog.upstream_response_body) && (
                                             <div>
                                                 <div className="flex items-center justify-between mb-2">
                                                     <h3 className="text-xs font-bold uppercase text-gray-400 flex items-center gap-2">
@@ -2145,7 +3039,15 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                                         <span className="text-[10px]">复制</span>
                                                     </button>
                                                 </div>
-                                                <div className="bg-gray-50 dark:bg-base-300 rounded-lg p-3 border border-green-100 dark:border-green-900/30 overflow-hidden">{renderCollapsibleBody(selectedLog.upstream_response_body, '响应（来自供应商）')}</div>
+                                                <div className="bg-gray-50 dark:bg-base-300 rounded-lg p-3 border border-green-100 dark:border-green-900/30 overflow-hidden">
+                                                    {selectedLog.upstream_response_body ? (
+                                                        renderCollapsibleBody(selectedLog.upstream_response_body, '响应（来自供应商）')
+                                                    ) : (
+                                                        <span className="text-xs italic text-gray-400 dark:text-gray-500">
+                                                            该记录未保存供应商原始响应；新请求将记录上游流式响应。
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </div>
                                         )}
                                     </div>
@@ -2155,7 +3057,8 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                 {detailViewMode === 'compare' && (
                                     <div className="space-y-4">
                                         {/* Request diff */}
-                                        <div>
+                                        <div className="space-y-2">
+                                            <h3 className="text-xs font-bold text-gray-700 dark:text-gray-200">请求报文对比</h3>
                                             <DiffView
                                                 left={selectedLog.request_body ?? ''}
                                                 right={selectedLog.upstream_request_body ?? ''}
@@ -2164,12 +3067,14 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                                             />
                                         </div>
                                         {/* Response diff */}
-                                        <div>
+                                        <div className="space-y-2">
+                                            <h3 className="text-xs font-bold text-gray-700 dark:text-gray-200">响应报文对比</h3>
                                             <DiffView
-                                                left={selectedLog.response_body ?? ''}
+                                                left={selectedLog.raw_response_body ?? selectedLog.response_body ?? ''}
                                                 right={selectedLog.upstream_response_body ?? ''}
-                                                leftLabel="原始响应（8150 → 客户端）"
+                                                leftLabel={selectedLog.raw_response_body ? '客户端原始响应（8150 → 客户端）' : '原始响应（8150 → 客户端）'}
                                                 rightLabel="供应商响应（供应商 → 8150）"
+                                                normalizeSse
                                             />
                                         </div>
                                     </div>

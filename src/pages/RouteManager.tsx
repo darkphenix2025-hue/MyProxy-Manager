@@ -4,7 +4,6 @@ import { request as invoke } from '../utils/request';
 import {
     BrainCircuit,
     Sparkles,
-    ArrowRight,
     Plus,
     Trash2,
     Edit2,
@@ -16,17 +15,34 @@ import {
     Activity,
     Clock,
     Zap,
+    ChevronDown,
+    ChevronUp,
 } from 'lucide-react';
-import { ProxyConfig, ExperimentalConfig, StickySessionConfig, WeightedTarget } from '../types/config';
+import { ModelCooldownEntry, ExperimentalConfig, StickySessionConfig, WeightedTarget } from '../types/config';
 import HelpTooltip from '../components/common/HelpTooltip';
 import ModalDialog from '../components/common/ModalDialog';
 import { showToast } from '../components/common/ToastContainer';
-import GroupedSelect, { SelectOption } from '../components/common/GroupedSelect';
+import GroupedSelect, { type SelectOption } from '../components/common/GroupedSelect';
+import ProviderModelSelect from '../components/common/ProviderModelSelect';
+import ReasoningEffortSelect from '../components/common/ReasoningEffortSelect';
 import DebouncedSlider from '../components/common/DebouncedSlider';
-import AdvancedThinking from '../components/settings/AdvancedThinking';
 import CircuitBreaker from '../components/settings/CircuitBreaker';
 import { useProxyConfig } from '../hooks/useProxyConfig';
 import { listAccounts } from '../services/accountService';
+import {
+    codexModelCatalogKey,
+    getModelCatalog,
+    MODEL_CATALOG_UPDATED_EVENT,
+    providerModelCatalogKey,
+} from '../services/modelCatalogCache';
+import type { CodexConnection } from '../types/codex';
+import { groupProviders, protocolConfigsForProvider } from '../utils/providerGrouping';
+import type {
+    ModelSelectionOption,
+    ModelSelectionProtocol,
+    ModelSelectionSource,
+} from '../components/common/ProviderModelSelect';
+import { getProviderProtocolLabel } from '../components/common/ProviderModelSelect';
 
 interface CustomPreset {
     id: string;
@@ -35,13 +51,89 @@ interface CustomPreset {
     mappings: Record<string, string | WeightedTarget[]>;
 }
 
+const weightedSourceModelTemplates: ReadonlyArray<SelectOption> = [
+    { value: 'internal-background-task', label: '后台任务 · internal-background-task', group: '系统模板' },
+    { value: 'claude-opus-*', label: 'Claude Opus · claude-opus-*', group: 'Claude' },
+    { value: 'claude-sonnet-*', label: 'Claude Sonnet · claude-sonnet-*', group: 'Claude' },
+    { value: 'claude-haiku-*', label: 'Claude Haiku · claude-haiku-*', group: 'Claude' },
+    { value: 'claude-*', label: 'Claude 全系列 · claude-*', group: 'Claude' },
+    { value: 'gpt-5.4*', label: 'GPT-5.4 · gpt-5.4*', group: 'GPT' },
+    { value: 'gpt-5.3*', label: 'GPT-5.3 · gpt-5.3*', group: 'GPT' },
+    { value: 'gpt-5.2*', label: 'GPT-5.2 · gpt-5.2*', group: 'GPT' },
+    { value: 'gpt-5.1*', label: 'GPT-5.1 · gpt-5.1*', group: 'GPT' },
+    { value: 'gpt-5*', label: 'GPT-5 全系列 · gpt-5*', group: 'GPT' },
+    { value: 'gpt-4.1*', label: 'GPT-4.1 · gpt-4.1*', group: 'GPT' },
+    { value: 'gpt-4o*', label: 'GPT-4o · gpt-4o*', group: 'GPT' },
+    { value: 'gpt-4*', label: 'GPT-4 全系列 · gpt-4*', group: 'GPT' },
+    { value: 'gpt-*', label: 'GPT 全系列 · gpt-*', group: 'GPT' },
+    { value: 'gemini-3*', label: 'Gemini 3 · gemini-3*', group: 'Gemini' },
+    { value: 'gemini-2.5-pro*', label: 'Gemini 2.5 Pro · gemini-2.5-pro*', group: 'Gemini' },
+    { value: 'gemini-2.5-flash*', label: 'Gemini 2.5 Flash · gemini-2.5-flash*', group: 'Gemini' },
+    { value: 'gemini-2*', label: 'Gemini 2 全系列 · gemini-2*', group: 'Gemini' },
+    { value: 'gemini-*', label: 'Gemini 全系列 · gemini-*', group: 'Gemini' },
+];
+
+const DEFAULT_MAPPING_WEIGHT = 1;
+const MAX_MAPPING_WEIGHT = 1_000_000;
+const TARGET_EFFORT_SEPARATOR = '::';
+
+const targetEffortKey = (routePattern: string, target: string): string =>
+    `${routePattern}${TARGET_EFFORT_SEPARATOR}${target}`;
+
+const normalizeMappingWeight = (weight: number): number => Number.isFinite(weight)
+    ? Math.min(MAX_MAPPING_WEIGHT, Math.max(1, Math.round(weight)))
+    : DEFAULT_MAPPING_WEIGHT;
+
+const formatMappingPercentage = (weight: number, totalWeight: number): string => {
+    if (totalWeight <= 0) return '0%';
+    const percentage = Number(((weight / totalWeight) * 100).toFixed(2));
+    return `${percentage}%`;
+};
+
+/** Convert both legacy single-target mappings and weighted mappings to rows. */
+const normalizeMappingTargets = (value?: string | WeightedTarget[]): WeightedTarget[] => {
+    if (!value) return [];
+
+    if (typeof value === 'string') {
+        const target = value.trim();
+        return target ? [{ target, weight: DEFAULT_MAPPING_WEIGHT }] : [];
+    }
+
+    return value
+        .map((entry) => ({
+            target: entry.target.trim(),
+            weight: normalizeMappingWeight(entry.weight),
+        }))
+        .filter((entry) => entry.target.length > 0);
+};
+
+/** Merge targets by model ID so repeated single-target additions build 1:N mappings. */
+const mergeMappingTargets = (
+    current: ReadonlyArray<WeightedTarget>,
+    incoming: ReadonlyArray<WeightedTarget>,
+): WeightedTarget[] => {
+    const merged = current.map((entry) => ({ ...entry }));
+    for (const entry of incoming) {
+        const target = entry.target.trim();
+        if (!target) continue;
+        const existingIndex = merged.findIndex((candidate) => candidate.target === target);
+        if (existingIndex >= 0) {
+            merged[existingIndex] = { target, weight: entry.weight };
+        } else {
+            merged.push({ target, weight: entry.weight });
+        }
+    }
+    return merged;
+};
+
 export default function RouteManager() {
     const { t } = useTranslation();
     const { appConfig, configLoading, configError, status, setAppConfig, saveConfig } = useProxyConfig();
 
     // Model routing state
-    const [editingKey, setEditingKey] = useState<string | null>(null);
-    const [editingValue, setEditingValue] = useState<string>('');
+    const [editingTarget, setEditingTarget] = useState<{ key: string; index: number } | null>(null);
+    const [editingTargetValue, setEditingTargetValue] = useState<string>('');
+    const [mappingDrafts, setMappingDrafts] = useState<Record<string, WeightedTarget[]>>({});
     const [selectedPreset, setSelectedPreset] = useState<string>('default');
     const [customPresets, setCustomPresets] = useState<CustomPreset[]>([]);
     const [isPresetManagerOpen, setIsPresetManagerOpen] = useState(false);
@@ -49,57 +141,152 @@ export default function RouteManager() {
     const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
     const [preferredAccountId, setPreferredAccountId] = useState<string | null>(null);
     const [availableAccounts, setAvailableAccounts] = useState<Array<{ id: string; email: string }>>([]);
+    const [codexConnections, setCodexConnections] = useState<ReadonlyArray<CodexConnection>>([]);
+    const [modelCatalogVersion, setModelCatalogVersion] = useState(0);
     const [isClearBindingsConfirmOpen, setIsClearBindingsConfirmOpen] = useState(false);
 
     // Weighted mapping state
     const [weightedKey, setWeightedKey] = useState('');
-    const [weightedTargets, setWeightedTargets] = useState<WeightedTarget[]>([{ target: '', weight: 50 }]);
-    const [addMode, setAddMode] = useState<'single' | 'weighted'>('single');
+    const [weightedTargets, setWeightedTargets] = useState<WeightedTarget[]>([{ target: '', weight: DEFAULT_MAPPING_WEIGHT }]);
+    const [weightedEffort, setWeightedEffort] = useState<string>('');
 
     // Fallback model state
     const [fallbackEnabled, setFallbackEnabled] = useState(appConfig?.proxy?.fallback_model?.enabled ?? false);
     const [fallbackModel, setFallbackModel] = useState(appConfig?.proxy?.fallback_model?.model ?? '');
     const [fallbackProviderId, setFallbackProviderId] = useState(appConfig?.proxy?.fallback_model?.provider_id ?? '');
+    const [fallbackEffort, setFallbackEffort] = useState<string>(appConfig?.proxy?.fallback_model?.reasoning_effort ?? '');
 
     // Cooldown state
-    const [cooldowns, setCooldowns] = useState<Array<{ model: string; provider: string; remaining_secs: number }>>([]);
+    const [cooldowns, setCooldowns] = useState<ModelCooldownEntry[]>([]);
     const [cooldownEnabled, setCooldownEnabled] = useState(appConfig?.proxy?.model_cooldown?.enabled ?? true);
     const [cooldownDuration, setCooldownDuration] = useState(appConfig?.proxy?.model_cooldown?.duration_secs ?? 600);
 
-    /** Resolve a mapping value to display string (handles both string and weighted array) */
-    const resolveMappingDisplay = (val: string | WeightedTarget[]): string => {
-        if (typeof val === 'string') return val;
-        return val.map(t => `${t.target}(${t.weight})`).join(', ');
+    const getMappingEffort = (key: string, target: string): string => {
+        const routeEffort = appConfig?.proxy.route_reasoning_effort ?? {};
+        return (target ? routeEffort[targetEffortKey(key, target)] : undefined)
+            ?? routeEffort[key]
+            ?? '';
     };
 
-    /** Get the string target for editing (first weighted target or the string itself) */
-    const resolveMappingEditValue = (val: string | WeightedTarget[]): string => {
-        if (typeof val === 'string') return val;
-        return val.length > 0 ? val[0].target : '';
-    };
+    const modelSources: ReadonlyArray<ModelSelectionSource> = useMemo(() => {
+        const sources: ModelSelectionSource[] = [];
+        const providerGroups = groupProviders(appConfig?.proxy?.providers ?? []);
 
-    // Custom mapping options: only from provider available_models
-    const customMappingOptions: SelectOption[] = useMemo(() => {
-        const options: SelectOption[] = [];
+        for (const group of providerGroups) {
+            const provider = group.provider;
+            const providerId = provider.provider_id?.trim();
+            if (!provider.enabled || !providerId) continue;
 
-        // Build options from each provider's available_models
-        const providers = appConfig?.proxy?.providers?.filter(p => p.enabled && p.provider_id && p.available_models) ?? [];
-
-        for (const provider of providers) {
-            const pid = provider.provider_id!;
-            const modelList = provider.available_models!.split(',').map(s => s.trim()).filter(Boolean);
-            for (const modelName of modelList) {
-                const value = `${pid}/${modelName}`;
-                options.push({
-                    value,
-                    label: `${modelName} (${pid})`,
-                    group: `供应商: ${provider.name}`,
+            const catalog = getModelCatalog(providerModelCatalogKey(providerId));
+            const models = new Map<string, ModelSelectionOption>();
+            for (const modelId of (provider.available_models ?? '').split(',')) {
+                const id = modelId.trim();
+                if (id) models.set(id, { value: id, label: id, group: '可用模型' });
+            }
+            for (const model of provider.model_configs ?? []) {
+                const id = model.id.trim();
+                if (!id) continue;
+                const displayName = model.alias?.trim() || model.display_name?.trim();
+                models.set(id, {
+                    value: id,
+                    label: displayName && displayName !== id ? `${displayName} (${id})` : id,
+                    group: '可用模型',
+                    ...(model.reasoning_efforts?.length
+                        ? { reasoningEfforts: model.reasoning_efforts }
+                        : {}),
                 });
             }
+            for (const model of catalog?.models ?? []) {
+                if (models.has(model.id)) continue;
+                models.set(model.id, {
+                    value: model.id,
+                    label: model.displayName && model.displayName !== model.id
+                        ? `${model.displayName} (${model.id})`
+                        : model.id,
+                    group: '可用模型',
+                });
+            }
+
+            const protocolRoutePrefixes = new Map<string, Set<string>>();
+            for (const member of group.members) {
+                const memberId = member.provider_id?.trim();
+                if (!memberId) continue;
+                for (const protocolConfig of protocolConfigsForProvider(member)) {
+                    if (!protocolConfig.enabled) continue;
+                    const prefixes = protocolRoutePrefixes.get(protocolConfig.protocol) ?? new Set<string>();
+                    prefixes.add(memberId);
+                    protocolRoutePrefixes.set(protocolConfig.protocol, prefixes);
+                }
+            }
+
+            const configuredProtocols = protocolConfigsForProvider(provider);
+            const enabledProtocols = configuredProtocols.filter((protocol) => protocol.enabled);
+            const protocolConfigs = enabledProtocols.length > 0 ? enabledProtocols : configuredProtocols;
+            const protocols: ModelSelectionProtocol[] = protocolConfigs.map((protocolConfig) => ({
+                key: `provider:${providerId}:protocol:${protocolConfig.protocol}`,
+                label: getProviderProtocolLabel(protocolConfig.protocol),
+                protocol: protocolConfig.protocol,
+                targetPrefix: providerId,
+                targetPrefixes: Array.from(protocolRoutePrefixes.get(protocolConfig.protocol) ?? [])
+                    .filter((prefix) => prefix !== providerId),
+                models: Array.from(models.values()),
+            }));
+
+            sources.push({
+                key: `provider:${providerId}`,
+                label: provider.name || providerId,
+                kind: 'provider',
+                protocol: protocols[0]?.protocol ?? provider.protocol,
+                targetPrefix: providerId,
+                targetPrefixes: provider.provider_id_aliases,
+                models: Array.from(models.values()),
+                protocols,
+            });
         }
 
-        return options;
-    }, [appConfig?.proxy?.providers]);
+        for (const connection of codexConnections) {
+            if (!connection.connection.enabled) continue;
+            const credentialId = connection.credential.id;
+            const catalog = getModelCatalog(codexModelCatalogKey(credentialId));
+            const identity = connection.identity.email
+                || connection.identity.display_name
+                || connection.credential.fingerprint;
+            const protocol: ModelSelectionProtocol = {
+                key: `codex:${credentialId}:protocol:codex_responses`,
+                label: getProviderProtocolLabel('codex_responses'),
+                protocol: 'codex_responses',
+                targetPrefix: `account/${credentialId}`,
+                models: (catalog?.models ?? []).map((model) => ({
+                    value: model.id,
+                    label: model.displayName && model.displayName !== model.id
+                        ? `${model.displayName} (${model.id})`
+                        : model.id,
+                    group: '可用模型',
+                })),
+            };
+            sources.push({
+                key: `codex:${credentialId}`,
+                label: identity,
+                kind: 'account',
+                protocol: 'codex_responses',
+                targetPrefix: `account/${credentialId}`,
+                models: protocol.models,
+                protocols: [protocol],
+            });
+        }
+
+        return sources;
+    }, [appConfig?.proxy?.providers, codexConnections, modelCatalogVersion]);
+
+    const customMappingEntries = useMemo(() => {
+        const mappings = appConfig?.proxy?.custom_mapping ?? {};
+        return Object.entries(mappings)
+            .map(([key, value]) => ({
+                key,
+                targets: mappingDrafts[key] ?? normalizeMappingTargets(value),
+            }))
+            .filter((entry) => entry.targets.length > 0);
+    }, [appConfig?.proxy?.custom_mapping, mappingDrafts]);
 
     // Load custom presets from localStorage
     useEffect(() => {
@@ -116,12 +303,33 @@ export default function RouteManager() {
             console.error('Failed to load custom presets:', error);
         }
         loadAccounts();
+        loadCodexConnections();
         loadPreferredAccount();
+
+        const handleModelCatalogUpdated = () => setModelCatalogVersion((version) => version + 1);
+        window.addEventListener(MODEL_CATALOG_UPDATED_EVENT, handleModelCatalogUpdated);
+        return () => window.removeEventListener(MODEL_CATALOG_UPDATED_EVENT, handleModelCatalogUpdated);
     }, []);
 
     // Load cooldowns on mount
     useEffect(() => {
         loadCooldowns();
+        const refreshTimer = window.setInterval(loadCooldowns, 5000);
+        return () => window.clearInterval(refreshTimer);
+    }, []);
+
+    // Keep the countdown responsive between backend refreshes. The backend
+    // remains authoritative and removes expired entries on the next fetch.
+    useEffect(() => {
+        const timer = window.setInterval(() => {
+            setCooldowns((current) => current
+                .map((cooldown) => ({
+                    ...cooldown,
+                    remaining_secs: Math.max(0, cooldown.remaining_secs - 1),
+                }))
+                .filter((cooldown) => cooldown.remaining_secs > 0));
+        }, 1000);
+        return () => window.clearInterval(timer);
     }, []);
 
     // Sync fallback/cooldown state from config
@@ -130,6 +338,7 @@ export default function RouteManager() {
             setFallbackEnabled(appConfig.proxy.fallback_model.enabled);
             setFallbackModel(appConfig.proxy.fallback_model.model);
             setFallbackProviderId(appConfig.proxy.fallback_model.provider_id ?? '');
+            setFallbackEffort(appConfig.proxy.fallback_model.reasoning_effort ?? '');
         }
     }, [appConfig?.proxy?.fallback_model]);
 
@@ -262,6 +471,7 @@ export default function RouteManager() {
 
         try {
             setAppConfig({ ...appConfig, proxy: newConfig });
+            setMappingDrafts({});
             showToast(t('proxy.router.presets_applied') + ` (${selectedPresetData.name})`, 'success');
             await saveConfig({ ...appConfig, proxy: newConfig });
         } catch (error) {
@@ -271,74 +481,238 @@ export default function RouteManager() {
         }
     };
 
-    const handleMappingUpdate = async (_type: 'custom', key: string, value: string) => {
+    const persistMappingTargets = async (
+        key: string,
+        targets: ReadonlyArray<WeightedTarget>,
+    ): Promise<boolean> => {
         if (!appConfig) return false;
-        const newConfig = { ...appConfig.proxy };
-        newConfig.custom_mapping = { ...(newConfig.custom_mapping || {}), [key]: value };
+
+        const normalizedTargets = normalizeMappingTargets([...targets]);
+        const customMapping = { ...(appConfig.proxy.custom_mapping || {}) };
+        const routeEffort = { ...(appConfig.proxy.route_reasoning_effort || {}) };
+        const activeEffortKeys = new Set(
+            normalizedTargets.map((target) => targetEffortKey(key, target.target)),
+        );
+        const effortPrefix = `${key}${TARGET_EFFORT_SEPARATOR}`;
+
+        for (const effortKey of Object.keys(routeEffort)) {
+            if (effortKey.startsWith(effortPrefix) && !activeEffortKeys.has(effortKey)) {
+                delete routeEffort[effortKey];
+            }
+        }
+
+        if (normalizedTargets.length === 0) {
+            delete customMapping[key];
+            delete routeEffort[key];
+        } else {
+            // Store rows consistently so a single target can later be edited
+            // or joined with another target without changing the UI flow.
+            customMapping[key] = normalizedTargets;
+            const legacyEffort = routeEffort[key];
+            if (legacyEffort) {
+                for (const target of normalizedTargets) {
+                    const effortKey = targetEffortKey(key, target.target);
+                    if (!routeEffort[effortKey]) routeEffort[effortKey] = legacyEffort;
+                }
+                delete routeEffort[key];
+            }
+        }
+
+        const newProxyConfig = {
+            ...appConfig.proxy,
+            custom_mapping: customMapping,
+            route_reasoning_effort: routeEffort,
+        };
+        const newAppConfig = { ...appConfig, proxy: newProxyConfig };
 
         try {
-            await saveConfig({ ...appConfig, proxy: newConfig });
-            setAppConfig({ ...appConfig, proxy: newConfig });
-            showToast(t('common.saved'), 'success');
+            await saveConfig(newAppConfig);
+            setAppConfig(newAppConfig);
+            setMappingDrafts((current) => {
+                const next = { ...current };
+                delete next[key];
+                return next;
+            });
             return true;
         } catch (error) {
-            console.error('Failed to update mapping:', error);
-            showToast(`${t('common.error')}: ${error}`, 'error');
+            // saveConfig already displays the single user-facing error toast.
+            console.error(`Failed to save mapping '${key}':`, error);
             return false;
         }
     };
 
+    const getMappingTargets = (key: string): WeightedTarget[] => {
+        return mappingDrafts[key]
+            ?? normalizeMappingTargets(appConfig?.proxy.custom_mapping?.[key]);
+    };
+
     const handleRemoveCustomMapping = async (key: string) => {
-        if (!appConfig || !appConfig.proxy.custom_mapping) return;
-        const newCustom = { ...appConfig.proxy.custom_mapping };
-        delete newCustom[key];
-        const newConfig = { ...appConfig.proxy, custom_mapping: newCustom };
+        await persistMappingTargets(key, []);
+        if (editingTarget?.key === key) {
+            setEditingTarget(null);
+            setEditingTargetValue('');
+        }
+    };
+
+    const beginTargetEdit = (key: string, index: number, target: string) => {
+        setEditingTarget({ key, index });
+        setEditingTargetValue(target);
+    };
+
+    const cancelTargetEdit = () => {
+        setEditingTarget(null);
+        setEditingTargetValue('');
+    };
+
+    const saveTargetEdit = async () => {
+        if (!editingTarget || !editingTargetValue.trim()) return;
+        const targets = getMappingTargets(editingTarget.key);
+        if (!targets[editingTarget.index]) return;
+
+        const updatedTargets = targets.map((target, index) => index === editingTarget.index
+            ? { ...target, target: editingTargetValue.trim() }
+            : target);
+        if (await persistMappingTargets(editingTarget.key, updatedTargets)) {
+            cancelTargetEdit();
+        }
+    };
+
+    const handleMappingWeightDraftChange = (key: string, index: number, weight: number) => {
+        const targets = getMappingTargets(key);
+        if (!targets[index]) return;
+        const nextWeight = normalizeMappingWeight(weight);
+        const updatedTargets = targets.map((target, targetIndex) => targetIndex === index
+            ? { ...target, weight: nextWeight }
+            : target);
+        setMappingDrafts((current) => ({ ...current, [key]: updatedTargets }));
+    };
+
+    const commitMappingWeight = async (key: string) => {
+        const draft = mappingDrafts[key];
+        if (draft) await persistMappingTargets(key, draft);
+    };
+
+    const moveMappingTarget = async (key: string, index: number, direction: -1 | 1) => {
+        const targets = getMappingTargets(key);
+        const nextIndex = index + direction;
+        if (nextIndex < 0 || nextIndex >= targets.length) return;
+
+        const updatedTargets = [...targets];
+        [updatedTargets[index], updatedTargets[nextIndex]] = [updatedTargets[nextIndex], updatedTargets[index]];
+        if (editingTarget?.key === key) cancelTargetEdit();
+        await persistMappingTargets(key, updatedTargets);
+    };
+
+    const removeMappingTarget = async (key: string, index: number) => {
+        const targets = getMappingTargets(key);
+        if (!targets[index]) return;
+
+        const updatedTargets = targets.filter((_, targetIndex) => targetIndex !== index);
+        if (editingTarget?.key === key) cancelTargetEdit();
+        await persistMappingTargets(key, updatedTargets);
+    };
+
+    const handleMappingEffortUpdate = async (key: string, target: string, effort: string) => {
+        if (!appConfig || !target) return;
+        const routeEffort = { ...(appConfig.proxy.route_reasoning_effort || {}) };
+        const legacyEffort = routeEffort[key];
+        const targets = getMappingTargets(key);
+
+        if (legacyEffort) {
+            for (const mappingTarget of targets) {
+                const effortKey = targetEffortKey(key, mappingTarget.target);
+                if (!routeEffort[effortKey]) routeEffort[effortKey] = legacyEffort;
+            }
+            delete routeEffort[key];
+        }
+
+        const effortKey = targetEffortKey(key, target);
+        if (effort) routeEffort[effortKey] = effort;
+        else delete routeEffort[effortKey];
+
+        const newProxyConfig = { ...appConfig.proxy, route_reasoning_effort: routeEffort };
+        const newAppConfig = { ...appConfig, proxy: newProxyConfig };
         try {
-            await saveConfig({ ...appConfig, proxy: newConfig });
-            setAppConfig({ ...appConfig, proxy: newConfig });
+            await saveConfig(newAppConfig);
+            setAppConfig(newAppConfig);
         } catch (error) {
-            console.error('Failed to remove custom mapping:', error);
+            console.error(`Failed to save reasoning effort for '${key}':`, error);
         }
     };
 
     // --- Weighted mapping handlers ---
     const handleAddWeightedMapping = async () => {
-        if (!appConfig || !weightedKey || weightedTargets.some(t => !t.target)) return;
+        const key = weightedKey.trim();
+        const selectedTarget = weightedTargets[0];
+        if (!appConfig || !key || !selectedTarget?.target.trim()) return;
+
+        const incomingTarget: WeightedTarget = {
+            target: selectedTarget.target.trim(),
+            weight: normalizeMappingWeight(selectedTarget.weight),
+        };
+
+        const existingTargets = normalizeMappingTargets(appConfig.proxy.custom_mapping?.[key]);
+        const mergedTargets = mergeMappingTargets(existingTargets, [incomingTarget]);
+        const routeEffort = { ...(appConfig.proxy.route_reasoning_effort || {}) };
+        const legacyEffort = routeEffort[key];
+        if (legacyEffort) {
+            for (const target of mergedTargets) {
+                const effortKey = targetEffortKey(key, target.target);
+                if (!routeEffort[effortKey]) routeEffort[effortKey] = legacyEffort;
+            }
+            delete routeEffort[key];
+        }
+        if (weightedEffort) {
+            routeEffort[targetEffortKey(key, incomingTarget.target)] = weightedEffort;
+        }
         const newProxyConfig = {
             ...appConfig.proxy,
-            custom_mapping: { ...(appConfig.proxy.custom_mapping || {}), [weightedKey]: weightedTargets }
+            custom_mapping: { ...(appConfig.proxy.custom_mapping || {}), [key]: mergedTargets },
+            route_reasoning_effort: routeEffort,
         };
+        const newAppConfig = { ...appConfig, proxy: newProxyConfig };
         try {
-            await saveConfig({ ...appConfig, proxy: newProxyConfig });
+            await saveConfig(newAppConfig);
+            setAppConfig(newAppConfig);
+            setMappingDrafts((current) => {
+                const next = { ...current };
+                delete next[key];
+                return next;
+            });
             setWeightedKey('');
-            setWeightedTargets([{ target: '', weight: 50 }]);
+            setWeightedTargets([{ target: '', weight: DEFAULT_MAPPING_WEIGHT }]);
+            setWeightedEffort('');
             showToast(t('common.saved'), 'success');
         } catch (error) {
-            showToast(`${t('common.error')}: ${error}`, 'error');
+            // saveConfig already shows the single user-facing error toast.
+            console.error('Failed to add weighted mapping:', error);
         }
-    };
-
-    const handleAddWeightedTarget = () => {
-        setWeightedTargets([...weightedTargets, { target: '', weight: 50 }]);
-    };
-
-    const handleRemoveWeightedTarget = (index: number) => {
-        if (weightedTargets.length <= 1) return;
-        setWeightedTargets(weightedTargets.filter((_, i) => i !== index));
     };
 
     const updateWeightedTarget = (index: number, field: keyof WeightedTarget, value: string | number) => {
         const updated = [...weightedTargets];
-        updated[index] = { ...updated[index], [field]: value };
+        const nextValue = field === 'weight' && typeof value === 'number'
+            ? normalizeMappingWeight(value)
+            : value;
+        updated[index] = { ...updated[index], [field]: nextValue };
         setWeightedTargets(updated);
     };
 
     // --- Fallback model handlers ---
     const handleSaveFallbackModel = async () => {
         if (!appConfig) return;
+        if (fallbackEnabled && !fallbackModel.trim()) {
+            showToast('启用兜底模型时必须选择或输入模型', 'error');
+            return;
+        }
         const newProxyConfig = {
             ...appConfig.proxy,
-            fallback_model: { enabled: fallbackEnabled, model: fallbackModel, provider_id: fallbackProviderId }
+            fallback_model: {
+                enabled: fallbackEnabled,
+                model: fallbackModel,
+                provider_id: fallbackProviderId,
+                reasoning_effort: fallbackEffort,
+            }
         };
         try {
             await saveConfig({ ...appConfig, proxy: newProxyConfig });
@@ -351,7 +725,7 @@ export default function RouteManager() {
     // --- Cooldown handlers ---
     const loadCooldowns = async () => {
         try {
-            const data = await invoke<Array<{ model: string; provider: string; remaining_secs: number }>>('get_model_cooldowns');
+            const data = await invoke<ModelCooldownEntry[]>('get_model_cooldowns');
             setCooldowns(data);
         } catch { /* Service not running */ }
     };
@@ -406,29 +780,21 @@ export default function RouteManager() {
 
         const newConfig = {
             ...appConfig.proxy,
-            custom_mapping: {}
+            custom_mapping: {},
+            route_reasoning_effort: {},
         };
 
         try {
             await saveConfig({ ...appConfig, proxy: newConfig });
             setAppConfig({ ...appConfig, proxy: newConfig });
+            setMappingDrafts({});
+            setEditingTarget(null);
+            setEditingTargetValue('');
             showToast(t('common.success'), 'success');
         } catch (error) {
             console.error('Failed to reset mapping:', error);
             showToast(`${t('common.error')}: ${error}`, 'error');
         }
-    };
-
-    const updateProxyConfig = (updates: Partial<ProxyConfig>) => {
-        if (!appConfig) return;
-        const newConfig = {
-            ...appConfig,
-            proxy: {
-                ...appConfig.proxy,
-                ...updates
-            }
-        };
-        saveConfig(newConfig);
     };
 
     const updateExperimentalConfig = (updates: Partial<ExperimentalConfig>) => {
@@ -457,6 +823,15 @@ export default function RouteManager() {
             setAvailableAccounts(accounts.map(a => ({ id: a.id, email: a.email })));
         } catch (error) {
             console.error('Failed to load accounts:', error);
+        }
+    };
+
+    const loadCodexConnections = async () => {
+        try {
+            const connections = await invoke<CodexConnection[]>('list_account_connections');
+            setCodexConnections(Array.isArray(connections) ? connections : []);
+        } catch (error) {
+            console.warn('Failed to load Codex auth-files for routing:', error);
         }
     };
 
@@ -547,6 +922,9 @@ export default function RouteManager() {
                                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 max-w-xl leading-relaxed">
                                     {t('proxy.router.subtitle_simple')}
                                 </p>
+                                <p className="mt-1 text-[10px] text-indigo-500 dark:text-indigo-300">
+                                    模型列表按供应商/账号分组，使用本地缓存；请在对应页面点击“模型”或“从服务端获取”刷新
+                                </p>
                             </div>
                             <div className="flex flex-wrap items-center gap-2 bg-white dark:bg-base-100 p-1.5 rounded-xl border border-gray-100 dark:border-gray-700/50 shadow-sm">
                                 {/* Preset Select */}
@@ -630,176 +1008,240 @@ export default function RouteManager() {
                     </div>
 
                     <div className="p-3 space-y-3">
-                        {/* Background Task Model Config */}
-                        <div className="mb-4 pb-4 border-b border-gray-100 dark:border-base-200">
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                                <div className="flex-1">
-                                    <h3 className="text-xs font-bold text-gray-700 dark:text-gray-300 flex items-center gap-2">
-                                        <Sparkles size={14} className="text-blue-500" />
-                                        {t('proxy.router.background_task_title')}
-                                    </h3>
-                                    <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
-                                        {t('proxy.router.background_task_desc')}
-                                    </p>
-                                </div>
-
-                                <div className="flex items-center gap-2 w-full sm:w-auto min-w-[200px] max-w-sm">
-                                    <div className="relative flex-1">
-                                        <GroupedSelect
-                                            value={resolveMappingEditValue(appConfig.proxy.custom_mapping?.['internal-background-task'] || '')}
-                                            onChange={(val) => handleMappingUpdate('custom', 'internal-background-task', val)}
-                                            options={[
-                                                { value: '', label: 'Default (auto-match provider)', group: 'System' },
-                                                ...customMappingOptions
-                                            ]}
-                                            placeholder="Default (auto-match provider)"
-                                            className="font-mono text-[11px] h-8 dark:bg-base-200 w-full"
-                                        />
-                                    </div>
-
-                                    {appConfig.proxy.custom_mapping && appConfig.proxy.custom_mapping['internal-background-task'] && (
-                                        <button
-                                            onClick={() => handleRemoveCustomMapping('internal-background-task')}
-                                            className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"
-                                            title={t('proxy.router.use_default', { defaultValue: 'Use default' })}
-                                        >
-                                            <RefreshCw size={12} />
-                                        </button>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-
                         {/* Custom Mapping List */}
                         <div className="flex flex-col gap-4">
                             <div className="w-full flex flex-col">
-                                <div className="flex items-center justify-between mb-2">
-                                    <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                                <div className="mb-2 flex items-center justify-between">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                                         {t('proxy.router.current_list')}
                                     </span>
+                                    <span className="text-[10px] text-gray-400 dark:text-gray-500">
+                                        点击目标模型可编辑
+                                    </span>
                                 </div>
-                                <div className="overflow-y-auto max-h-[500px] border border-gray-100 dark:border-white/5 rounded-lg bg-gray-50/10 dark:bg-white/5 p-3" data-custom-mapping-list>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
-                                        {appConfig.proxy.custom_mapping && Object.entries(appConfig.proxy.custom_mapping).length > 0 ? (
-                                            Object.entries(appConfig.proxy.custom_mapping).map(([key, val]) => {
-                                                const displayVal = resolveMappingDisplay(val);
-                                                const editVal = resolveMappingEditValue(val);
+                                <div
+                                    className="max-h-[560px] overflow-y-auto rounded-lg border border-gray-200 bg-white p-3 dark:border-base-300 dark:bg-base-100"
+                                    data-custom-mapping-list
+                                >
+                                    {customMappingEntries.length > 0 ? (
+                                        <div className="space-y-3">
+                                            {customMappingEntries.map(({ key, targets }) => {
+                                                const totalWeight = targets.reduce((sum, target) => sum + target.weight, 0);
                                                 return (
-                                                <div key={key} className={`flex items-center justify-between p-1.5 rounded-md transition-all border group ${editingKey === key ? 'bg-blue-50/80 dark:bg-blue-900/15 border-blue-300/50 dark:border-blue-500/30 shadow-sm' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/5 hover:border-gray-200 dark:hover:border-white/10'}`}>
-                                                    <div className="flex items-center gap-2.5 overflow-hidden flex-1">
-                                                        <span className="font-mono text-[10px] font-bold text-blue-600 dark:text-blue-400 truncate max-w-[140px]" title={key}>{key}</span>
-                                                        <ArrowRight size={10} className="text-gray-300 dark:text-gray-600 shrink-0" />
-
-                                                        {editingKey === key ? (
-                                                            <div className="flex-1 mr-2">
-                                                                <GroupedSelect
-                                                                    value={editingValue}
-                                                                    onChange={setEditingValue}
-                                                                    options={customMappingOptions}
-                                                                    placeholder="Select..."
-                                                                    className="font-mono text-[10px] h-7 dark:bg-gray-800 border-blue-200 dark:border-blue-800"
-                                                                    allowCustomInput={true}
-                                                                />
+                                                    <section
+                                                        key={key}
+                                                        className="overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-base-300 dark:bg-base-100"
+                                                    >
+                                                        <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-base-300">
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                    <span className="max-w-full truncate font-mono text-[11px] font-bold text-blue-600 dark:text-blue-400" title={key}>
+                                                                        {key}
+                                                                    </span>
+                                                                    <span className="rounded-full bg-blue-50 px-1.5 py-0.5 text-[9px] text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">
+                                                                        {targets.length} 个目标
+                                                                    </span>
+                                                                </div>
+                                                                <div className="mt-0.5 text-[9px] text-gray-500 dark:text-gray-400">
+                                                                    顺序用于优先级，模型权重按总比例计算实际占比
+                                                                </div>
                                                             </div>
-                                                        ) : (
-                                                            <span className="font-mono text-[10px] text-gray-500 dark:text-gray-400 truncate cursor-pointer hover:text-blue-500"
-                                                                onClick={() => { setEditingKey(key); setEditingValue(editVal); }}
-                                                                title={displayVal}>{displayVal}</span>
-                                                        )}
-                                                    </div>
-
-                                                    <div className="flex items-center gap-1.5 shrink-0">
-                                                        {editingKey === key ? (
-                                                            <div className="flex items-center gap-1 bg-white dark:bg-gray-800 rounded-md border border-blue-200 dark:border-blue-800 p-0.5 shadow-sm">
+                                                            <div className="flex items-center gap-1.5">
                                                                 <button
-                                                                    className="btn btn-ghost btn-xs text-primary hover:bg-blue-50 dark:hover:bg-blue-900/30 p-0 h-6 w-6 min-h-0"
-                                                                    onClick={async () => {
-                                                                        const saved = await handleMappingUpdate('custom', key, editingValue);
-                                                                        if (saved) setEditingKey(null);
-                                                                    }}
-                                                                    title={t('common.save') || 'Save'}
-                                                                >
-                                                                    <Check size={14} strokeWidth={3} />
-                                                                </button>
-                                                                <div className="w-[1px] h-3 bg-gray-200 dark:bg-gray-700" />
-                                                                <button
-                                                                    className="btn btn-ghost btn-xs text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 p-0 h-6 w-6 min-h-0"
-                                                                    onClick={() => setEditingKey(null)}
-                                                                    title={t('common.cancel') || 'Cancel'}
-                                                                >
-                                                                    <X size={14} strokeWidth={3} />
-                                                                </button>
-                                                            </div>
-                                                        ) : (
-                                                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                                <button
-                                                                    className="btn btn-ghost btn-xs text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-white/10 p-0 h-6 w-6 min-h-0"
-                                                                    onClick={() => { setEditingKey(key); setEditingValue(editVal); }}
-                                                                    title={t('common.edit') || 'Edit'}
-                                                                >
-                                                                    <Edit2 size={12} />
-                                                                </button>
-                                                                <button
-                                                                    className="btn btn-ghost btn-xs text-error hover:bg-red-50 dark:hover:bg-red-900/20 p-0 h-6 w-6 min-h-0"
+                                                                    type="button"
                                                                     onClick={() => handleRemoveCustomMapping(key)}
-                                                                    title={t('common.delete') || 'Delete'}
+                                                                    className="btn btn-ghost btn-xs h-7 min-h-0 w-7 p-0 text-gray-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-900/20"
+                                                                    title="删除整个模型模板"
+                                                                    aria-label={`删除 ${key} 模型模板`}
                                                                 >
-                                                                    <Trash2 size={12} />
+                                                                    <Trash2 size={13} />
                                                                 </button>
                                                             </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            ); })
-                                        ) : (
-                                            <div className="col-span-full text-center py-4 text-gray-400 dark:text-gray-600 italic text-[11px]">{t('proxy.router.no_custom_mapping')}</div>
-                                        )}
-                                    </div>
+                                                        </div>
+
+                                                        <div className="hidden grid-cols-[2rem_minmax(0,1fr)_8rem_7rem_7.5rem] items-center gap-2 px-3 py-1.5 text-[9px] text-gray-400 dark:text-gray-500 sm:grid">
+                                                            <span className="text-center">优先级</span>
+                                                            <span>目标模型</span>
+                                                            <span className="text-center">思考深度</span>
+                                                            <span className="text-center">模型权重 / 占比</span>
+                                                            <span className="text-right">操作</span>
+                                                        </div>
+                                                        <div className="space-y-1.5 px-2 py-2">
+                                                            {targets.map((target, index) => {
+                                                                const isEditing = editingTarget?.key === key && editingTarget.index === index;
+                                                                return (
+                                                                    <div
+                                                                        key={`${key}-${target.target}-${index}`}
+                                                                        className={`rounded-md border px-2 py-1.5 transition-colors ${isEditing
+                                                                            ? 'border-blue-300 bg-blue-50/70 dark:border-blue-700 dark:bg-blue-900/20'
+                                                                            : 'border-gray-100 bg-white hover:border-blue-200 hover:bg-blue-50/30 dark:border-base-300 dark:bg-base-100 dark:hover:border-blue-800 dark:hover:bg-blue-900/10'}`}
+                                                                    >
+                                                                        <div className="grid grid-cols-[2rem_minmax(0,1fr)_8rem_7rem_7.5rem] items-center gap-2">
+                                                                            <span className="text-center font-mono text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                                                                                {index + 1}
+                                                                            </span>
+                                                                            <div className="min-w-0">
+                                                                                {isEditing ? (
+                                                                                    <ProviderModelSelect
+                                                                                        value={editingTargetValue}
+                                                                                        onChange={setEditingTargetValue}
+                                                                                        sources={modelSources}
+                                                                                        placeholder="目标模型"
+                                                                                        className="w-full min-w-0 font-mono text-[10px] lg:flex-nowrap"
+                                                                                        allowCustomInput={true}
+                                                                                    />
+                                                                                ) : (
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => beginTargetEdit(key, index, target.target)}
+                                                                                        className="flex w-full min-w-0 items-center gap-1 text-left"
+                                                                                        title="点击编辑目标模型"
+                                                                                    >
+                                                                                        <span className="truncate font-mono text-[10px] text-gray-700 hover:text-blue-600 dark:text-gray-200 dark:hover:text-blue-300">
+                                                                                            {target.target}
+                                                                                        </span>
+                                                                                        <Edit2 size={11} className="shrink-0 text-gray-400" />
+                                                                                    </button>
+                                                                                )}
+                                                                            </div>
+                                                                            <ReasoningEffortSelect
+                                                                                value={getMappingEffort(key, target.target)}
+                                                                                target={target.target}
+                                                                                sources={modelSources}
+                                                                                onChange={(effort) => handleMappingEffortUpdate(key, target.target, effort)}
+                                                                                className="w-full min-w-0"
+                                                                            />
+                                                                            <div className="flex items-center justify-center gap-1">
+                                                                                <input
+                                                                                    type="number"
+                                                                                    min={1}
+                                                                                    max={MAX_MAPPING_WEIGHT}
+                                                                                    step={1}
+                                                                                    value={target.weight}
+                                                                                    onChange={(event) => handleMappingWeightDraftChange(key, index, Number(event.target.value))}
+                                                                                    onBlur={() => commitMappingWeight(key)}
+                                                                                    className="input input-xs input-bordered h-7 w-12 bg-white text-center font-mono text-[10px] dark:bg-base-100"
+                                                                                    title="模型比例权重（整数）"
+                                                                                    aria-label={`${key} 第 ${index + 1} 个模型比例权重`}
+                                                                                />
+                                                                                <span className="min-w-[2.8rem] text-right font-mono text-[9px] text-blue-600 dark:text-blue-300">
+                                                                                    {formatMappingPercentage(target.weight, totalWeight)}
+                                                                                </span>
+                                                                            </div>
+                                                                            <div className="flex items-center justify-end gap-0.5">
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => moveMappingTarget(key, index, -1)}
+                                                                                    disabled={index === 0}
+                                                                                    className="btn btn-ghost btn-xs h-6 min-h-0 w-6 p-0 text-gray-400 hover:bg-blue-50 hover:text-blue-500 disabled:opacity-30 dark:hover:bg-blue-900/20"
+                                                                                    title="上移，提高优先级"
+                                                                                    aria-label="上移"
+                                                                                >
+                                                                                    <ChevronUp size={13} />
+                                                                                </button>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => moveMappingTarget(key, index, 1)}
+                                                                                    disabled={index === targets.length - 1}
+                                                                                    className="btn btn-ghost btn-xs h-6 min-h-0 w-6 p-0 text-gray-400 hover:bg-blue-50 hover:text-blue-500 disabled:opacity-30 dark:hover:bg-blue-900/20"
+                                                                                    title="下移，降低优先级"
+                                                                                    aria-label="下移"
+                                                                                >
+                                                                                    <ChevronDown size={13} />
+                                                                                </button>
+                                                                                {isEditing ? (
+                                                                                    <>
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={saveTargetEdit}
+                                                                                            disabled={!editingTargetValue.trim()}
+                                                                                            className="btn btn-ghost btn-xs h-6 min-h-0 w-6 p-0 text-blue-500 hover:bg-blue-50 disabled:opacity-40 dark:hover:bg-blue-900/20"
+                                                                                            title="保存目标模型"
+                                                                                            aria-label="保存目标模型"
+                                                                                        >
+                                                                                            <Check size={13} strokeWidth={3} />
+                                                                                        </button>
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={cancelTargetEdit}
+                                                                                            className="btn btn-ghost btn-xs h-6 min-h-0 w-6 p-0 text-gray-400 hover:bg-gray-100 dark:hover:bg-base-300"
+                                                                                            title="取消编辑"
+                                                                                            aria-label="取消编辑"
+                                                                                        >
+                                                                                            <X size={13} />
+                                                                                        </button>
+                                                                                    </>
+                                                                                ) : (
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => removeMappingTarget(key, index)}
+                                                                                        className="btn btn-ghost btn-xs h-6 min-h-0 w-6 p-0 text-gray-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-900/20"
+                                                                                        title="删除目标模型"
+                                                                                        aria-label="删除目标模型"
+                                                                                    >
+                                                                                        <Trash2 size={12} />
+                                                                                    </button>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </section>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : (
+                                        <div className="py-6 text-center text-[11px] italic text-gray-500 dark:text-gray-400">
+                                            {t('proxy.router.no_custom_mapping')}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
                             {/* Weighted Mapping Add Form */}
-                            <div className="w-full bg-gray-50/50 dark:bg-white/5 p-2.5 rounded-xl border border-gray-100 dark:border-white/5 shadow-inner">
-                                <div className="flex items-center gap-2 mb-2">
+                            <div className="w-full rounded-xl border border-gray-200 bg-white p-2.5 shadow-inner dark:border-base-300 dark:bg-base-100">
+                                <div className="mb-2 flex items-center gap-2">
                                     <Zap size={12} className="text-amber-500" />
-                                    <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                                         1对N 权重映射
                                     </span>
-                                    <div className="flex gap-1 ml-auto">
-                                        <button onClick={() => setAddMode('single')} className={`text-[10px] px-2 py-0.5 rounded ${addMode === 'single' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-500'}`}>单目标</button>
-                                        <button onClick={() => setAddMode('weighted')} className={`text-[10px] px-2 py-0.5 rounded ${addMode === 'weighted' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-500'}`}>多目标</button>
-                                    </div>
+                                    <span className="ml-auto text-[10px] text-gray-500 dark:text-gray-400">
+                                        单次添加一个目标，重复添加同一模板即可增加模型
+                                    </span>
                                 </div>
 
-                                {addMode === 'single' ? (
-                                    <div className="flex flex-col sm:flex-row items-center gap-2">
-                                        <input type="text" placeholder="原始模型名 (如 gpt-4*)" className="input input-xs input-bordered flex-1 font-mono text-[11px] bg-white dark:bg-gray-800 h-8"
-                                            onChange={e => { setWeightedKey(e.target.value); }} value={weightedKey} />
-                                        <div className="w-full sm:w-48">
-                                            <GroupedSelect value={weightedTargets[0]?.target || ''} onChange={v => updateWeightedTarget(0, 'target', v)} options={customMappingOptions} placeholder="目标模型" className="font-mono text-[11px] h-8 dark:bg-gray-800" allowCustomInput={true} />
-                                        </div>
-                                        <button className="btn btn-xs sm:w-20 gap-1.5 shadow-md hover:shadow-lg transition-all bg-blue-600 hover:bg-blue-700 text-white border-none h-8" onClick={handleAddWeightedMapping}><Plus size={14} />{t('common.add')}</button>
-                                    </div>
-                                ) : (
-                                    <div className="space-y-2">
-                                        <input type="text" placeholder="原始模型名 (如 claude-sonnet-*)" className="input input-xs input-bordered w-full font-mono text-[11px] bg-white dark:bg-gray-800 h-8"
-                                            onChange={e => setWeightedKey(e.target.value)} value={weightedKey} />
-                                        {weightedTargets.map((wt, idx) => (
-                                            <div key={idx} className="flex items-center gap-2">
-                                                <span className="text-[10px] text-gray-400 w-6">#{idx + 1}</span>
-                                                <div className="flex-1">
-                                                    <GroupedSelect value={wt.target} onChange={v => updateWeightedTarget(idx, 'target', v)} options={customMappingOptions} placeholder="目标模型" className="font-mono text-[11px] h-8 dark:bg-gray-800 w-full" allowCustomInput={true} />
-                                                </div>
-                                                <input type="number" min={1} max={100} value={wt.weight} onChange={e => updateWeightedTarget(idx, 'weight', parseInt(e.target.value) || 1)} className="input input-xs input-bordered w-16 font-mono text-[11px] bg-white dark:bg-gray-800 h-8 text-center" title="权重" />
-                                                <button onClick={() => handleRemoveWeightedTarget(idx)} className="btn btn-ghost btn-xs text-error p-0 h-6 w-6 min-h-0" disabled={weightedTargets.length <= 1}><X size={12} /></button>
-                                            </div>
-                                        ))}
-                                        <div className="flex gap-2 justify-end">
-                                            <button onClick={handleAddWeightedTarget} className="btn btn-xs btn-ghost gap-1"><Plus size={12} />添加目标</button>
-                                            <button className="btn btn-xs sm:w-20 gap-1.5 shadow-md hover:shadow-lg transition-all bg-blue-600 hover:bg-blue-700 text-white border-none h-8" onClick={handleAddWeightedMapping}><Plus size={14} />{t('common.add')}</button>
-                                        </div>
-                                    </div>
-                                )}
+                                <div className="grid grid-cols-1 items-center gap-2 lg:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)_7rem_auto]">
+                                    <GroupedSelect
+                                        value={weightedKey}
+                                        onChange={setWeightedKey}
+                                        options={weightedSourceModelTemplates}
+                                        placeholder="选择原始模型模板或自定义输入"
+                                        className="h-8 w-full"
+                                        allowCustomInput={true}
+                                    />
+                                    <ProviderModelSelect
+                                        value={weightedTargets[0]?.target || ''}
+                                        onChange={v => {
+                                            updateWeightedTarget(0, 'target', v);
+                                            setWeightedEffort('');
+                                        }}
+                                        sources={modelSources}
+                                        placeholder="目标模型"
+                                        className="h-8 w-full min-w-0 font-mono text-[11px] dark:bg-base-100 lg:flex-nowrap"
+                                        allowCustomInput={true}
+                                    />
+                                    <ReasoningEffortSelect
+                                        value={weightedEffort}
+                                        target={weightedTargets[0]?.target || ''}
+                                        sources={modelSources}
+                                        onChange={setWeightedEffort}
+                                        className="w-full min-w-0"
+                                        disabled={!weightedTargets[0]?.target}
+                                    />
+                                    <button className="btn btn-xs w-full gap-1.5 bg-blue-600 text-white shadow-md transition-all hover:bg-blue-700 hover:shadow-lg lg:w-20" onClick={handleAddWeightedMapping}><Plus size={14} />{t('common.add')}</button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -813,7 +1255,7 @@ export default function RouteManager() {
                         </div>
                         <div className="flex-1">
                             <h3 className="text-base font-bold text-gray-900 dark:text-gray-100 leading-none">兜底模型</h3>
-                            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">当请求的模型处于冷却状态时，自动转换到指定的兜底模型</p>
+                            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">请求模型无法匹配有效供应商和模型时，改用指定的兜底模型</p>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer">
                             <input type="checkbox" className="sr-only peer" checked={fallbackEnabled} onChange={e => setFallbackEnabled(e.target.checked)} />
@@ -821,15 +1263,43 @@ export default function RouteManager() {
                         </label>
                     </div>
                     {fallbackEnabled && (
-                        <div className="flex flex-col sm:flex-row gap-3">
-                            <div className="flex-1">
+                        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_9rem_auto]">
+                            <div className="min-w-0">
                                 <label className="text-[10px] text-gray-400 mb-1 block">兜底模型</label>
-                                <GroupedSelect value={fallbackModel} onChange={setFallbackModel} options={customMappingOptions} placeholder="输入或选择模型" className="font-mono text-[11px] h-9 dark:bg-base-200 w-full" allowCustomInput={true} />
+                                <ProviderModelSelect
+                                    value={fallbackModel}
+                                    onChange={(value) => {
+                                        setFallbackModel(value);
+                                        setFallbackEffort('');
+                                        const providerSource = modelSources.find((source) => source.kind === 'provider' && value.startsWith(`${source.targetPrefix}/`));
+                                        setFallbackProviderId(providerSource?.targetPrefix ?? '');
+                                    }}
+                                    sources={modelSources}
+                                    placeholder="输入或选择模型"
+                                    className="font-mono text-[11px] h-9 dark:bg-base-200 w-full"
+                                    allowCustomInput={true}
+                                />
+                            </div>
+                            <div className="min-w-0">
+                                <label className="text-[10px] text-gray-400 mb-1 block">思考强度</label>
+                                <ReasoningEffortSelect
+                                    value={fallbackEffort}
+                                    target={fallbackModel}
+                                    sources={modelSources}
+                                    onChange={setFallbackEffort}
+                                    className="h-9 w-full min-w-0"
+                                    disabled={!fallbackModel}
+                                />
                             </div>
                             <div className="flex items-end">
-                                <button className="btn btn-sm sm:w-20 bg-amber-600 hover:bg-amber-700 text-white gap-1 h-9" onClick={handleSaveFallbackModel}><Save size={14} />保存</button>
+                                <button className="btn btn-sm w-full bg-amber-600 hover:bg-amber-700 text-white gap-1 h-9 lg:w-20" onClick={handleSaveFallbackModel}><Save size={14} />保存</button>
                             </div>
                         </div>
+                    )}
+                    {fallbackEnabled && (
+                        <p className="mt-3 text-[11px] text-gray-500 dark:text-gray-400">
+                            仅在路由映射后的目标没有匹配到供应商或可用模型时生效；关闭后保留原有路由行为。思考强度留空表示跟随请求。
+                        </p>
                     )}
                 </div>
 
@@ -841,7 +1311,7 @@ export default function RouteManager() {
                         </div>
                         <div className="flex-1">
                             <h3 className="text-base font-bold text-gray-900 dark:text-gray-100 leading-none">模型冷却状态</h3>
-                            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">遇到 429 错误的模型会进入冷却，冷却期间请求自动走兜底模型</p>
+                            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">429 后暂时排除对应供应商、协议和模型，倒计时结束自动恢复</p>
                         </div>
                         <div className="flex items-center gap-1">
                             <span className="text-[10px] text-gray-400">冷却时长</span>
@@ -860,11 +1330,11 @@ export default function RouteManager() {
                         {cooldowns.length > 0 ? (
                                 <div className="space-y-1">
                                     {cooldowns.map((cd, idx) => (
-                                        <div key={`${cd.model}-${cd.provider}-${idx}`} className="flex items-center justify-between px-3 py-2 bg-red-50/50 dark:bg-red-900/10 rounded-md border border-red-100 dark:border-red-900/30">
+                                        <div key={`${cd.model}-${cd.provider}-${cd.protocol}-${idx}`} className="flex items-center justify-between px-3 py-2 bg-red-50/50 dark:bg-red-900/10 rounded-md border border-red-100 dark:border-red-900/30">
                                             <div className="flex items-center gap-3">
                                                 <Activity size={12} className="text-red-500 animate-pulse" />
                                                 <span className="font-mono text-[11px] text-gray-700 dark:text-gray-300">{cd.model}</span>
-                                                <span className="text-[10px] text-gray-400">@{cd.provider}</span>
+                                                <span className="text-[10px] text-gray-500 dark:text-gray-400">@{cd.provider} · {cd.protocol}</span>
                                             </div>
                                             <span className="font-mono text-[11px] text-red-600 dark:text-red-400">{cd.remaining_secs}s</span>
                                         </div>
@@ -876,12 +1346,6 @@ export default function RouteManager() {
                                 )}
                         </div>
                 </div>
-
-                {/* Advanced Thinking & Global Config */}
-                <AdvancedThinking
-                    config={appConfig.proxy}
-                    onChange={(newProxyConfig) => updateProxyConfig(newProxyConfig)}
-                />
 
                 {/* Experimental Settings */}
                 <div className="bg-white dark:bg-base-100 rounded-xl p-4 border border-gray-100 dark:border-base-200 shadow-sm">

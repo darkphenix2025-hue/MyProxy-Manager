@@ -3,6 +3,8 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
+use crate::proxy::config::CustomMappingTable;
+
 // 动态官方废弃模型转发表 (old_model_id -> new_model_id)
 pub static DYNAMIC_MODEL_FORWARDING_RULES: Lazy<DashMap<String, String>> = Lazy::new(DashMap::new);
 
@@ -139,7 +141,7 @@ pub fn get_supported_models() -> Vec<String> {
 
 /// 动态获取所有可用模型列表 (包含内置与用户自定义与官方端点动态下发)
 pub async fn get_all_dynamic_models(
-    custom_mapping: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    custom_mapping: &tokio::sync::RwLock<CustomMappingTable>,
     token_manager: Option<&crate::proxy::token_manager::TokenManager>,
 ) -> Vec<String> {
     use std::collections::HashSet;
@@ -249,10 +251,24 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 ///
 /// # 返回
 /// 映射后的目标模型名称
-pub fn resolve_model_route(
+pub fn resolve_model_route(original_model: &str, custom_mapping: &CustomMappingTable) -> String {
+    resolve_model_route_with_filter(original_model, custom_mapping, |_| true)
+        .unwrap_or_else(|| map_claude_model_to_gemini(original_model))
+}
+
+/// Resolve a model route while excluding targets that are currently
+/// unavailable (for example, because they are in cooldown). `None` means a
+/// matching custom rule existed but none of its targets was usable; callers
+/// can then try the configured fallback model and report a precise error if
+/// that fallback is also unavailable.
+pub fn resolve_model_route_with_filter<F>(
     original_model: &str,
-    custom_mapping: &std::collections::HashMap<String, String>,
-) -> String {
+    custom_mapping: &CustomMappingTable,
+    mut is_target_available: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
     // 0. API 热更新废弃模型转发 (最高物理优先级，强制纠正)
     // 如果用户非要用已经被移除的模型，并且官方下发了 fallback path，我们在此拦截并纠正
     if let Some(forwarded) = DYNAMIC_MODEL_FORWARDING_RULES.get(original_model) {
@@ -261,29 +277,42 @@ pub fn resolve_model_route(
             original_model,
             forwarded.value()
         ));
-        return forwarded.value().clone();
+        let target = forwarded.value().clone();
+        return is_target_available(&target).then_some(target);
     }
 
     // 1. 精确匹配 (次高优先级)
-    if let Some(target) = custom_mapping.get(original_model) {
-        crate::modules::logger::log_info(&format!(
-            "[Router] 精确映射: {} -> {}",
-            original_model, target
-        ));
-        return target.clone();
+    if let Some(mapping) = custom_mapping.get(original_model) {
+        if let Some(target) = mapping.select_target_with(|target| is_target_available(target)) {
+            crate::modules::logger::log_info(&format!(
+                "[Router] 精确映射: {} -> {}",
+                original_model, target
+            ));
+            return Some(target);
+        }
+        return None;
     }
 
     // 2. Wildcard match - most specific (highest non-wildcard chars) wins
     // Note: When multiple patterns have the SAME specificity, HashMap iteration order
     // determines the result (non-deterministic). Users can avoid this by making patterns
     // more specific. Future improvement: use IndexMap + frontend sorting for full control.
-    let mut best_match: Option<(&str, &str, usize)> = None;
+    let mut best_match: Option<(&str, String, usize)> = None;
+    let mut matched_custom_pattern = false;
 
-    for (pattern, target) in custom_mapping.iter() {
+    for (pattern, mapping) in custom_mapping.iter() {
         if pattern.contains('*') && wildcard_match(pattern, original_model) {
+            matched_custom_pattern = true;
+            let Some(target) = mapping.select_target_with(|target| is_target_available(target))
+            else {
+                continue;
+            };
             let specificity = pattern.chars().count() - pattern.matches('*').count();
-            if best_match.is_none() || specificity > best_match.unwrap().2 {
-                best_match = Some((pattern.as_str(), target.as_str(), specificity));
+            let should_replace = best_match
+                .as_ref()
+                .is_none_or(|(_, _, current_specificity)| specificity > *current_specificity);
+            if should_replace {
+                best_match = Some((pattern.as_str(), target, specificity));
             }
         }
     }
@@ -293,7 +322,11 @@ pub fn resolve_model_route(
             "[Router] Wildcard match: {} -> {} (rule: {})",
             original_model, target, pattern
         ));
-        return target.to_string();
+        return Some(target);
+    }
+
+    if matched_custom_pattern {
+        return None;
     }
 
     // 3. 系统默认映射
@@ -304,7 +337,7 @@ pub fn resolve_model_route(
             original_model, result
         ));
     }
-    result
+    Some(result)
 }
 
 /// Normalize any physical model name to one of the 3 standard protection IDs.
@@ -349,6 +382,11 @@ pub fn normalize_to_standard_id(model_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::config::{CustomMappingValue, WeightedTarget};
+
+    fn single(target: &str) -> CustomMappingValue {
+        CustomMappingValue::Single(target.to_string())
+    }
 
     #[test]
     fn test_model_mapping() {
@@ -448,13 +486,10 @@ mod tests {
     #[test]
     fn test_wildcard_priority() {
         let mut custom = HashMap::new();
-        custom.insert("gpt*".to_string(), "fallback".to_string());
-        custom.insert("gpt-4*".to_string(), "specific".to_string());
-        custom.insert("claude-opus-*".to_string(), "opus-default".to_string());
-        custom.insert(
-            "claude-opus*thinking".to_string(),
-            "opus-thinking".to_string(),
-        );
+        custom.insert("gpt*".to_string(), single("fallback"));
+        custom.insert("gpt-4*".to_string(), single("specific"));
+        custom.insert("claude-opus-*".to_string(), single("opus-default"));
+        custom.insert("claude-opus*thinking".to_string(), single("opus-thinking"));
 
         // More specific pattern wins
         assert_eq!(resolve_model_route("gpt-4-turbo", &custom), "specific");
@@ -473,12 +508,9 @@ mod tests {
     #[test]
     fn test_multi_wildcard_support() {
         let mut custom = HashMap::new();
-        custom.insert(
-            "claude-*-sonnet-*".to_string(),
-            "sonnet-versioned".to_string(),
-        );
-        custom.insert("gpt-*-*".to_string(), "gpt-multi".to_string());
-        custom.insert("*thinking*".to_string(), "has-thinking".to_string());
+        custom.insert("claude-*-sonnet-*".to_string(), single("sonnet-versioned"));
+        custom.insert("gpt-*-*".to_string(), single("gpt-multi"));
+        custom.insert("*thinking*".to_string(), single("has-thinking"));
 
         // Multi-wildcard patterns should work
         assert_eq!(
@@ -504,9 +536,9 @@ mod tests {
     #[test]
     fn test_wildcard_edge_cases() {
         let mut custom = HashMap::new();
-        custom.insert("prefix*".to_string(), "prefix-match".to_string());
-        custom.insert("*".to_string(), "catch-all".to_string());
-        custom.insert("a*b*c".to_string(), "multi-wild".to_string());
+        custom.insert("prefix*".to_string(), single("prefix-match"));
+        custom.insert("*".to_string(), single("catch-all"));
+        custom.insert("a*b*c".to_string(), single("multi-wild"));
 
         // Specificity: "prefix*" (6) > "*" (0)
         assert_eq!(
@@ -517,5 +549,59 @@ mod tests {
         assert_eq!(resolve_model_route("random-model", &custom), "catch-all");
         // Multi-wildcard: "a*b*c" (3)
         assert_eq!(resolve_model_route("a-test-b-foo-c", &custom), "multi-wild");
+    }
+
+    #[test]
+    fn test_weighted_mapping_route_uses_weighted_target() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "claude-*".to_string(),
+            CustomMappingValue::Weighted(vec![WeightedTarget {
+                target: "big/claude-sonnet".to_string(),
+                weight: 100,
+            }]),
+        );
+
+        assert_eq!(
+            resolve_model_route("claude-sonnet-4-6", &custom),
+            "big/claude-sonnet"
+        );
+    }
+
+    #[test]
+    fn filtered_weighted_mapping_recalculates_weights_without_cooled_targets() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "claude-*".to_string(),
+            CustomMappingValue::Weighted(vec![
+                WeightedTarget {
+                    target: "big/glm-5".to_string(),
+                    weight: 1,
+                },
+                WeightedTarget {
+                    target: "ali/qwen-3".to_string(),
+                    weight: 1,
+                },
+            ]),
+        );
+
+        let result = resolve_model_route_with_filter("claude-sonnet-4-6", &custom, |target| {
+            target == "ali/qwen-3"
+        });
+        assert_eq!(result.as_deref(), Some("ali/qwen-3"));
+    }
+
+    #[test]
+    fn filtered_mapping_returns_none_when_all_targets_are_unavailable() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "claude-*".to_string(),
+            CustomMappingValue::Weighted(vec![WeightedTarget {
+                target: "big/glm-5".to_string(),
+                weight: 1,
+            }]),
+        );
+
+        assert!(resolve_model_route_with_filter("claude-sonnet-4-6", &custom, |_| false).is_none());
     }
 }

@@ -3,6 +3,8 @@
 // 现有模块 (保留)
 pub mod config;
 pub mod project_resolver;
+pub mod provider_discovery;
+pub mod provider_testing;
 pub mod security;
 pub mod server;
 pub mod token_manager;
@@ -26,6 +28,7 @@ pub mod rate_limit; // 限流跟踪
 pub mod session_manager; // 会话指纹管理
 pub mod signature_cache; // Signature Cache (v3.3.16)
 pub mod sticky_config; // 粘性调度配置
+pub mod stream_error; // Protocol-safe streaming error events
 pub mod upstream; // 上游客户端
 pub mod upstream_trace; // Upstream trace cache
 pub mod zai_vision_mcp; // Built-in Vision MCP server state

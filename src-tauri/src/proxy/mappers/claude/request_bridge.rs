@@ -152,6 +152,17 @@ pub fn claude_to_openai_body(request: &ClaudeRequest) -> Value {
         }
     }
 
+    // A route-level effort must still be sent when the incoming Claude
+    // history has no thinking blocks. OpenAI-compatible providers expect the
+    // standard reasoning_effort field in that case.
+    if let Some(effort) = request
+        .output_config
+        .as_ref()
+        .and_then(|config| config.effort.as_deref())
+    {
+        body["reasoning_effort"] = json!(effort);
+    }
+
     body
 }
 

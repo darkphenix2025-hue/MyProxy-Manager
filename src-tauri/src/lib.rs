@@ -149,6 +149,12 @@ pub fn run() {
         error!("Failed to initialize user token database: {}", e);
     }
 
+    // Initialize the traffic log database and apply schema migrations before
+    // the monitor page or proxy server can query it.
+    if let Err(e) = modules::proxy_db::init_db() {
+        error!("Failed to initialize proxy log database: {}", e);
+    }
+
     if is_headless {
         info!("Starting in HEADLESS mode...");
 
@@ -520,6 +526,13 @@ pub fn run() {
             commands::codex_account::get_codex_login_status,
             commands::codex_account::cancel_codex_login,
             commands::codex_account::list_account_connections,
+            commands::codex_account::set_codex_connection_enabled,
+            commands::codex_account::refresh_codex_auth_file,
+            commands::codex_account::delete_codex_auth_file,
+            commands::codex_account::import_codex_auth_file,
+            commands::codex_account::export_codex_auth_file,
+            commands::codex_account::list_codex_models,
+            commands::codex_account::get_codex_quota,
             commands::save_text_file,
             commands::read_text_file,
             commands::clear_log_cache,
@@ -541,6 +554,8 @@ pub fn run() {
             commands::proxy::export_proxy_logs_json,
             commands::proxy::get_proxy_logs_count_filtered,
             commands::proxy::get_proxy_logs_filtered,
+            commands::proxy::get_model_cooldowns,
+            commands::proxy::clear_model_cooldowns,
             commands::proxy::set_proxy_monitor_enabled,
             commands::proxy::clear_proxy_logs,
             commands::proxy::generate_api_key,
@@ -558,6 +573,7 @@ pub fn run() {
             commands::proxy::clear_all_proxy_rate_limits,
             commands::proxy::check_proxy_health,
             commands::proxy::test_provider_models,
+            commands::proxy::fetch_provider_models,
             // Proxy Pool Binding commands
             commands::proxy_pool::bind_account_proxy,
             commands::proxy_pool::unbind_account_proxy,

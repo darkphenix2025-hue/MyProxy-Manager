@@ -49,6 +49,71 @@ impl ProxyServiceState {
             starting: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    /// Return the Axum instance that is actually serving requests.
+    ///
+    /// The admin server is started before the logical proxy service and keeps
+    /// serving the HTTP API while `instance` can still be empty (for example,
+    /// when there are no Google accounts but provider routing is configured).
+    /// Configuration hot updates must therefore fall back to the admin server.
+    pub async fn runtime_axum_server(&self) -> Option<crate::proxy::AxumServer> {
+        let service_server = self
+            .instance
+            .read()
+            .await
+            .as_ref()
+            .map(|instance| instance.axum_server.clone());
+
+        let admin_server = self
+            .admin_server
+            .read()
+            .await
+            .as_ref()
+            .map(|admin| admin.axum_server.clone());
+
+        match select_runtime_server_source(service_server.is_some(), admin_server.is_some()) {
+            Some(RuntimeServerSource::Service) => service_server,
+            Some(RuntimeServerSource::Admin) => admin_server,
+            None => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RuntimeServerSource {
+    Service,
+    Admin,
+}
+
+fn select_runtime_server_source(
+    service_available: bool,
+    admin_available: bool,
+) -> Option<RuntimeServerSource> {
+    if service_available {
+        Some(RuntimeServerSource::Service)
+    } else if admin_available {
+        Some(RuntimeServerSource::Admin)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select_runtime_server_source, RuntimeServerSource};
+
+    #[test]
+    fn admin_server_is_used_when_logical_service_is_not_started() {
+        assert_eq!(
+            select_runtime_server_source(false, true),
+            Some(RuntimeServerSource::Admin)
+        );
+        assert_eq!(
+            select_runtime_server_source(true, true),
+            Some(RuntimeServerSource::Service)
+        );
+        assert_eq!(select_runtime_server_source(false, false), None);
+    }
 }
 
 /// 启动反代服务 (Tauri 命令)
@@ -258,6 +323,9 @@ pub async fn ensure_admin_server(
         config.port,
         token_manager,
         config.custom_mapping.clone(),
+        config.route_reasoning_effort.clone(),
+        config.fallback_model.clone(),
+        config.model_cooldown.clone(),
         config.request_timeout,
         config.upstream_proxy.clone(),
         config.user_agent_override.clone(),
@@ -476,6 +544,28 @@ pub async fn get_proxy_logs_filtered(
     crate::modules::proxy_db::get_logs_filtered(&filter, errors_only, limit, offset)
 }
 
+/// 获取当前仍在冷却中的供应商/协议/模型。
+#[tauri::command]
+pub async fn get_model_cooldowns(
+    state: State<'_, ProxyServiceState>,
+) -> Result<Vec<crate::proxy::common::model_cooldown::ActiveCooldown>, String> {
+    let server = state
+        .runtime_axum_server()
+        .await
+        .ok_or_else(|| "服务未运行".to_string())?;
+    Ok(server.get_active_model_cooldowns())
+}
+
+/// 清空运行时模型冷却状态。
+#[tauri::command]
+pub async fn clear_model_cooldowns(state: State<'_, ProxyServiceState>) -> Result<usize, String> {
+    let server = state
+        .runtime_axum_server()
+        .await
+        .ok_or_else(|| "服务未运行".to_string())?;
+    Ok(server.clear_model_cooldowns())
+}
+
 /// 生成 API Key
 #[tauri::command]
 pub fn generate_api_key() -> String {
@@ -511,18 +601,19 @@ pub async fn update_model_mapping(
     config: ProxyConfig,
     state: State<'_, ProxyServiceState>,
 ) -> Result<(), String> {
-    let instance_lock = state.instance.read().await;
-
-    // 1. 如果服务正在运行，立即更新内存中的映射 (这里目前只更新了 anthropic_mapping 的 RwLock,
-    // 后续可以根据需要让 resolve_model_route 直接读取全量 config)
-    if let Some(instance) = instance_lock.as_ref() {
-        instance.axum_server.update_mapping(&config).await;
+    // 1. 更新当前实际承载请求的 Axum 实例。常驻管理服务器在逻辑服务
+    // 尚未创建时也可能已经运行，不能只检查 instance。
+    if let Some(axum_server) = state.runtime_axum_server().await {
+        axum_server.update_mapping(&config).await;
         tracing::debug!("后端服务已接收全量模型映射配置");
     }
 
     // 2. 无论是否运行，都保存到全局配置持久化
     let mut app_config = crate::modules::config::load_app_config()?;
     app_config.proxy.custom_mapping = config.custom_mapping;
+    app_config.proxy.route_reasoning_effort = config.route_reasoning_effort;
+    app_config.proxy.fallback_model = config.fallback_model;
+    app_config.proxy.model_cooldown = config.model_cooldown;
     crate::modules::config::save_app_config(&app_config)?;
 
     Ok(())
@@ -643,6 +734,46 @@ pub async fn fetch_zai_models(
     models.sort();
     models.dedup();
     Ok(models)
+}
+
+/// Fetch the available models exposed by a configured upstream provider.
+#[derive(Deserialize)]
+pub struct FetchProviderModelsRequest {
+    pub provider: crate::proxy::config::UpstreamProvider,
+    #[serde(default, alias = "useOpenaiProtocol")]
+    pub use_openai_protocol: bool,
+}
+
+#[tauri::command]
+pub async fn fetch_provider_models(
+    request: FetchProviderModelsRequest,
+    proxy_state: State<'_, ProxyServiceState>,
+) -> Result<Vec<crate::proxy::provider_discovery::DiscoveredModel>, String> {
+    let runtime_server = proxy_state.runtime_axum_server().await;
+    let upstream_proxy = if let Some(server) = runtime_server.as_ref() {
+        server.get_upstream_proxy().await
+    } else {
+        crate::modules::config::load_app_config()
+            .ok()
+            .map(|config| config.proxy.upstream_proxy)
+            .unwrap_or_default()
+    };
+
+    let provider = crate::proxy::provider_discovery::provider_for_model_discovery(
+        &request.provider,
+        request.use_openai_protocol,
+    );
+    let provider = if let Some(server) = runtime_server.as_ref() {
+        server.resolve_provider_auth(provider).await?
+    } else {
+        provider
+    };
+
+    crate::proxy::provider_discovery::discover_provider_models_with_proxy(
+        &provider,
+        &upstream_proxy,
+    )
+    .await
 }
 
 /// 获取当前调度配置
@@ -809,11 +940,16 @@ pub async fn get_proxy_pool_config(
 #[derive(Deserialize)]
 pub struct TestProviderModelsRequest {
     pub provider: crate::proxy::config::UpstreamProvider,
+    #[serde(default)]
+    pub protocol: Option<crate::proxy::config::ProviderProtocol>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct ModelTestResult {
     pub model: String,
+    pub protocol: String,
     pub success: bool,
     pub latency_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -830,28 +966,40 @@ pub async fn test_provider_models(
     request: TestProviderModelsRequest,
     proxy_state: State<'_, ProxyServiceState>,
 ) -> Result<TestProviderModelsResponse, String> {
-    let provider = request.provider;
-
-    if provider.api_key.trim().is_empty() {
-        return Err("Provider API key is empty".into());
-    }
-
-    let models: Vec<String> = provider
-        .available_models
-        .as_ref()
-        .map(|s| {
-            s.split(',')
-                .map(|m| m.trim().to_string())
-                .filter(|m| !m.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
+    let TestProviderModelsRequest {
+        provider: configured_provider,
+        protocol,
+        model,
+    } = request;
+    let models =
+        crate::proxy::provider_testing::collect_test_models(&configured_provider, model.as_deref());
 
     if models.is_empty() {
-        return Err("No models configured for this provider".into());
+        return Err(
+            if model
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                "Requested model is not configured for this provider".into()
+            } else {
+                "No models configured for this provider".into()
+            },
+        );
     }
 
-    let timeout_secs = provider.request_timeout_secs.unwrap_or(30).min(30);
+    let variants = crate::proxy::provider_testing::collect_test_variants(
+        &configured_provider,
+        protocol.as_ref(),
+    );
+    if variants.is_empty() {
+        return Err("No enabled protocols configured for this provider".into());
+    }
+
+    let runtime_server = proxy_state.runtime_axum_server().await;
+    let timeout_secs = configured_provider
+        .request_timeout_secs
+        .unwrap_or(30)
+        .min(30);
 
     let upstream_proxy = if let Some(instance) = proxy_state.instance.read().await.as_ref() {
         instance.axum_server.get_upstream_proxy().await
@@ -866,17 +1014,31 @@ pub async fn test_provider_models(
 
     let mut results = Vec::new();
 
-    for model in &models {
-        let start = std::time::Instant::now();
-        let result = test_single_model(&client, &provider, model).await;
-        let latency_ms = start.elapsed().as_millis() as u64;
+    for variant in variants {
+        let protocol = variant.protocol.as_str().to_string();
+        let provider = if let Some(server) = runtime_server.as_ref() {
+            server.resolve_provider_auth(variant).await?
+        } else {
+            variant
+        };
 
-        results.push(ModelTestResult {
-            model: model.clone(),
-            success: result.is_ok(),
-            latency_ms,
-            error: result.err(),
-        });
+        for model in &models {
+            let start = std::time::Instant::now();
+            let result = if provider.api_key.trim().is_empty() && provider.credential_id.is_none() {
+                Err("Provider API key is empty".to_string())
+            } else {
+                test_single_model(&client, &provider, model).await
+            };
+            let latency_ms = start.elapsed().as_millis() as u64;
+
+            results.push(ModelTestResult {
+                model: model.clone(),
+                protocol: protocol.clone(),
+                success: result.is_ok(),
+                latency_ms,
+                error: result.err(),
+            });
+        }
     }
 
     Ok(TestProviderModelsResponse { results })
@@ -955,6 +1117,32 @@ async fn test_single_model(
             client
                 .post(&url)
                 .header("content-type", "application/json")
+                .bearer_auth(&provider.api_key)
+                .json(&body)
+                .send()
+                .await
+        }
+        ProviderProtocol::CodexResponses => {
+            let url = format!("{base}/responses");
+            let body = serde_json::json!({
+                "model": model,
+                "input": "hi",
+                "stream": false,
+                "max_output_tokens": 1
+            });
+            let mut request = client
+                .post(&url)
+                .header("accept", "application/json")
+                .header("content-type", "application/json")
+                .header("originator", "codex_cli_rs")
+                .header(
+                    "user-agent",
+                    "codex_cli_rs/0.144.1 (MyProxy-Manager; auth-file)",
+                );
+            if let Some(account_id) = provider.account_id.as_deref() {
+                request = request.header("ChatGPT-Account-Id", account_id);
+            }
+            request
                 .bearer_auth(&provider.api_key)
                 .json(&body)
                 .send()

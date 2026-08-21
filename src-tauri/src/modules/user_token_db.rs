@@ -586,6 +586,19 @@ pub fn record_token_usage_and_ip(
     Ok(())
 }
 
+fn get_request_count_since_conn(conn: &Connection, since_timestamp: i64) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM token_usage_logs WHERE request_time >= ?1",
+        [since_timestamp],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("Failed to count token requests: {}", e))
+}
+
+pub fn get_request_count_since(since_timestamp: i64) -> Result<i64, String> {
+    get_request_count_since_conn(&connect_db()?, since_timestamp)
+}
+
 /// 检查 Token 是否有效 (包含过期时间检查和 IP 限制检查)
 /// 返回: (是否有效, 拒绝原因)
 pub fn validate_token(token_str: &str, ip: &str) -> Result<(bool, Option<String>), String> {
@@ -691,6 +704,18 @@ pub fn get_username_for_ip(ip: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_count_since_uses_usage_log_timestamps() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE token_usage_logs (request_time INTEGER NOT NULL);
+             INSERT INTO token_usage_logs (request_time) VALUES (99), (100), (101);",
+        )
+        .unwrap();
+
+        assert_eq!(get_request_count_since_conn(&conn, 100).unwrap(), 2);
+    }
 
     #[test]
     fn test_create_and_query_token() {

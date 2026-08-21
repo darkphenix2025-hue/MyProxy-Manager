@@ -1,6 +1,7 @@
 pub mod account;
 pub mod account_platform_store;
 pub mod account_service;
+pub mod auth_file_store;
 pub mod cache;
 pub mod cloudflared;
 pub mod codex_account_runtime;

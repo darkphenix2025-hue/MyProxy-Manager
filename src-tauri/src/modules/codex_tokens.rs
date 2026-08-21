@@ -12,8 +12,8 @@ pub enum CodexTokenError {
     InvalidConfiguration(String),
     #[error("Codex token request failed")]
     RequestFailed,
-    #[error("Codex token endpoint returned HTTP {status}")]
-    Provider { status: u16 },
+    #[error("Codex token endpoint returned HTTP {status}: {message}")]
+    Provider { status: u16, message: String },
     #[error("Codex token response is invalid")]
     InvalidResponse,
     #[error("Codex refresh token is unavailable")]
@@ -27,18 +27,27 @@ pub struct CodexTokenSet {
     access_token: zeroize::Zeroizing<String>,
     refresh_token: zeroize::Zeroizing<String>,
     id_token: Option<zeroize::Zeroizing<String>>,
+    account_id: Option<zeroize::Zeroizing<String>>,
     token_type: String,
     expires_at: i64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PersistedCodexTokenSet {
+    #[serde(rename = "type", default = "default_auth_type")]
+    auth_type: String,
     access_token: String,
     refresh_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
     token_type: String,
     expires_at: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    expired: String,
+    #[serde(default)]
+    disabled: bool,
 }
 
 impl CodexTokenSet {
@@ -59,10 +68,15 @@ impl CodexTokenSet {
         {
             return Err(CodexTokenError::InvalidResponse);
         }
+        let account_id = id_token
+            .as_deref()
+            .and_then(jwt_account_id)
+            .map(zeroize::Zeroizing::new);
         Ok(Self {
             access_token: access_token.into(),
             refresh_token: refresh_token.into(),
             id_token: id_token.map(zeroize::Zeroizing::new),
+            account_id,
             token_type,
             expires_at,
         })
@@ -80,6 +94,17 @@ impl CodexTokenSet {
         self.id_token.as_deref().map(String::as_str)
     }
 
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref().map(String::as_str)
+    }
+
+    pub fn set_account_id(&mut self, account_id: &str) {
+        let account_id = account_id.trim();
+        if !account_id.is_empty() {
+            self.account_id = Some(zeroize::Zeroizing::new(account_id.to_string()));
+        }
+    }
+
     pub fn token_type(&self) -> &str {
         &self.token_type
     }
@@ -88,29 +113,138 @@ impl CodexTokenSet {
         self.expires_at
     }
 
-    fn encode_for_secret_store(&self) -> Result<zeroize::Zeroizing<String>, CodexTokenError> {
+    /// Serialize the token set into the provider auth-file format.
+    ///
+    /// The returned string remains zeroized until it is handed to the secret
+    /// store or an explicitly requested export operation.
+    pub fn to_auth_file_json(&self) -> Result<zeroize::Zeroizing<String>, CodexTokenError> {
+        self.to_auth_file_json_with_disabled(false)
+    }
+
+    pub fn to_auth_file_json_with_disabled(
+        &self,
+        disabled: bool,
+    ) -> Result<zeroize::Zeroizing<String>, CodexTokenError> {
         let persisted = PersistedCodexTokenSet {
+            auth_type: default_auth_type(),
             access_token: self.access_token().to_string(),
             refresh_token: self.refresh_token().to_string(),
             id_token: self.id_token().map(str::to_string),
+            account_id: self.account_id().map(str::to_string),
             token_type: self.token_type.clone(),
             expires_at: self.expires_at,
+            expired: chrono::DateTime::from_timestamp(self.expires_at, 0)
+                .map(|value| value.to_rfc3339())
+                .unwrap_or_default(),
+            disabled,
         };
-        serde_json::to_string(&persisted)
+        serde_json::to_string_pretty(&persisted)
             .map(zeroize::Zeroizing::new)
             .map_err(|_| CodexTokenError::InvalidResponse)
+    }
+
+    /// Parse a Codex auth-file produced by the CLI or an external auth-file
+    /// manager. Unknown metadata is deliberately ignored so secrets are not
+    /// copied into the application's account metadata document.
+    pub fn from_auth_file_json(encoded: &str, now: i64) -> Result<Self, CodexTokenError> {
+        let value: serde_json::Value =
+            serde_json::from_str(encoded).map_err(|_| CodexTokenError::InvalidResponse)?;
+        let object = value.as_object().ok_or(CodexTokenError::InvalidResponse)?;
+        let auth_type = object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("codex");
+        if !auth_type.eq_ignore_ascii_case("codex") {
+            return Err(CodexTokenError::InvalidResponse);
+        }
+        let access_token = object
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(CodexTokenError::InvalidResponse)?;
+        let refresh_token = object
+            .get("refresh_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(CodexTokenError::MissingRefreshToken)?;
+        let id_token = object
+            .get("id_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        let account_id = [
+            "account_id",
+            "accountId",
+            "chatgpt_account_id",
+            "chatgptAccountId",
+        ]
+        .iter()
+        .find_map(|key| {
+            object
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        });
+        let token_type = object
+            .get("token_type")
+            .or_else(|| object.get("tokenType"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Bearer");
+        let expires_at = [
+            "expires_at",
+            "expiresAt",
+            "expiry",
+            "expires",
+            "expired",
+            "expire",
+        ]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(parse_timestamp))
+        .or_else(|| {
+            object
+                .get("expires_in")
+                .and_then(parse_timestamp)
+                .map(|value| now.saturating_add(value))
+        })
+        .or_else(|| id_token.as_deref().and_then(jwt_expiry))
+        .or_else(|| jwt_expiry(access_token))
+        .ok_or(CodexTokenError::InvalidResponse)?;
+
+        let mut token_set = Self::new(
+            access_token,
+            refresh_token,
+            id_token,
+            token_type,
+            expires_at,
+        )?;
+        if let Some(account_id) = account_id {
+            token_set.set_account_id(account_id);
+        }
+        Ok(token_set)
+    }
+
+    fn encode_for_secret_store(&self) -> Result<zeroize::Zeroizing<String>, CodexTokenError> {
+        self.to_auth_file_json()
     }
 
     fn decode_from_secret_store(encoded: &str) -> Result<Self, CodexTokenError> {
         let persisted: PersistedCodexTokenSet =
             serde_json::from_str(encoded).map_err(|_| CodexTokenError::InvalidResponse)?;
-        Self::new(
+        if !persisted.auth_type.eq_ignore_ascii_case("codex") {
+            return Err(CodexTokenError::InvalidResponse);
+        }
+        let mut token_set = Self::new(
             persisted.access_token,
             persisted.refresh_token,
             persisted.id_token,
             persisted.token_type,
             persisted.expires_at,
-        )
+        )?;
+        if let Some(account_id) = persisted.account_id {
+            token_set.set_account_id(&account_id);
+        }
+        Ok(token_set)
     }
 }
 
@@ -121,6 +255,10 @@ impl fmt::Debug for CodexTokenSet {
             .field("access_token", &"[REDACTED]")
             .field("refresh_token", &"[REDACTED]")
             .field("id_token", &self.id_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "account_id",
+                &self.account_id.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("token_type", &self.token_type)
             .field("expires_at", &self.expires_at)
             .finish()
@@ -157,6 +295,73 @@ impl fmt::Debug for TokenEndpointResponse {
 
 fn default_token_type() -> String {
     "Bearer".to_string()
+}
+
+fn default_auth_type() -> String {
+    "codex".to_string()
+}
+
+fn parse_timestamp(value: &serde_json::Value) -> Option<i64> {
+    let timestamp = match value {
+        serde_json::Value::Number(value) => value.as_i64(),
+        serde_json::Value::String(value) => value.trim().parse::<i64>().ok().or_else(|| {
+            chrono::DateTime::parse_from_rfc3339(value.trim())
+                .ok()
+                .map(|date| date.timestamp())
+        }),
+        _ => None,
+    }?;
+    if timestamp > 10_000_000_000 {
+        Some(timestamp / 1_000)
+    } else {
+        Some(timestamp)
+    }
+}
+
+fn jwt_expiry(token: &str) -> Option<i64> {
+    use base64::Engine;
+
+    let payload = token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    value.get("exp").and_then(parse_timestamp)
+}
+
+fn jwt_account_id(token: &str) -> Option<String> {
+    use base64::Engine;
+
+    let payload = token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let account_keys = [
+        "account_id",
+        "accountId",
+        "chatgpt_account_id",
+        "chatgptAccountId",
+    ];
+    let find_account_id = |object: &serde_json::Map<String, serde_json::Value>| {
+        account_keys.iter().find_map(|key| {
+            object
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        })
+    };
+    value.as_object().and_then(|object| {
+        find_account_id(object).or_else(|| {
+            ["https://api.openai.com/auth", "auth"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(serde_json::Value::as_object))
+                .and_then(find_account_id)
+        })
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -223,7 +428,7 @@ impl CodexTokenClient {
             ("code_verifier", material.code_verifier()),
         ];
         let response = self.send_form(&form).await?;
-        build_token_set(response, None, now)
+        build_token_set(response, None, None, now)
     }
 
     pub async fn refresh(
@@ -244,9 +449,15 @@ impl CodexTokenClient {
             ("grant_type", "refresh_token"),
             ("client_id", client_id),
             ("refresh_token", current.refresh_token()),
+            ("scope", "openid profile email"),
         ];
         let response = self.send_form(&form).await?;
-        build_token_set(response, Some(current.refresh_token()), now)
+        build_token_set(
+            response,
+            Some(current.refresh_token()),
+            current.account_id(),
+            now,
+        )
     }
 
     async fn send_form(
@@ -263,8 +474,15 @@ impl CodexTokenClient {
             .map_err(|_| CodexTokenError::RequestFailed)?;
         let status = response.status();
         if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .ok()
+                .and_then(|body| provider_error_message(&body))
+                .unwrap_or_else(|| "provider rejected the request".to_string());
             return Err(CodexTokenError::Provider {
                 status: status.as_u16(),
+                message,
             });
         }
         if response
@@ -291,6 +509,7 @@ impl CodexTokenClient {
 fn build_token_set(
     response: TokenEndpointResponse,
     fallback_refresh_token: Option<&str>,
+    fallback_account_id: Option<&str>,
     now: i64,
 ) -> Result<CodexTokenSet, CodexTokenError> {
     if response.expires_in <= 0 {
@@ -301,13 +520,34 @@ fn build_token_set(
         .filter(|token| !token.trim().is_empty())
         .or_else(|| fallback_refresh_token.map(str::to_string))
         .ok_or(CodexTokenError::MissingRefreshToken)?;
-    CodexTokenSet::new(
+    let mut token_set = CodexTokenSet::new(
         response.access_token,
         refresh_token,
         response.id_token,
         response.token_type,
         now.saturating_add(response.expires_in),
-    )
+    )?;
+    if token_set.account_id().is_none() {
+        if let Some(account_id) = fallback_account_id {
+            token_set.set_account_id(account_id);
+        }
+    }
+    Ok(token_set)
+}
+
+fn provider_error_message(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let message = value
+        .get("error_description")
+        .or_else(|| value.get("message"))
+        .or_else(|| value.get("error"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("message").and_then(serde_json::Value::as_str))
+        })?
+        .trim();
+    (!message.is_empty()).then(|| message.chars().take(300).collect())
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +592,24 @@ impl<S: SecretStore> CodexRefreshCoordinator<S> {
         if current.expires_at() > now.saturating_add(refresh_skew_seconds.max(0)) {
             return Ok(());
         }
+        self.refresh_locked(secret_ref, now, Some(refresh_skew_seconds))
+            .await
+    }
+
+    pub async fn refresh_now(
+        &self,
+        secret_ref: &SecretRef,
+        now: i64,
+    ) -> Result<(), CodexTokenError> {
+        self.refresh_locked(secret_ref, now, None).await
+    }
+
+    async fn refresh_locked(
+        &self,
+        secret_ref: &SecretRef,
+        now: i64,
+        refresh_skew_seconds: Option<i64>,
+    ) -> Result<(), CodexTokenError> {
         let lock_key = refresh_lock_key(secret_ref);
         let lock = refresh_locks()
             .entry(lock_key)
@@ -360,7 +618,9 @@ impl<S: SecretStore> CodexRefreshCoordinator<S> {
         let _guard = lock.lock().await;
 
         let current = self.vault.read(secret_ref).await?;
-        if current.expires_at() > now.saturating_add(refresh_skew_seconds.max(0)) {
+        if refresh_skew_seconds
+            .is_some_and(|skew| current.expires_at() > now.saturating_add(skew.max(0)))
+        {
             return Ok(());
         }
         let refreshed = self.client.refresh(&self.client_id, &current, now).await?;
@@ -587,6 +847,8 @@ mod tests {
         assert_eq!(refreshed.access_token(), "new-access");
         assert_eq!(refreshed.refresh_token(), "old-refresh");
         assert_eq!(refreshed.expires_at(), 1_700_003_600);
+        let form = server.received_form().await;
+        assert_eq!(form["scope"], "openid profile email");
     }
 
     #[tokio::test]
@@ -605,11 +867,43 @@ mod tests {
         let secret_ref = vault.create(&token_set).await.unwrap();
         assert_eq!(secret_ref.backend, "memory");
         assert!(!format!("{secret_ref:?}").contains("canary"));
+        let encoded = store.read(&secret_ref).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["type"],
+            "codex"
+        );
 
         let restored = vault.read(&secret_ref).await.unwrap();
         assert_eq!(restored.access_token(), "access-canary");
         assert_eq!(restored.refresh_token(), "refresh-canary");
         assert_eq!(restored.id_token(), Some("id-canary"));
+    }
+
+    #[test]
+    fn auth_file_json_accepts_cli_proxy_shape_and_exports_canonical_tokens() {
+        let external = serde_json::json!({
+            "type": "codex",
+            "access_token": "access-import-canary",
+            "refresh_token": "refresh-import-canary",
+            "id_token": "id-import-canary",
+            "expired": "2030-03-17T17:46:40Z",
+            "account_id": "account-canary",
+            "email": "codex@example.com"
+        });
+
+        let token_set =
+            CodexTokenSet::from_auth_file_json(&external.to_string(), 1_700_000_000).unwrap();
+        assert_eq!(token_set.access_token(), "access-import-canary");
+        assert_eq!(token_set.refresh_token(), "refresh-import-canary");
+        assert_eq!(token_set.account_id(), Some("account-canary"));
+        assert_eq!(token_set.expires_at(), 1_900_000_000);
+
+        let exported = token_set.to_auth_file_json().unwrap();
+        let exported: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(exported["type"], "codex");
+        assert_eq!(exported["token_type"], "Bearer");
+        assert_eq!(exported["expired"], "2030-03-17T17:46:40+00:00");
+        assert_eq!(exported["account_id"], "account-canary");
     }
 
     #[tokio::test]

@@ -108,6 +108,8 @@ pub async fn forward_audio_to_openai_compat(
             .status(status)
             .header("x-provider-name", &provider.name)
             .header("x-mapped-model", model)
+            .header("x-upstream-protocol", "openai")
+            .header("x-upstream-model", model)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(
                 String::from_utf8_lossy(&error_body).to_string(),

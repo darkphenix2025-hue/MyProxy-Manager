@@ -1,15 +1,13 @@
 import { useState, useEffect } from 'react';
-import { Save, Github, User, MessageCircle, ExternalLink, RefreshCw, LayoutDashboard, Users, Network, Activity, BarChart3, Settings as SettingsIcon, Lock, CheckCircle2, Globe, Sliders, Route, Server } from 'lucide-react';
+import { Save, Github, MessageCircle, ExternalLink, LayoutDashboard, Users, Network, Activity, BarChart3, Settings as SettingsIcon, Lock, CheckCircle2, Globe, Sliders, Route, Server } from 'lucide-react';
 import { request as invoke } from '../utils/request';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useConfigStore } from '../stores/useConfigStore';
 import { AppConfig } from '../types/config';
 import ModalDialog from '../components/common/ModalDialog';
 import { showToast } from '../components/common/ToastContainer';
-import QuotaProtection from '../components/settings/QuotaProtection';
-// import SmartWarmup from '../components/settings/SmartWarmup';
-import PinnedQuotaModels from '../components/settings/PinnedQuotaModels';
 import { useDebugConsole } from '../stores/useDebugConsole';
+import { DEFAULT_HIDDEN_MENU_ITEMS } from '../components/navbar/constants';
 
 import { useTranslation } from 'react-i18next';
 import { isTauri } from '../utils/env';
@@ -25,7 +23,7 @@ function Settings() {
     const { t, i18n } = useTranslation();
     const { config, loadConfig, saveConfig, updateLanguage, updateTheme } = useConfigStore();
     const { enable, disable, isEnabled } = useDebugConsole();
-    const [activeTab, setActiveTab] = useState<'general' | 'account' | 'proxy' | 'advanced' | 'debug' | 'about'>('general');
+    const [activeTab, setActiveTab] = useState<'general' | 'proxy' | 'advanced' | 'debug' | 'about'>('general');
     const [formData, setFormData] = useState<AppConfig>({
         language: 'zh',
         theme: 'system',
@@ -79,7 +77,8 @@ function Settings() {
             enabled: false,
             backoff_steps: [30, 60, 120, 300, 600]
         },
-        hidden_menu_items: [],  // 菜单显示设置：默认不隐藏任何菜单项
+        hidden_menu_items: [...DEFAULT_HIDDEN_MENU_ITEMS],
+        menu_visibility_version: 1,
 
     });
 
@@ -304,15 +303,6 @@ function Settings() {
                             {t('settings.tabs.general')}
                         </button>
                         <button
-                            className={`px-6 py-2 rounded-full text-sm font-medium transition-all ${activeTab === 'account'
-                                ? 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm'
-                                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-                                }`}
-                            onClick={() => setActiveTab('account')}
-                        >
-                            {t('settings.tabs.account')}
-                        </button>
-                        <button
                             className={`px-6 py-2 rounded-full text-sm font-medium transition-all ${activeTab === 'proxy'
                                 ? 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm'
                                 : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
@@ -453,16 +443,16 @@ function Settings() {
                                         {[
                                             { path: '/', label: t('nav.dashboard'), icon: LayoutDashboard },
                                             { path: '/accounts', label: t('nav.accounts'), icon: Users },
-                                            { path: '/service-config', label: t('nav.service_config'), icon: Sliders },
-                                            { path: '/route-manage', label: t('nav.route_manage'), icon: Route },
                                             { path: '/providers', label: t('nav.providers'), icon: Server },
+                                            { path: '/route-manage', label: t('nav.route_manage'), icon: Route },
                                             { path: '/monitor', label: t('nav.call_records'), icon: Activity },
+                                            { path: '/service-config', label: t('nav.service_config'), icon: Sliders },
+                                            { path: '/security', label: t('nav.security'), icon: Lock },
                                             { path: '/token-stats', label: t('nav.token_stats'), icon: BarChart3 },
                                             { path: '/user-token', label: t('nav.user_token', 'User Tokens'), icon: Users },
-                                            { path: '/security', label: t('nav.security'), icon: Lock },
                                             { path: '/settings', label: t('nav.settings'), icon: SettingsIcon },
                                         ].map((item) => {
-                                            const hiddenItems = formData.hidden_menu_items || [];
+                                            const hiddenItems = formData.hidden_menu_items ?? [...DEFAULT_HIDDEN_MENU_ITEMS];
                                             const isVisible = !hiddenItems.includes(item.path);
                                             const isSettings = item.path === '/settings';
 
@@ -472,7 +462,7 @@ function Settings() {
                                                     onClick={async () => {
                                                         if (!isSettings) {
                                                             const originalConfig = { ...formData };
-                                                            const hiddenItems = formData.hidden_menu_items || [];
+                                                            const hiddenItems = formData.hidden_menu_items ?? [...DEFAULT_HIDDEN_MENU_ITEMS];
                                                             const newHiddenItems = isVisible
                                                                 ? [...hiddenItems, item.path]
                                                                 : hiddenItems.filter(p => p !== item.path);
@@ -540,158 +530,6 @@ function Settings() {
                                     </span>
                                 </div>
                             </>
-                        </div>
-                    )}
-
-                    {/* 账号设置 */}
-                    {activeTab === 'account' && (
-                        <div className="space-y-4 animate-in fade-in duration-500">
-                            {/* 自动刷新配额 */}
-                            <div className="group bg-white dark:bg-base-100 rounded-xl p-5 border border-gray-100 dark:border-base-200 hover:border-blue-200 transition-all duration-300 shadow-sm">
-                                <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-4">
-                                        <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-900/20 flex items-center justify-center text-blue-500 group-hover:bg-blue-500 group-hover:text-white transition-all duration-300">
-                                            <RefreshCw size={20} />
-                                        </div>
-                                        <div>
-                                            <div className="font-bold text-gray-900 dark:text-gray-100">{t('settings.account.auto_refresh')}</div>
-                                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{t('settings.account.auto_refresh_desc')}</p>
-                                        </div>
-                                    </div>
-                                    <label className={`relative inline-flex items-center ${formData.quota_protection.enabled ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'}`}>
-                                        <input
-                                            type="checkbox"
-                                            className="sr-only peer"
-                                            checked={formData.auto_refresh}
-                                            disabled={formData.quota_protection.enabled}
-                                            onChange={async (e) => {
-                                                const enabled = e.target.checked;
-                                                const newConfig = { ...formData, auto_refresh: enabled };
-                                                setFormData(newConfig);
-                                                // Hot Save
-                                                try {
-                                                    await saveConfig(newConfig);
-                                                } catch (error) {
-                                                    showToast(`${t('common.error')}: ${error}`, 'error');
-                                                }
-                                            }}
-                                        />
-                                        <div className={`w-11 h-6 bg-gray-200 dark:bg-base-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500 shadow-inner ${formData.quota_protection.enabled ? 'peer-checked:bg-blue-500' : ''}`}></div>
-                                    </label>
-                                </div>
-
-                                <div className="mt-5 pt-5 border-t border-gray-50 dark:border-base-300 flex items-center gap-4 animate-in slide-in-from-top-1 duration-200">
-                                    <label className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">{t('settings.account.refresh_interval')}</label>
-                                    <div className="relative">
-                                        <input
-                                            type="number"
-                                            className="w-24 px-3 py-2 bg-gray-50 dark:bg-base-200 border border-gray-100 dark:border-base-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm font-bold text-blue-600 dark:text-blue-400"
-                                            min="1"
-                                            max="35791"
-                                            value={formData.refresh_interval}
-                                            onChange={(e) => setFormData({ ...formData, refresh_interval: isNaN(parseInt(e.target.value)) ? 1 : Math.min(Math.max(parseInt(e.target.value), 1), 35791) })}
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* 自动获取当前账号 */}
-                            <div className="group bg-white dark:bg-base-100 rounded-xl p-5 border border-gray-100 dark:border-base-200 hover:border-emerald-200 transition-all duration-300 shadow-sm">
-                                <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-4">
-                                        <div className="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 flex items-center justify-center text-emerald-500 group-hover:bg-emerald-500 group-hover:text-white transition-all duration-300">
-                                            <User size={20} />
-                                        </div>
-                                        <div>
-                                            <div className="font-bold text-gray-900 dark:text-gray-100">{t('settings.account.auto_sync')}</div>
-                                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{t('settings.account.auto_sync_desc')}</p>
-                                        </div>
-                                    </div>
-                                    <label className="relative inline-flex items-center cursor-pointer">
-                                        <input
-                                            type="checkbox"
-                                            className="sr-only peer"
-                                            checked={formData.auto_sync}
-                                            onChange={(e) => setFormData({ ...formData, auto_sync: e.target.checked })}
-                                        />
-                                        <div className="w-11 h-6 bg-gray-200 dark:bg-base-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500 shadow-inner"></div>
-                                    </label>
-                                </div>
-
-                                {formData.auto_sync && (
-                                    <div className="mt-5 pt-5 border-t border-gray-50 dark:border-base-300 flex items-center gap-4 animate-in slide-in-from-top-1 duration-200">
-                                        <label className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">{t('settings.account.sync_interval')}</label>
-                                        <input
-                                            type="number"
-                                            className="w-24 px-3 py-2 bg-gray-50 dark:bg-base-200 border border-gray-100 dark:border-base-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none text-sm font-bold text-emerald-600 dark:text-emerald-400"
-                                            min="1"
-                                            max="35791"
-                                            value={formData.sync_interval}
-                                            onChange={(e) => setFormData({ ...formData, sync_interval: isNaN(parseInt(e.target.value)) ? 1 : Math.min(Math.max(parseInt(e.target.value), 1), 35791) })}
-                                        />
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* 智能预热 (Smart Warmup) - [DISABLED] Backend scheduler commented out as per user request */}
-                            {/* <div className="group bg-white dark:bg-base-100 rounded-xl p-5 border border-gray-100 dark:border-base-200 hover:border-orange-200 transition-all duration-300 shadow-sm">
-                                <SmartWarmup
-                                    config={formData.scheduled_warmup}
-                                    onChange={async (newConfig) => {
-                                        const newFormData = {
-                                            ...formData,
-                                            scheduled_warmup: newConfig
-                                        };
-                                        setFormData(newFormData);
-                                        // Hot Save
-                                        try {
-                                            await saveConfig(newFormData);
-                                        } catch (error) {
-                                            showToast(`${t('common.error')}: ${error}`, 'error');
-                                        }
-                                    }}
-                                />
-                            </div> */}
-
-                            {/* 配额保护 (Quota Protection) */}
-                            <div className="group bg-white dark:bg-base-100 rounded-xl p-5 border border-gray-100 dark:border-base-200 hover:border-rose-200 transition-all duration-300 shadow-sm">
-                                <QuotaProtection
-                                    config={formData.quota_protection}
-                                    onChange={async (newConfig) => {
-                                        const updates: any = {
-                                            quota_protection: newConfig
-                                        };
-                                        // 联动逻辑：开启配额保护时，强制开启后台自动刷新 (不仅仅是预热)
-                                        if (newConfig.enabled) {
-                                            updates.auto_refresh = true;
-                                        }
-
-                                        const newFormData = {
-                                            ...formData,
-                                            ...updates
-                                        };
-                                        setFormData(newFormData);
-
-                                        // Hot Save
-                                        try {
-                                            await saveConfig(newFormData);
-                                        } catch (error) {
-                                            showToast(`${t('common.error')}: ${error}`, 'error');
-                                        }
-                                    }}
-                                />
-                            </div>
-
-                            {/* 配额关注列表 (Pinned Quota Models) */}
-                            <div className="group bg-white dark:bg-base-100 rounded-xl p-5 border border-gray-100 dark:border-base-200 hover:border-indigo-200 transition-all duration-300 shadow-sm">
-                                <PinnedQuotaModels
-                                    config={formData.pinned_quota_models}
-                                    onChange={(newConfig) => setFormData({
-                                        ...formData,
-                                        pinned_quota_models: newConfig
-                                    })}
-                                />
-                            </div>
                         </div>
                     )}
 
@@ -1082,7 +920,7 @@ function Settings() {
                                     }
 
                                     // Hot reload: save immediately for manual changes
-                                    saveConfig({ ...updatedFormData, auto_refresh: true })
+                                    saveConfig(updatedFormData)
                                         .then(() => {
                                             console.log('Proxy config saved');
                                         })

@@ -73,16 +73,21 @@ pub fn extract_data(line: &[u8]) -> Option<&[u8]> {
 
 /// 解析完整的 SSE 事件块。
 ///
-/// SSE 事件以空行 (`\n\n`) 分隔。此函数从缓冲区中读取一个完整事件，
+/// SSE 事件以空行 (`\n\n` 或 `\r\n\r\n`) 分隔。此函数从缓冲区中读取一个完整事件，
 /// 返回 `(event_type, id, data)` 三元组。
 ///
 /// 如果缓冲区中没有完整事件，返回 None。
 pub fn parse_sse_event(buf: &mut BytesMut) -> Option<(String, Option<String>, Vec<u8>)> {
     // 查找事件分隔符
     let text = std::str::from_utf8(buf.as_ref()).ok()?;
-    let end = text.find("\n\n")?;
+    let (end, delimiter_len) = if let Some(end) = text.find("\n\n") {
+        (end, 2)
+    } else {
+        let end = text.find("\r\n\r\n")?;
+        (end, 4)
+    };
 
-    let event_bytes = buf.split_to(end + 2); // 包含 \n\n
+    let event_bytes = buf.split_to(end + delimiter_len); // 包含事件分隔符
     let event_text = std::str::from_utf8(&event_bytes).ok()?;
 
     let mut event_type = None;
@@ -154,6 +159,17 @@ mod tests {
     fn test_parse_sse_event() {
         let mut buf =
             BytesMut::from("event: message\nid: 42\ndata: {\"text\":\"hi\"}\n\n".as_bytes());
+        let (event_type, id, data) = parse_sse_event(&mut buf).unwrap();
+        assert_eq!(event_type, "message");
+        assert_eq!(id, Some("42".to_string()));
+        assert_eq!(data, b"{\"text\":\"hi\"}");
+    }
+
+    #[test]
+    fn test_parse_sse_event_accepts_crlf_delimiters() {
+        let mut buf = BytesMut::from(
+            "event: message\r\nid: 42\r\ndata: {\"text\":\"hi\"}\r\n\r\n".as_bytes(),
+        );
         let (event_type, id, data) = parse_sse_event(&mut buf).unwrap();
         assert_eq!(event_type, "message");
         assert_eq!(id, Some("42".to_string()));

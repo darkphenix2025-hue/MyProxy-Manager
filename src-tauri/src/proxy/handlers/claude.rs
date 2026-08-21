@@ -353,17 +353,29 @@ pub async fn handle_messages(
     // Decide whether to route through a configured upstream provider or the legacy Google path.
     // ProviderRouter replaces the old z.ai dispatch logic with a generic multi-provider system.
     // Resolve model route first so route table mappings apply before provider selection.
-    let claude_mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
-        &request.model,
-        &*state.custom_mapping.read().await,
-    );
-    let router = state.provider_router.read().await;
-    let selection = if !router.is_empty() {
-        let sel = router.select(&claude_mapped_model, None);
-        Some((sel.resolved_model.clone(), sel.provider.clone()))
+    let route_resolution = state
+        .resolve_model_for_protocol(
+            &request.model,
+            crate::proxy::config::ProviderProtocol::AnthropicPassthrough,
+        )
+        .await;
+    if let Some(error) = route_resolution.cooldown_error.as_ref() {
+        return state.model_cooldown_error_response(error);
+    }
+    let claude_mapped_model = route_resolution.model;
+    let route_effort = if route_resolution.fallback_reasoning_effort.is_some() {
+        route_resolution.fallback_reasoning_effort.clone()
     } else {
-        None
+        let route_effort_config = state.route_reasoning_effort.read().await;
+        crate::proxy::common::route_reasoning::resolve_route_reasoning_effort(
+            &request.model,
+            Some(&claude_mapped_model),
+            &route_effort_config,
+        )
     };
+    let selection = route_resolution
+        .provider_selection
+        .map(|selection| (selection.resolved_model, selection.provider));
 
     // Extract resolved model and provider info for later use
     let resolved_model = selection.as_ref().map(|(r, _)| r.clone());
@@ -379,6 +391,7 @@ pub async fn handle_messages(
         let proto = match provider.protocol {
             crate::proxy::config::ProviderProtocol::AnthropicPassthrough => "anthropic",
             crate::proxy::config::ProviderProtocol::OpenAICompatible => "openai_compat",
+            crate::proxy::config::ProviderProtocol::CodexResponses => "codex_responses",
             crate::proxy::config::ProviderProtocol::GeminiV1Internal => "gemini_v1",
         };
         (true, Some(proto), Some(provider.name.clone()))
@@ -419,7 +432,29 @@ pub async fn handle_messages(
     } else {
         (false, None, None)
     };
-    drop(router);
+    let selection = match selection {
+        Some((resolved_model, provider)) => {
+            let provider = match state.resolve_provider_auth(provider).await {
+                Ok(provider) => provider,
+                Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+            };
+            Some((resolved_model, provider))
+        }
+        None => None,
+    };
+
+    if let Some(effort) = route_effort.as_deref() {
+        let target_protocol = selection
+            .as_ref()
+            .map(|(_, provider)| &provider.protocol)
+            .cloned()
+            .unwrap_or(crate::proxy::config::ProviderProtocol::AnthropicPassthrough);
+        crate::proxy::common::route_reasoning::apply_to_claude_request_for_protocol(
+            &mut request,
+            effort,
+            &target_protocol,
+        );
+    }
 
     // [CRITICAL FIX] 预先清理所有消息中的 cache_control 字段 (Issue #744)
     // 必须在序列化之前处理，以确保 z.ai 和 Google Flow 都不受历史消息缓存标记干扰
@@ -475,12 +510,23 @@ pub async fn handle_messages(
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
+        let mut new_body = new_body;
+        // ClaudeRequest intentionally models the fields needed by the legacy
+        // Google path. Preserve newer Claude extensions that are important to
+        // tool calling when the request crosses the Responses boundary.
+        if let Some(object) = new_body.as_object_mut() {
+            for field in ["tool_choice", "stop_sequences"] {
+                if !object.contains_key(field) {
+                    if let Some(value) = original_body.get(field) {
+                        object.insert(field.to_string(), value.clone());
+                    }
+                }
+            }
+        }
 
-        // Find the provider by name from the router using stored selection info
-        let router = state.provider_router.read().await;
-        let provider = provider_name
-            .as_ref()
-            .and_then(|name| router.get_by_name(name));
+        // Reuse the already-resolved provider. Looking it up again from the
+        // router would discard the in-memory auth-file access token.
+        let provider = selection.as_ref().map(|(_, provider)| provider);
 
         match route_protocol {
             Some("anthropic") => {
@@ -513,6 +559,19 @@ pub async fn handle_messages(
                     return crate::proxy::providers::zai_openai_compat::forward_claude_via_openai_compat(
                         &state, provider, &request, &headers, llm_trace_id.as_deref(),
                     ).await;
+                }
+            }
+            Some("codex_responses") => {
+                if let Some(provider) = provider {
+                    return crate::proxy::providers::codex_responses::forward_claude_via_codex_responses(
+                        &state,
+                        provider,
+                        &request,
+                        &new_body,
+                        &headers,
+                        llm_trace_id.as_deref(),
+                    )
+                    .await;
                 }
             }
             Some("gemini_v1") => {
@@ -684,7 +743,7 @@ pub async fn handle_messages(
 
     // 3. 准备闭包
     let mut request_for_body = request.clone();
-    let token_manager = state.token_manager;
+    let token_manager = state.token_manager.clone();
 
     let pool_size = token_manager.len();
     // [FIX] Ensure max_attempts is at least 2 to allow for internal retries (e.g. stripping signatures)
@@ -1292,13 +1351,26 @@ pub async fn handle_messages(
                     Some(bytes) => {
                         // We have data! Construct the combined stream
                         let stream_rest = claude_stream;
-                        let combined_stream = Box::pin(futures::stream::once(async move { Ok(bytes) })
-                            .chain(stream_rest.map(|result| -> Result<Bytes, std::io::Error> {
-                                match result {
-                                    Ok(b) => Ok(b),
-                                    Err(e) => Ok(Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"message\":\"{}\",\"code\":\"stream_error\"}}}}\n\n", e.replace('"', "\\\"")))),
-                                }
-                            })));
+                        let combined_stream = Box::pin(
+                            futures::stream::once(async move { Ok(bytes) })
+                                .chain(stream_rest)
+                                .scan(false, |errored, result| {
+                                    if *errored {
+                                        return std::future::ready(None);
+                                    }
+
+                                    let output = match result {
+                                        Ok(bytes) => Ok::<Bytes, std::io::Error>(bytes),
+                                        Err(error) => {
+                                            *errored = true;
+                                            Ok(crate::proxy::stream_error::anthropic_sse_error(
+                                                error,
+                                            ))
+                                        }
+                                    };
+                                    std::future::ready(Some(output))
+                                }),
+                        );
 
                         // 判断客户端期望的格式
                         if client_wants_stream {

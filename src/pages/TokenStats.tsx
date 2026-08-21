@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { request as invoke } from '../utils/request';
 import { useTranslation } from 'react-i18next';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
-import { Clock, Calendar, CalendarDays, Users, Zap, TrendingUp, RefreshCw, Cpu } from 'lucide-react';
+import { Activity, CheckCircle2, Clock, Clock3, Calendar, CalendarDays, Users, Zap, TrendingUp, RefreshCw, Cpu } from 'lucide-react';
 
 interface TokenStatsAggregated {
     period: string;
@@ -43,7 +43,14 @@ interface TokenStatsSummary {
     total_output_tokens: number;
     total_tokens: number;
     total_requests: number;
+    successful_requests: number;
+    failed_requests: number;
+    success_rate: number;
+    average_duration_ms: number;
+    unique_sources: number;
     unique_accounts: number;
+    unique_providers: number;
+    unique_models: number;
 }
 
 type TimeRange = 'hourly' | 'daily' | 'weekly';
@@ -61,6 +68,16 @@ const formatNumber = (num: number): string => {
     if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
     if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
     return num.toString();
+};
+
+const formatDuration = (milliseconds: number): string => {
+    if (milliseconds >= 1000) return `${(milliseconds / 1000).toFixed(2)}s`;
+    return `${Math.round(milliseconds)}ms`;
+};
+
+const shortenSourceName = (source: string): string => {
+    const label = source.includes('@') ? source.split('@')[0] : source;
+    return label.length > 22 ? `${label.slice(0, 20)}…` : label;
 };
 
 const shortenModelName = (model: string): string => {
@@ -107,10 +124,10 @@ const TokenStats: React.FC = () => {
                     accountTrend = await invoke<AccountTrendPoint[]>('get_token_stats_account_trend_daily', { days: 7 });
                     break;
                 case 'weekly':
-                    hours = 720;
+                    hours = 672;
                     data = await invoke<TokenStatsAggregated[]>('get_token_stats_weekly', { weeks: 4 });
-                    modelTrend = await invoke<ModelTrendPoint[]>('get_token_stats_model_trend_daily', { days: 30 });
-                    accountTrend = await invoke<AccountTrendPoint[]>('get_token_stats_account_trend_daily', { days: 30 });
+                    modelTrend = await invoke<ModelTrendPoint[]>('get_token_stats_model_trend_daily', { days: 28 });
+                    accountTrend = await invoke<AccountTrendPoint[]>('get_token_stats_account_trend_daily', { days: 28 });
                     break;
             }
 
@@ -170,7 +187,7 @@ const TokenStats: React.FC = () => {
     }, [timeRange]);
 
     const pieData = accountData.slice(0, 8).map((account, index) => ({
-        name: account.account_email.split('@')[0] + '...',
+        name: shortenSourceName(account.account_email),
         value: account.total_tokens,
         fullEmail: account.account_email,
         color: COLORS[index % COLORS.length]
@@ -246,7 +263,7 @@ const TokenStats: React.FC = () => {
                 <div className="max-h-[180px] overflow-y-auto space-y-1 pr-1.5 scrollbar-thin scrollbar-thumb-gray-200 dark:scrollbar-thumb-gray-700">
                     {sortedPayload.map((entry: any, index: number) => {
                         const name = entry.name;
-                        const displayName = viewMode === 'model' ? shortenModelName(name) : name.split('@')[0];
+                        const displayName = viewMode === 'model' ? shortenModelName(name) : shortenSourceName(name);
                         return (
                             <div key={index} className="flex items-center justify-between gap-4">
                                 <div className="flex items-center gap-2 overflow-hidden">
@@ -360,7 +377,31 @@ const TokenStats: React.FC = () => {
                 </div>
 
                 {summary && (
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-sky-100 dark:border-base-200">
+                            <div className="flex items-center gap-2 text-sky-600/80 dark:text-sky-400/80 text-sm mb-2">
+                                <Activity className="w-4 h-4" />
+                                {t('token_stats.total_requests', '总请求')}
+                            </div>
+                            <div className="text-2xl font-bold text-sky-600 dark:text-sky-400">{formatNumber(summary.total_requests)}</div>
+                        </div>
+                        <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-emerald-100 dark:border-base-200">
+                            <div className="flex items-center gap-2 text-emerald-600/80 dark:text-emerald-400/80 text-sm mb-2">
+                                <CheckCircle2 className="w-4 h-4" />
+                                {t('token_stats.success_rate', '成功率')}
+                            </div>
+                            <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{summary.success_rate.toFixed(1)}%</div>
+                            <div className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
+                                {t('token_stats.successful', '成功')} {formatNumber(summary.successful_requests)} · {t('token_stats.failed', '失败')} {formatNumber(summary.failed_requests)}
+                            </div>
+                        </div>
+                        <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-amber-100 dark:border-base-200">
+                            <div className="flex items-center gap-2 text-amber-600/80 dark:text-amber-400/80 text-sm mb-2">
+                                <Clock3 className="w-4 h-4" />
+                                {t('token_stats.average_latency', '平均耗时')}
+                            </div>
+                            <div className="text-2xl font-bold text-amber-600 dark:text-amber-400">{formatDuration(summary.average_duration_ms)}</div>
+                        </div>
                         <div className="bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-800/50 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:shadow-md transition-shadow">
                             <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-sm mb-2">
                                 <div className="p-1.5 rounded-lg bg-gray-100 dark:bg-gray-700">
@@ -399,10 +440,10 @@ const TokenStats: React.FC = () => {
                                 <div className="p-1.5 rounded-lg bg-green-100/50 dark:bg-green-900/30">
                                     <Users className="w-4 h-4 text-green-600 dark:text-green-400" />
                                 </div>
-                                {t('token_stats.accounts_used', '活跃账号')}
+                                {t('token_stats.sources_used', '活跃来源')}
                             </div>
                             <div className="text-2xl font-bold text-green-600 dark:text-green-400">
-                                {summary.unique_accounts}
+                                {summary.unique_sources}
                             </div>
                         </div>
                         <div className="bg-gradient-to-br from-orange-50/50 to-white dark:from-orange-900/10 dark:to-gray-800 rounded-xl p-4 shadow-sm border border-orange-100 dark:border-orange-900/30 hover:shadow-md transition-shadow">
@@ -413,7 +454,7 @@ const TokenStats: React.FC = () => {
                                 {t('token_stats.models_used', '使用模型')}
                             </div>
                             <div className="text-2xl font-bold text-orange-600 dark:text-orange-400">
-                                {modelData.length}
+                                {summary.unique_models}
                             </div>
                         </div>
                     </div>
@@ -429,7 +470,7 @@ const TokenStats: React.FC = () => {
                             )}
                             {viewMode === 'model'
                                 ? t('token_stats.model_trend', '分模型使用趋势')
-                                : t('token_stats.account_trend', '分账号使用趋势')
+                                : t('token_stats.account_trend', '分来源使用趋势')
                             }
                         </h2>
                         <div className="flex bg-gray-100/80 dark:bg-gray-700/50 rounded-lg p-1">
@@ -449,12 +490,14 @@ const TokenStats: React.FC = () => {
                                     : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
                                     }`}
                             >
-                                {t('token_stats.by_account_view', '按账号')}
+                                {t('token_stats.by_account_view', '按来源')}
                             </button>
                         </div>
                     </div>
                     <div className="h-72" ref={trendChartContainerRef}>
-                        {modelTrendData.length > 0 && allModels.length > 0 ? (
+                        {(viewMode === 'model'
+                            ? modelTrendData.length > 0 && allModels.length > 0
+                            : accountTrendData.length > 0 && allAccounts.length > 0) ? (
                             <ResponsiveContainer width="100%" height="100%">
                                 <AreaChart
                                     data={viewMode === 'model' ? modelTrendData : accountTrendData}
@@ -488,7 +531,7 @@ const TokenStats: React.FC = () => {
                                         wrapperStyle={{ zIndex: 100 }}
                                     />
                                     <Legend
-                                        formatter={(value) => viewMode === 'model' ? shortenModelName(value) : value.split('@')[0]}
+                                        formatter={(value) => viewMode === 'model' ? shortenModelName(value) : shortenSourceName(value)}
                                         wrapperStyle={{
                                             fontSize: '11px',
                                             paddingTop: '10px',
@@ -566,7 +609,7 @@ const TokenStats: React.FC = () => {
 
                     <div className="bg-white dark:bg-gray-800 rounded-xl p-6 shadow-sm border border-gray-200 dark:border-gray-700">
                         <h2 className="text-lg font-semibold text-gray-800 dark:text-white mb-4">
-                            {t('token_stats.by_account', '分账号统计')}
+                            {t('token_stats.by_account', '分来源统计')}
                         </h2>
                         <div className="h-48" ref={pieChartContainerRef}>
                             {pieData.length > 0 ? (
@@ -610,8 +653,8 @@ const TokenStats: React.FC = () => {
                                             className="w-3 h-3 rounded-full"
                                             style={{ backgroundColor: COLORS[index % COLORS.length] }}
                                         />
-                                        <span className="text-gray-600 dark:text-gray-300 truncate max-w-[120px]">
-                                            {account.account_email.split('@')[0]}
+                                        <span className="text-gray-600 dark:text-gray-300 truncate max-w-[160px]" title={account.account_email}>
+                                            {shortenSourceName(account.account_email)}
                                         </span>
                                     </div>
                                     <span className="font-medium text-gray-800 dark:text-white">
@@ -657,7 +700,9 @@ const TokenStats: React.FC = () => {
                                     </thead>
                                     <tbody>
                                         {modelData.map((model, index) => {
-                                            const percentage = summary ? ((model.total_tokens / summary.total_tokens) * 100).toFixed(1) : '0';
+                                            const percentage = summary && summary.total_tokens > 0
+                                                ? ((model.total_tokens / summary.total_tokens) * 100).toFixed(1)
+                                                : '0.0';
                                             return (
                                                 <tr
                                                     key={model.model}

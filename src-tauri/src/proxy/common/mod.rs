@@ -5,7 +5,9 @@
 pub mod client_adapter;
 pub mod client_adapters;
 pub mod json_schema;
+pub mod model_cooldown;
 pub mod model_mapping;
+pub mod route_reasoning;
 pub mod schema_cache;
 pub mod session;
 pub mod tool_adapter;

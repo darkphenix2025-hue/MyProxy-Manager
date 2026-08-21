@@ -8,6 +8,8 @@ export interface NavItem {
     priority: 'high' | 'medium' | 'low';
 }
 
+export const DEFAULT_HIDDEN_MENU_ITEMS = ['/token-stats', '/user-token'] as const;
+
 export interface Language {
     code: string;
     label: string;

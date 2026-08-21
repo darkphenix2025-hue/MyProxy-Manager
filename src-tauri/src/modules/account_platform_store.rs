@@ -1,5 +1,5 @@
 use crate::models::connection::{
-    AccountPlatformDocumentV3, Credential, Identity, ProviderConnection,
+    AccountPlatformDocumentV3, ConnectionStatus, Credential, Identity, ProviderConnection,
 };
 use std::io::Write;
 
@@ -23,6 +23,8 @@ pub enum AccountPlatformStoreError {
     Conflict,
     #[error("account platform references are inconsistent")]
     InvalidReference,
+    #[error("account platform record was not found")]
+    NotFound,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,67 @@ impl AccountPlatformStore {
             credentials,
             connections,
         ))
+    }
+
+    pub async fn set_connection_enabled(
+        &self,
+        credential_id: &str,
+        enabled: bool,
+    ) -> Result<(), AccountPlatformStoreError> {
+        let _guard = self.lock.lock().await;
+        let _file_lock = self.acquire_file_lock()?;
+        let (identities, credentials, mut connections) = self.load_unlocked()?;
+        let connection = connections
+            .iter_mut()
+            .find(|connection| connection.credential_id == credential_id)
+            .ok_or(AccountPlatformStoreError::NotFound)?;
+        connection.enabled = enabled;
+        connection.status = if enabled {
+            if connection.status == ConnectionStatus::Disabled {
+                ConnectionStatus::Ready
+            } else {
+                connection.status.clone()
+            }
+        } else {
+            ConnectionStatus::Disabled
+        };
+        self.write_unlocked(AccountPlatformDocumentV3::new(
+            identities,
+            credentials,
+            connections,
+        ))
+    }
+
+    pub async fn remove_credential(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<Credential>, AccountPlatformStoreError> {
+        let _guard = self.lock.lock().await;
+        let _file_lock = self.acquire_file_lock()?;
+        let (mut identities, mut credentials, mut connections) = self.load_unlocked()?;
+        let Some(index) = credentials
+            .iter()
+            .position(|credential| credential.id == credential_id)
+        else {
+            return Ok(None);
+        };
+        let credential = credentials.remove(index);
+        let identity_id = credential.identity_id.clone();
+        connections.retain(|connection| connection.credential_id != credential_id);
+        if let Some(identity_id) = identity_id {
+            if !credentials
+                .iter()
+                .any(|credential| credential.identity_id.as_deref() == Some(identity_id.as_str()))
+            {
+                identities.retain(|identity| identity.id != identity_id);
+            }
+        }
+        self.write_unlocked(AccountPlatformDocumentV3::new(
+            identities,
+            credentials,
+            connections,
+        ))?;
+        Ok(Some(credential))
     }
 
     pub async fn begin_onboarding(
@@ -367,6 +430,36 @@ mod tests {
             Err(AccountPlatformStoreError::InvalidReference)
         ));
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn can_toggle_connection_and_remove_credential_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AccountPlatformStore::new(directory.path().join("accounts-v3.json"));
+        let (identity, credential, connection) = record("managed");
+        store
+            .append(identity, credential, connection)
+            .await
+            .unwrap();
+
+        store
+            .set_connection_enabled("credential-managed", false)
+            .await
+            .unwrap();
+        let (_, _, connections) = store.load().await.unwrap();
+        assert!(!connections[0].enabled);
+        assert_eq!(connections[0].status, ConnectionStatus::Disabled);
+
+        let removed = store
+            .remove_credential("credential-managed")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed.id, "credential-managed");
+        let (identities, credentials, connections) = store.load().await.unwrap();
+        assert!(identities.is_empty());
+        assert!(credentials.is_empty());
+        assert!(connections.is_empty());
     }
 
     #[tokio::test]

@@ -262,6 +262,8 @@ pub async fn handle_warmup(
                     req.model
                 )),
                 response_body: None,
+                raw_response_body: None,
+                message_start_id: None,
                 input_tokens: Some(0),
                 output_tokens: Some(0),
                 protocol: Some("warmup".to_string()),
@@ -366,6 +368,8 @@ pub async fn handle_warmup(
                     req.model
                 )),
                 response_body: None,
+                raw_response_body: None,
+                message_start_id: None,
                 input_tokens: None,
                 output_tokens: None,
                 protocol: Some("warmup".to_string()),

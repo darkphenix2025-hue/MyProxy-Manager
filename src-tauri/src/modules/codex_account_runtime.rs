@@ -3,6 +3,7 @@ use crate::models::connection::{
     ProviderConnection, WireProtocol,
 };
 use crate::modules::account_platform_store::{AccountPlatformStore, AccountPlatformStoreError};
+use crate::modules::auth_file_store::CodexAuthStore;
 use crate::modules::codex_auth::{CodexAuthStart, CodexOAuthConfig};
 use crate::modules::codex_identity::{
     CodexIdentityClient, CodexIdentityError, VerifiedCodexIdentity,
@@ -10,16 +11,28 @@ use crate::modules::codex_identity::{
 use crate::modules::codex_login::{
     CodexLoginError, CodexLoginFlow, CodexLoginResult, CodexLoginService,
 };
-use crate::modules::codex_tokens::{CodexTokenError, CodexTokenVault};
-use crate::modules::secret_store::{KeyringSecretStore, SecretStore};
-use serde::Serialize;
+use crate::modules::codex_tokens::{CodexTokenError, CodexTokenSet, CodexTokenVault};
+use crate::modules::secret_store::SecretStore;
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::Path;
 
 pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const CODEX_AUTHORIZATION_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 pub const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 pub const CODEX_USERINFO_ENDPOINT: &str = "https://auth.openai.com/userinfo";
-pub const CODEX_CALLBACK_BIND_ADDRESS: &str = "127.0.0.1:0";
+/// Codex OAuth only accepts the callback registered by the Codex CLI client.
+/// Keep the listener on loopback, while advertising the canonical `localhost`
+/// redirect URI from `CodexLoopbackListener::redirect_uri`.
+pub const CODEX_CALLBACK_BIND_ADDRESS: &str = "127.0.0.1:1455";
 pub const CODEX_UPSTREAM_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex";
+pub const CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+pub const CODEX_RESET_CREDITS_ENDPOINT: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const CODEX_CLIENT_VERSION: &str = "0.144.1";
+const CODEX_USER_AGENT: &str = "codex_cli_rs/0.144.1 (MyProxy-Manager; auth-file)";
+const MAX_CODEX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CODEX_ERROR_BODY_CHARS: usize = 2_000;
 const ONBOARDING_LEASE_SECONDS: i64 = 10 * 60;
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +47,18 @@ pub enum CodexAccountRuntimeError {
     Store(#[from] AccountPlatformStoreError),
     #[error("Codex login session was not found")]
     SessionNotFound,
+    #[error("Codex credential was not found")]
+    CredentialNotFound,
+    #[error("Codex credential is disabled")]
+    CredentialDisabled,
+    #[error("Codex model discovery failed: {0}")]
+    ModelDiscovery(String),
+    #[error("Codex quota discovery failed: {0}")]
+    QuotaDiscovery(String),
+    #[error("Codex account identifier is unavailable")]
+    AccountIdUnavailable,
+    #[error("Codex auth-file export failed")]
+    AuthFileExport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -91,7 +116,238 @@ pub struct AccountConnectionSummary {
     pub connection: ProviderConnection,
 }
 
-pub type ProductionCodexAccountRuntime = CodexAccountRuntime<KeyringSecretStore>;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodexModelSummary {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexQuotaWindow {
+    #[serde(
+        default,
+        alias = "usedPercent",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub used_percent: Option<f64>,
+    #[serde(
+        default,
+        alias = "limitWindowSeconds",
+        deserialize_with = "deserialize_optional_i64"
+    )]
+    pub limit_window_seconds: Option<i64>,
+    #[serde(
+        default,
+        alias = "resetAfterSeconds",
+        deserialize_with = "deserialize_optional_i64"
+    )]
+    pub reset_after_seconds: Option<i64>,
+    #[serde(
+        default,
+        alias = "resetAt",
+        deserialize_with = "deserialize_optional_timestamp"
+    )]
+    pub reset_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexQuotaLimit {
+    #[serde(default)]
+    pub allowed: Option<bool>,
+    #[serde(default, alias = "limitReached")]
+    pub limit_reached: Option<bool>,
+    #[serde(default, alias = "primaryWindow")]
+    pub primary_window: Option<CodexQuotaWindow>,
+    #[serde(default, alias = "secondaryWindow")]
+    pub secondary_window: Option<CodexQuotaWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexAdditionalQuota {
+    #[serde(default, alias = "limitName")]
+    pub limit_name: Option<String>,
+    #[serde(default, alias = "meteredFeature")]
+    pub metered_feature: Option<String>,
+    #[serde(default, alias = "rateLimit")]
+    pub rate_limit: Option<CodexQuotaLimit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexResetCredit {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default, alias = "resetType")]
+    pub reset_type: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(
+        default,
+        alias = "grantedAt",
+        deserialize_with = "deserialize_optional_timestamp"
+    )]
+    pub granted_at: Option<i64>,
+    #[serde(
+        default,
+        alias = "expiresAt",
+        deserialize_with = "deserialize_optional_timestamp"
+    )]
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CodexQuotaSummary {
+    pub plan_type: Option<String>,
+    pub subscription_expires_at: Option<i64>,
+    pub rate_limit: Option<CodexQuotaLimit>,
+    pub code_review_rate_limit: Option<CodexQuotaLimit>,
+    pub additional_rate_limits: Vec<CodexAdditionalQuota>,
+    pub reset_credits_available_count: Option<i64>,
+    pub reset_credits_applicable_available_count: Option<i64>,
+    pub reset_credits: Vec<CodexResetCredit>,
+    pub reset_credits_error: Option<String>,
+    pub fetched_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CodexImportRequest {
+    pub content: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CodexExportRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CodexEnabledRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CodexQuotaPayload {
+    #[serde(default, alias = "planType")]
+    plan_type: Option<String>,
+    #[serde(
+        default,
+        alias = "subscriptionExpiresAt",
+        deserialize_with = "deserialize_optional_timestamp"
+    )]
+    subscription_expires_at: Option<i64>,
+    #[serde(default, alias = "subscription")]
+    subscription: Option<CodexSubscriptionPayload>,
+    #[serde(default, alias = "rateLimit")]
+    rate_limit: Option<CodexQuotaLimit>,
+    #[serde(default, alias = "codeReviewRateLimit")]
+    code_review_rate_limit: Option<CodexQuotaLimit>,
+    #[serde(
+        default,
+        alias = "additionalRateLimits",
+        deserialize_with = "deserialize_vec_or_null"
+    )]
+    additional_rate_limits: Vec<CodexAdditionalQuota>,
+    #[serde(default, alias = "rateLimitResetCredits")]
+    rate_limit_reset_credits: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CodexSubscriptionPayload {
+    #[serde(
+        default,
+        alias = "expiresAt",
+        deserialize_with = "deserialize_optional_timestamp"
+    )]
+    expires_at: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CodexResetCreditsPayload {
+    #[serde(
+        default,
+        alias = "availableCount",
+        deserialize_with = "deserialize_optional_i64"
+    )]
+    available_count: Option<i64>,
+    #[serde(
+        default,
+        alias = "applicableAvailableCount",
+        deserialize_with = "deserialize_optional_i64"
+    )]
+    applicable_available_count: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_null")]
+    credits: Vec<CodexResetCredit>,
+}
+
+fn deserialize_optional_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)
+}
+
+fn deserialize_vec_or_null<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_optional_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = deserialize_optional_value(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(value) => value.trim().parse::<f64>().ok(),
+        _ => None,
+    }))
+}
+
+fn deserialize_optional_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = deserialize_optional_value(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::Number(number) => number.as_i64(),
+        serde_json::Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }))
+}
+
+fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = deserialize_optional_value(deserializer)?;
+    Ok(value
+        .and_then(|value| match value {
+            serde_json::Value::Number(number) => number.as_i64(),
+            serde_json::Value::String(value) => value.trim().parse::<i64>().ok().or_else(|| {
+                chrono::DateTime::parse_from_rfc3339(value.trim())
+                    .ok()
+                    .map(|date| date.timestamp())
+            }),
+            _ => None,
+        })
+        .map(|timestamp| {
+            if timestamp > 10_000_000_000 {
+                timestamp / 1_000
+            } else {
+                timestamp
+            }
+        }))
+}
+
+pub type ProductionCodexAccountRuntime = CodexAccountRuntime<CodexAuthStore>;
 
 pub struct CodexAccountRuntime<S: SecretStore> {
     login: CodexLoginService<S>,
@@ -121,7 +377,7 @@ impl<S: SecretStore> std::fmt::Debug for CodexAccountRuntime<S> {
 impl ProductionCodexAccountRuntime {
     pub fn production(data_dir: &std::path::Path) -> Result<Self, CodexAccountRuntimeError> {
         let oauth = default_oauth_config();
-        let secret_store = KeyringSecretStore::default();
+        let secret_store = CodexAuthStore::new(data_dir.join("auth-files"));
         Ok(Self::new(
             CodexLoginService::new(oauth, secret_store.clone())?,
             CodexIdentityClient::new(CODEX_USERINFO_ENDPOINT)?,
@@ -230,29 +486,410 @@ impl<S: SecretStore> CodexAccountRuntime<S> {
             .into_iter()
             .map(|credential| (credential.id.clone(), credential))
             .collect();
-        connections
-            .into_iter()
-            .map(|connection| {
-                let identity_id = connection
-                    .identity_id
-                    .as_deref()
-                    .ok_or(AccountPlatformStoreError::InvalidDocument)?;
-                let identity = identities
-                    .get(identity_id)
-                    .cloned()
-                    .ok_or(AccountPlatformStoreError::InvalidDocument)?;
-                let credential = credentials
-                    .get(&connection.credential_id)
-                    .map(CredentialSummary::from)
-                    .ok_or(AccountPlatformStoreError::InvalidDocument)?;
-                Ok(AccountConnectionSummary {
-                    identity,
-                    credential,
-                    connection,
-                })
+        let now = chrono::Utc::now().timestamp();
+        let mut summaries = Vec::with_capacity(connections.len());
+        for connection in connections {
+            let identity_id = connection
+                .identity_id
+                .as_deref()
+                .ok_or(AccountPlatformStoreError::InvalidDocument)?;
+            let identity = identities
+                .get(identity_id)
+                .cloned()
+                .ok_or(AccountPlatformStoreError::InvalidDocument)?;
+            let credential = credentials
+                .get(&connection.credential_id)
+                .ok_or(AccountPlatformStoreError::InvalidDocument)?;
+            let mut credential_summary = CredentialSummary::from(credential);
+            if !matches!(credential.lifecycle, CredentialLifecycle::Revoked) {
+                match self.vault.read(credential.material.secret_ref()).await {
+                    Ok(tokens) => {
+                        credential_summary.expires_at = Some(tokens.expires_at());
+                        credential_summary.lifecycle = if tokens.expires_at() <= now {
+                            CredentialLifecycle::Expired
+                        } else {
+                            CredentialLifecycle::Ready
+                        };
+                    }
+                    Err(_) => credential_summary.lifecycle = CredentialLifecycle::Unavailable,
+                }
+            }
+            summaries.push(AccountConnectionSummary {
+                identity,
+                credential: credential_summary,
+                connection,
+            });
+        }
+        Ok(summaries)
+    }
+
+    pub async fn set_enabled(
+        &self,
+        credential_id: &str,
+        enabled: bool,
+    ) -> Result<(), CodexAccountRuntimeError> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        self.store
+            .set_connection_enabled(credential_id, enabled)
+            .await
+            .map_err(|error| match error {
+                AccountPlatformStoreError::NotFound => CodexAccountRuntimeError::CredentialNotFound,
+                other => CodexAccountRuntimeError::Store(other),
             })
-            .collect::<Result<Vec<_>, AccountPlatformStoreError>>()
+    }
+
+    pub async fn refresh_credential(
+        &self,
+        credential_id: &str,
+    ) -> Result<(), CodexAccountRuntimeError> {
+        let (_, credentials, _) = self.store.load().await?;
+        let credential = credentials
+            .into_iter()
+            .find(|credential| credential.id == credential_id)
+            .ok_or(CodexAccountRuntimeError::CredentialNotFound)?;
+        self.login
+            .refresh_now(
+                credential.material.secret_ref(),
+                chrono::Utc::now().timestamp(),
+            )
+            .await
             .map_err(CodexAccountRuntimeError::from)
+    }
+
+    pub async fn delete_credential(
+        &self,
+        credential_id: &str,
+    ) -> Result<(), CodexAccountRuntimeError> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        let (_, credentials, _) = self.store.load().await?;
+        let credential = credentials
+            .into_iter()
+            .find(|credential| credential.id == credential_id)
+            .ok_or(CodexAccountRuntimeError::CredentialNotFound)?;
+        self.vault.delete(credential.material.secret_ref()).await?;
+        self.store
+            .remove_credential(credential_id)
+            .await?
+            .ok_or(CodexAccountRuntimeError::CredentialNotFound)?;
+        Ok(())
+    }
+
+    pub async fn import_auth_file(
+        &self,
+        request: CodexImportRequest,
+    ) -> Result<AccountConnectionSummary, CodexAccountRuntimeError> {
+        let imported_metadata: serde_json::Value =
+            serde_json::from_str(&request.content).map_err(|_| CodexTokenError::InvalidResponse)?;
+        let imported_enabled = !imported_metadata
+            .get("disabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let mut tokens =
+            CodexTokenSet::from_auth_file_json(&request.content, chrono::Utc::now().timestamp())?;
+        let verified = match tokens.id_token() {
+            Some(id_token) => match self.identity.verify_id_token(id_token) {
+                Ok(identity) => identity,
+                Err(_) => {
+                    self.verify_identity_from_access_token(
+                        tokens.access_token(),
+                        &tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await?
+                }
+            },
+            None => {
+                self.verify_identity_from_access_token(
+                    tokens.access_token(),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await?
+            }
+        };
+        tokens.set_account_id(&verified.subject);
+        let secret_ref = self.vault.create(&tokens).await?;
+        let (identity, credential, connection) = create_records(
+            verified,
+            secret_ref.clone(),
+            tokens.expires_at(),
+            request.filename.as_deref(),
+            imported_enabled,
+        );
+        let connection_id = connection.id.clone();
+        let (existing_identities, _, _) = self.store.load().await?;
+        if identity_subject_exists(&existing_identities, &identity) {
+            let _ = self.vault.delete(&secret_ref).await;
+            return Err(AccountPlatformStoreError::Conflict.into());
+        }
+        let append_result = self.store.append(identity, credential, connection).await;
+        if let Err(error) = append_result {
+            let _ = self.vault.delete(&secret_ref).await;
+            return Err(error.into());
+        }
+        self.list_connections()
+            .await?
+            .into_iter()
+            .find(|summary| summary.connection.id == connection_id)
+            .ok_or(AccountPlatformStoreError::InvalidDocument.into())
+    }
+
+    pub async fn export_auth_file(
+        &self,
+        credential_id: &str,
+        path: &str,
+    ) -> Result<(), CodexAccountRuntimeError> {
+        let (_, credentials, connections) = self.store.load().await?;
+        let credential = credentials
+            .into_iter()
+            .find(|credential| credential.id == credential_id)
+            .ok_or(CodexAccountRuntimeError::CredentialNotFound)?;
+        let connection = connections
+            .into_iter()
+            .find(|connection| connection.credential_id == credential_id)
+            .ok_or(CodexAccountRuntimeError::CredentialNotFound)?;
+        let tokens = self.vault.read(credential.material.secret_ref()).await?;
+        let encoded = tokens.to_auth_file_json_with_disabled(!connection.enabled)?;
+        write_private_export(Path::new(path), encoded.as_str())
+            .map_err(|_| CodexAccountRuntimeError::AuthFileExport)
+    }
+
+    pub async fn list_models(
+        &self,
+        credential_id: &str,
+    ) -> Result<Vec<CodexModelSummary>, CodexAccountRuntimeError> {
+        let (access_token, account_id) = self.auth_for_account_operation(credential_id).await?;
+        let account_id = self
+            .ensure_account_id(credential_id, &access_token, account_id)
+            .await?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| CodexAccountRuntimeError::ModelDiscovery(error.to_string()))?;
+        let response = codex_authenticated_request(
+            client.get(format!(
+                "{CODEX_UPSTREAM_ENDPOINT}/models?client_version={CODEX_CLIENT_VERSION}"
+            )),
+            &access_token,
+            &account_id,
+            "codex_cli_rs",
+        )
+        .send()
+        .await
+        .map_err(|error| CodexAccountRuntimeError::ModelDiscovery(error.to_string()))?;
+        let status = response.status();
+        let body = read_codex_response(response)
+            .await
+            .map_err(CodexAccountRuntimeError::ModelDiscovery)?;
+        if !status.is_success() {
+            return Err(CodexAccountRuntimeError::ModelDiscovery(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                truncate_codex_error_body(&body)
+            )));
+        }
+        let payload = serde_json::from_str::<serde_json::Value>(&body).map_err(|_| {
+            CodexAccountRuntimeError::ModelDiscovery("invalid JSON response".into())
+        })?;
+        let models = crate::proxy::provider_discovery::parse_discovered_models(&payload)
+            .into_iter()
+            .map(|model| CodexModelSummary {
+                id: model.id,
+                display_name: model.name,
+                owned_by: model.owned_by,
+            })
+            .collect::<Vec<_>>();
+        if models.is_empty() {
+            return Err(CodexAccountRuntimeError::ModelDiscovery(
+                "provider returned no models".into(),
+            ));
+        }
+        Ok(models)
+    }
+
+    pub async fn get_quota(
+        &self,
+        credential_id: &str,
+    ) -> Result<CodexQuotaSummary, CodexAccountRuntimeError> {
+        let (access_token, account_id) = self.auth_for_account_operation(credential_id).await?;
+        let account_id = self
+            .ensure_account_id(credential_id, &access_token, account_id)
+            .await?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| CodexAccountRuntimeError::QuotaDiscovery(error.to_string()))?;
+        let response = codex_authenticated_request(
+            client.get(CODEX_USAGE_ENDPOINT),
+            &access_token,
+            &account_id,
+            "Codex Desktop",
+        )
+        .send()
+        .await
+        .map_err(|error| CodexAccountRuntimeError::QuotaDiscovery(error.to_string()))?;
+        let status = response.status();
+        let body = read_codex_response(response)
+            .await
+            .map_err(CodexAccountRuntimeError::QuotaDiscovery)?;
+        if !status.is_success() {
+            return Err(CodexAccountRuntimeError::QuotaDiscovery(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                truncate_codex_error_body(&body)
+            )));
+        }
+        let payload = serde_json::from_str::<CodexQuotaPayload>(&body).map_err(|error| {
+            CodexAccountRuntimeError::QuotaDiscovery(format!("invalid JSON response: {error}"))
+        })?;
+        let mut summary = quota_summary_from_payload(payload, chrono::Utc::now().timestamp());
+
+        let reset_response = codex_authenticated_request(
+            client.get(CODEX_RESET_CREDITS_ENDPOINT),
+            &access_token,
+            &account_id,
+            "Codex Desktop",
+        )
+        .send()
+        .await;
+        match reset_response {
+            Ok(response) => {
+                let status = response.status();
+                match read_codex_response(response).await {
+                    Ok(body) if status.is_success() => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+                            if let Some(reset_credits) = parse_reset_credits(&value) {
+                                summary.reset_credits_available_count =
+                                    reset_credits.available_count;
+                                summary.reset_credits_applicable_available_count =
+                                    reset_credits.applicable_available_count;
+                                summary.reset_credits = reset_credits.credits;
+                                summary.reset_credits_error = None;
+                            }
+                        }
+                    }
+                    Ok(body) => {
+                        summary.reset_credits_error = Some(format!(
+                            "HTTP {}: {}",
+                            status.as_u16(),
+                            truncate_codex_error_body(&body)
+                        ));
+                    }
+                    Err(error) => summary.reset_credits_error = Some(error),
+                }
+            }
+            Err(error) => summary.reset_credits_error = Some(error.to_string()),
+        }
+        Ok(summary)
+    }
+
+    /// Resolve a Codex credential for the proxy request path.
+    ///
+    /// The auth-file remains the source of truth. The token is only returned
+    /// to the in-process request builder and is never serialized or logged.
+    pub async fn access_token_for_credential(
+        &self,
+        credential_id: &str,
+    ) -> Result<String, CodexAccountRuntimeError> {
+        self.auth_for_credential(credential_id)
+            .await
+            .map(|(access_token, _)| access_token)
+    }
+
+    async fn auth_for_credential(
+        &self,
+        credential_id: &str,
+    ) -> Result<(String, Option<String>), CodexAccountRuntimeError> {
+        self.auth_for_credential_with_enabled(credential_id, true)
+            .await
+    }
+
+    async fn auth_for_account_operation(
+        &self,
+        credential_id: &str,
+    ) -> Result<(String, Option<String>), CodexAccountRuntimeError> {
+        self.auth_for_credential_with_enabled(credential_id, false)
+            .await
+    }
+
+    async fn auth_for_credential_with_enabled(
+        &self,
+        credential_id: &str,
+        require_enabled: bool,
+    ) -> Result<(String, Option<String>), CodexAccountRuntimeError> {
+        let (_, credentials, connections) = self.store.load().await?;
+        let credential = credentials
+            .into_iter()
+            .find(|credential| credential.id == credential_id)
+            .ok_or(CodexAccountRuntimeError::CredentialNotFound)?;
+        let connection = connections
+            .into_iter()
+            .find(|connection| connection.credential_id == credential_id)
+            .ok_or(CodexAccountRuntimeError::CredentialNotFound)?;
+        if require_enabled && !connection.enabled {
+            return Err(CodexAccountRuntimeError::CredentialDisabled);
+        }
+        let secret_ref = credential.material.secret_ref().clone();
+        self.login
+            .refresh_if_expiring(&secret_ref, chrono::Utc::now().timestamp(), 300)
+            .await?;
+        let token = self.vault.read(&secret_ref).await?;
+        Ok((
+            token.access_token().to_string(),
+            token.account_id().map(str::to_string),
+        ))
+    }
+
+    async fn ensure_account_id(
+        &self,
+        credential_id: &str,
+        access_token: &str,
+        account_id: Option<String>,
+    ) -> Result<String, CodexAccountRuntimeError> {
+        if let Some(account_id) = account_id.filter(|value| !value.trim().is_empty()) {
+            return Ok(account_id);
+        }
+        let verified = self.identity.verify(access_token).await?;
+        let (_, credentials, _) = self.store.load().await?;
+        let credential = credentials
+            .into_iter()
+            .find(|credential| credential.id == credential_id)
+            .ok_or(CodexAccountRuntimeError::CredentialNotFound)?;
+        let secret_ref = credential.material.secret_ref().clone();
+        let mut token = self.vault.read(&secret_ref).await?;
+        token.set_account_id(&verified.subject);
+        self.vault.replace(&secret_ref, &token).await?;
+        Ok(verified.subject)
+    }
+
+    pub async fn access_token_for_credential_if_configured(
+        &self,
+        mut provider: crate::proxy::config::UpstreamProvider,
+    ) -> Result<crate::proxy::config::UpstreamProvider, String> {
+        if let Some(credential_id) = provider.credential_id.as_deref() {
+            let (access_token, account_id) = self
+                .auth_for_credential(credential_id)
+                .await
+                .map_err(|error| format!("Provider credential is unavailable: {error}"))?;
+            provider.api_key = access_token;
+            provider.account_id = account_id;
+        }
+        Ok(provider)
+    }
+
+    async fn verify_identity_from_access_token(
+        &self,
+        access_token: &str,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<VerifiedCodexIdentity, CodexAccountRuntimeError> {
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                Err(CodexAccountRuntimeError::Login(CodexLoginError::Cancelled))
+            }
+            result = self.identity.verify(access_token) => {
+                result.map_err(CodexAccountRuntimeError::from)
+            }
+        }
     }
 
     async fn complete_in_background(self: std::sync::Arc<Self>, flow: CodexLoginFlow) {
@@ -333,15 +970,31 @@ impl<S: SecretStore> CodexAccountRuntime<S> {
         completion_status: Option<&std::sync::Arc<parking_lot::Mutex<CodexLoginSessionStatus>>>,
     ) -> Result<String, CodexAccountRuntimeError> {
         let result = async {
-            let tokens = self.vault.read(&login.secret_ref).await?;
-            let verified = tokio::select! {
-                _ = cancellation.cancelled() => {
-                    return Err(CodexAccountRuntimeError::Login(CodexLoginError::Cancelled));
+            let mut tokens = self.vault.read(&login.secret_ref).await?;
+            let verified = match tokens.id_token() {
+                Some(id_token) => match self.identity.verify_id_token(id_token) {
+                    Ok(identity) => identity,
+                    Err(_) => {
+                        self.verify_identity_from_access_token(tokens.access_token(), cancellation)
+                            .await?
+                    }
+                },
+                None => {
+                    self.verify_identity_from_access_token(tokens.access_token(), cancellation)
+                        .await?
                 }
-                result = self.identity.verify(tokens.access_token()) => result?,
             };
-            let (identity, credential, connection) =
-                create_records(verified, login.secret_ref.clone(), login.expires_at);
+            if tokens.account_id() != Some(verified.subject.as_str()) {
+                tokens.set_account_id(&verified.subject);
+                self.vault.replace(&login.secret_ref, &tokens).await?;
+            }
+            let (identity, credential, connection) = create_records(
+                verified,
+                login.secret_ref.clone(),
+                login.expires_at,
+                None,
+                true,
+            );
             let connection_id = connection.id.clone();
             let _lifecycle = self.lifecycle_lock.lock().await;
             if cancellation.is_cancelled() {
@@ -444,6 +1097,109 @@ impl<S: SecretStore> CodexAccountRuntime<S> {
     }
 }
 
+fn codex_authenticated_request(
+    request: reqwest::RequestBuilder,
+    access_token: &str,
+    account_id: &str,
+    originator: &str,
+) -> reqwest::RequestBuilder {
+    request
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("ChatGPT-Account-Id", account_id)
+        .header("OpenAI-Beta", "codex-1")
+        .header("Originator", originator)
+        .header(reqwest::header::USER_AGENT, CODEX_USER_AGENT)
+        .bearer_auth(access_token)
+}
+
+async fn read_codex_response(response: reqwest::Response) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CODEX_RESPONSE_BYTES as u64)
+    {
+        return Err("upstream response is too large".to_string());
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("failed to read upstream response: {error}"))?;
+    if body.len() > MAX_CODEX_RESPONSE_BYTES {
+        return Err("upstream response is too large".to_string());
+    }
+    String::from_utf8(body.to_vec()).map_err(|_| "upstream response is not valid UTF-8".to_string())
+}
+
+fn truncate_codex_error_body(body: &str) -> String {
+    let mut truncated = body
+        .chars()
+        .take(MAX_CODEX_ERROR_BODY_CHARS)
+        .collect::<String>();
+    if body.chars().count() > MAX_CODEX_ERROR_BODY_CHARS {
+        truncated.push('…');
+    }
+    if truncated.trim().is_empty() {
+        "empty response".to_string()
+    } else {
+        truncated
+    }
+}
+
+fn quota_summary_from_payload(payload: CodexQuotaPayload, fetched_at: i64) -> CodexQuotaSummary {
+    let embedded_reset_credits = payload
+        .rate_limit_reset_credits
+        .as_ref()
+        .and_then(parse_reset_credits);
+    let subscription_expires_at = payload
+        .subscription_expires_at
+        .or_else(|| payload.subscription.and_then(|value| value.expires_at));
+    let (available_count, applicable_available_count, reset_credits) = embedded_reset_credits
+        .map(|value| {
+            (
+                value.available_count,
+                value.applicable_available_count,
+                value.credits,
+            )
+        })
+        .unwrap_or((None, None, Vec::new()));
+    CodexQuotaSummary {
+        plan_type: payload.plan_type,
+        subscription_expires_at,
+        rate_limit: payload.rate_limit,
+        code_review_rate_limit: payload.code_review_rate_limit,
+        additional_rate_limits: payload.additional_rate_limits,
+        reset_credits_available_count: available_count,
+        reset_credits_applicable_available_count: applicable_available_count,
+        reset_credits,
+        reset_credits_error: None,
+        fetched_at,
+    }
+}
+
+fn parse_reset_credits(value: &serde_json::Value) -> Option<CodexResetCreditsPayload> {
+    let candidate = value.get("data").unwrap_or(value);
+    let mut payload = if candidate.is_array() {
+        CodexResetCreditsPayload {
+            credits: serde_json::from_value(candidate.clone()).ok()?,
+            ..Default::default()
+        }
+    } else {
+        serde_json::from_value(candidate.clone()).ok()?
+    };
+    payload.credits.retain(|credit| {
+        let status_available = credit
+            .status
+            .as_deref()
+            .is_none_or(|status| status.eq_ignore_ascii_case("available"));
+        let is_codex_rate_limit = credit
+            .reset_type
+            .as_deref()
+            .is_none_or(|reset_type| reset_type.eq_ignore_ascii_case("codex_rate_limits"));
+        status_available && is_codex_rate_limit
+    });
+    Some(payload)
+}
+
 pub fn default_oauth_config() -> CodexOAuthConfig {
     CodexOAuthConfig {
         client_id: CODEX_OAUTH_CLIENT_ID.to_string(),
@@ -462,6 +1218,8 @@ fn create_records(
     verified: VerifiedCodexIdentity,
     secret_ref: crate::models::connection::SecretRef,
     expires_at: i64,
+    auth_file_name: Option<&str>,
+    enabled: bool,
 ) -> (Identity, Credential, ProviderConnection) {
     use sha2::Digest;
     let mut digest = sha2::Sha256::new();
@@ -479,6 +1237,7 @@ fn create_records(
     );
     let identity_id = uuid::Uuid::new_v4().to_string();
     let credential_id = uuid::Uuid::new_v4().to_string();
+    let display_email = verified.email.clone();
     let mut identity = Identity::new(&identity_id, "openai");
     identity.subject = Some(fingerprint.clone());
     identity.email = verified.email;
@@ -507,14 +1266,101 @@ fn create_records(
     let mut connection = ProviderConnection::new(
         uuid::Uuid::new_v4().to_string(),
         "openai_codex",
-        credential_id,
+        credential_id.clone(),
         CODEX_UPSTREAM_ENDPOINT,
         vec![WireProtocol::CodexResponsesUpstream],
     );
     connection.identity_id = Some(identity_id);
-    connection.status = ConnectionStatus::Ready;
-    connection.enabled = true;
+    connection.status = if enabled {
+        ConnectionStatus::Ready
+    } else {
+        ConnectionStatus::Disabled
+    };
+    connection.enabled = enabled;
+    connection.config.insert(
+        "auth_file_name".to_string(),
+        serde_json::Value::String(auth_file_display_name(
+            auth_file_name,
+            display_email.as_deref(),
+            &credential_id,
+        )),
+    );
     (identity, credential, connection)
+}
+
+fn identity_subject_exists(identities: &[Identity], candidate: &Identity) -> bool {
+    candidate.subject.as_deref().is_some_and(|subject| {
+        identities
+            .iter()
+            .any(|identity| identity.subject.as_deref() == Some(subject))
+    })
+}
+
+fn auth_file_display_name(
+    source: Option<&str>,
+    email: Option<&str>,
+    credential_id: &str,
+) -> String {
+    let fallback = format!("codex-{credential_id}.json");
+    let candidate = source
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| email.map(|value| format!("codex-{value}.json")))
+        .unwrap_or_else(|| fallback.clone());
+    let candidate = candidate.rsplit(['/', '\\']).next().unwrap_or(&candidate);
+    let mut safe = candidate
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | '@')
+        })
+        .take(120)
+        .collect::<String>();
+    if safe.is_empty() {
+        safe = fallback;
+    }
+    if !safe.ends_with(".json") {
+        safe.push_str(".json");
+    }
+    safe
+}
+
+fn write_private_export(path: &Path, content: &str) -> std::io::Result<()> {
+    if path.as_os_str().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "export path is empty",
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "export directory does not exist",
+        ));
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "export path is not a regular file",
+            ));
+        }
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(content.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 pub fn error_code(error: &CodexAccountRuntimeError) -> &'static str {
@@ -526,6 +1372,12 @@ pub fn error_code(error: &CodexAccountRuntimeError) -> &'static str {
         CodexAccountRuntimeError::Token(_) => "credential_storage_failed",
         CodexAccountRuntimeError::Store(_) => "account_storage_failed",
         CodexAccountRuntimeError::SessionNotFound => "session_not_found",
+        CodexAccountRuntimeError::CredentialNotFound => "credential_not_found",
+        CodexAccountRuntimeError::CredentialDisabled => "credential_disabled",
+        CodexAccountRuntimeError::ModelDiscovery(_) => "model_discovery_failed",
+        CodexAccountRuntimeError::QuotaDiscovery(_) => "quota_discovery_failed",
+        CodexAccountRuntimeError::AccountIdUnavailable => "account_id_unavailable",
+        CodexAccountRuntimeError::AuthFileExport => "auth_file_export_failed",
     }
 }
 
@@ -556,6 +1408,11 @@ mod tests {
         let rendered = format!("{start:?}");
         assert!(!rendered.contains("state-canary"));
         assert!(!rendered.contains("auth.openai.com"));
+    }
+
+    #[test]
+    fn default_callback_binding_matches_codex_oauth_registration() {
+        assert_eq!(CODEX_CALLBACK_BIND_ADDRESS, "127.0.0.1:1455");
     }
 
     #[tokio::test]
@@ -608,6 +1465,7 @@ mod tests {
             .unwrap();
 
         let (identities, credentials, connections) = store.load().await.unwrap();
+        let credential_id = credentials[0].id.clone();
         assert_eq!(identities[0].email.as_deref(), Some("codex@example.com"));
         assert_eq!(identities[0].workspace.as_deref(), Some("workspace-1"));
         assert!(identities[0]
@@ -626,6 +1484,58 @@ mod tests {
         assert!(!public_json.contains("secret-"));
         assert!(!public_json.contains("access-canary"));
         assert!(!public_json.contains("refresh-canary"));
+        assert_eq!(
+            runtime
+                .access_token_for_credential(&credential_id)
+                .await
+                .unwrap(),
+            "access-canary"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_login_uses_id_token_when_userinfo_is_unavailable() {
+        let secrets = MemorySecretStore::default();
+        let vault = CodexTokenVault::new(secrets.clone());
+        let token_set = CodexTokenSet::new(
+            "access-canary",
+            "refresh-canary",
+            Some(test_id_token()),
+            "Bearer",
+            2_000_000_000,
+        )
+        .unwrap();
+        let secret_ref = vault.create(&token_set).await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = CodexAccountRuntime::new(
+            CodexLoginService::with_client_for_test(
+                default_oauth_config(),
+                crate::modules::codex_tokens::CodexTokenClient::for_test_http(
+                    "http://127.0.0.1:1/token".to_string(),
+                )
+                .unwrap(),
+                secrets.clone(),
+            ),
+            CodexIdentityClient::for_test_http("http://127.0.0.1:1/userinfo".to_string()).unwrap(),
+            secrets,
+            AccountPlatformStore::new(directory.path().join("accounts-v3.json")),
+            "127.0.0.1:0",
+        );
+
+        runtime
+            .persist_verified_login(CodexLoginResult {
+                secret_ref,
+                expires_at: 2_000_000_000,
+            })
+            .await
+            .unwrap();
+
+        let summaries = runtime.list_connections().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].identity.email.as_deref(),
+            Some("codex@example.com")
+        );
     }
 
     #[tokio::test]
@@ -772,5 +1682,98 @@ mod tests {
             ))
         ));
         assert!(store.pending_onboarding().await.unwrap().is_none());
+    }
+
+    #[test]
+    fn quota_payload_accepts_codex_field_aliases_and_filters_reset_credits() {
+        let payload: CodexQuotaPayload = serde_json::from_value(json!({
+            "planType": "plus",
+            "rateLimit": {
+                "allowed": true,
+                "limitReached": false,
+                "primaryWindow": {
+                    "usedPercent": 42,
+                    "resetAt": 1_900_000_000,
+                    "resetAfterSeconds": "3600"
+                }
+            },
+            "codeReviewRateLimit": {
+                "secondary_window": {"used_percent": 5}
+            },
+            "rateLimitResetCredits": {
+                "availableCount": "2",
+                "applicableAvailableCount": 1,
+                "credits": [
+                    {"id": "available", "resetType": "codex_rate_limits", "status": "available", "expiresAt": 1_900_000_000},
+                    {"id": "consumed", "resetType": "codex_rate_limits", "status": "consumed"},
+                    {"id": "other", "resetType": "other", "status": "available"}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let summary = quota_summary_from_payload(payload, 1_700_000_000);
+        assert_eq!(summary.plan_type.as_deref(), Some("plus"));
+        assert_eq!(
+            summary
+                .rate_limit
+                .as_ref()
+                .unwrap()
+                .primary_window
+                .as_ref()
+                .unwrap()
+                .used_percent,
+            Some(42.0)
+        );
+        assert_eq!(summary.reset_credits_available_count, Some(2));
+        assert_eq!(summary.reset_credits_applicable_available_count, Some(1));
+        assert_eq!(summary.reset_credits.len(), 1);
+        assert_eq!(summary.reset_credits[0].id.as_deref(), Some("available"));
+    }
+
+    #[test]
+    fn quota_payload_accepts_null_collection_fields() {
+        let payload: CodexQuotaPayload = serde_json::from_value(json!({
+            "additionalRateLimits": null,
+            "rateLimitResetCredits": {
+                "availableCount": null,
+                "applicableAvailableCount": null,
+                "credits": null
+            }
+        }))
+        .expect("nullable quota collections should deserialize");
+
+        assert!(payload.additional_rate_limits.is_empty());
+        let reset_credits = parse_reset_credits(
+            payload
+                .rate_limit_reset_credits
+                .as_ref()
+                .expect("reset credits payload should be present"),
+        )
+        .expect("reset credits object should deserialize");
+        assert!(reset_credits.credits.is_empty());
+    }
+
+    fn test_id_token() -> String {
+        use base64::Engine;
+
+        let encode = |value: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&value).unwrap())
+        };
+        format!(
+            "{}.{}.signature",
+            encode(json!({"alg": "RS256", "typ": "JWT"})),
+            encode(json!({
+                "sub": "codex-subject",
+                "email": "codex@example.com",
+                "name": "Codex User",
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "account-123",
+                    "chatgpt_plan_type": "plus",
+                    "organizations": [{"id": "workspace-1", "is_default": true}]
+                }
+            }))
+        )
     }
 }

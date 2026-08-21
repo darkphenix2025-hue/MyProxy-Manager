@@ -1,6 +1,11 @@
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+const MAX_CAPTURED_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
 
 /// Captured upstream request/response data for a single trace.
 #[derive(Debug, Clone, Default)]
@@ -60,6 +65,34 @@ impl UpstreamTraceCache {
         store.get(trace_id).map(|(_, trace)| trace.clone())
     }
 
+    /// Append a chunk of the raw upstream response as soon as it is received.
+    ///
+    /// Streaming responses can be stopped by the downstream consumer immediately
+    /// after a terminal event. Persisting each chunk here ensures the portion that
+    /// actually arrived from the provider is still available for traffic-log
+    /// diagnostics even when the stream is not polled to completion.
+    pub async fn append_response_chunk(&self, trace_id: &str, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        let mut store = self.store.write().await;
+        self.cleanup_expired(&mut store);
+        let entry = store
+            .entry(trace_id.to_string())
+            .or_insert_with(|| (std::time::Instant::now(), UpstreamTrace::default()));
+        entry.0 = std::time::Instant::now();
+
+        let response = entry.1.response_body.get_or_insert_with(String::new);
+        if response.len() >= MAX_CAPTURED_RESPONSE_BYTES {
+            return;
+        }
+
+        let remaining = MAX_CAPTURED_RESPONSE_BYTES - response.len();
+        let captured = String::from_utf8_lossy(&chunk[..chunk.len().min(remaining)]);
+        response.push_str(&captured);
+    }
+
     fn cleanup_expired(&self, store: &mut HashMap<String, (std::time::Instant, UpstreamTrace)>) {
         let now = std::time::Instant::now();
         store.retain(|_, (ts, _)| now.duration_since(*ts).as_secs() < Self::TTL_SECONDS);
@@ -86,5 +119,108 @@ impl Clone for UpstreamTraceCache {
         Self {
             store: self.store.clone(),
         }
+    }
+}
+
+/// Wrap a provider byte stream and capture raw response chunks before yielding
+/// them to the protocol translator or downstream proxy response.
+pub fn capture_response_stream<S, E>(
+    stream: Pin<Box<S>>,
+    cache: UpstreamTraceCache,
+    trace_id: Option<String>,
+) -> Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + ?Sized + 'static,
+    E: Send + 'static,
+{
+    let captured = async_stream::stream! {
+        let mut upstream = stream;
+        while let Some(item) = upstream.next().await {
+            if let (Some(trace_id), Ok(bytes)) = (trace_id.as_deref(), &item) {
+                cache.append_response_chunk(trace_id, bytes).await;
+            }
+            yield item;
+        }
+    };
+
+    Box::pin(captured)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{capture_response_stream, UpstreamTrace, UpstreamTraceCache};
+    use bytes::Bytes;
+    use futures::{stream, StreamExt};
+
+    #[tokio::test]
+    async fn captured_stream_records_each_chunk_before_yielding_it() {
+        let cache = UpstreamTraceCache::new();
+        cache
+            .put(
+                "trace-1",
+                UpstreamTrace {
+                    request_body: Some("request".to_string()),
+                    response_body: None,
+                },
+            )
+            .await;
+
+        let mut captured = capture_response_stream(
+            Box::pin(stream::iter(vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"first")),
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b" second")),
+            ])),
+            cache.clone(),
+            Some("trace-1".to_string()),
+        );
+
+        assert_eq!(
+            captured.next().await.unwrap().unwrap(),
+            Bytes::from("first")
+        );
+        assert_eq!(
+            cache.get("trace-1").await.unwrap().response_body.as_deref(),
+            Some("first")
+        );
+
+        assert_eq!(
+            captured.next().await.unwrap().unwrap(),
+            Bytes::from(" second")
+        );
+        assert_eq!(
+            cache.get("trace-1").await.unwrap().response_body.as_deref(),
+            Some("first second")
+        );
+    }
+
+    #[tokio::test]
+    async fn captured_stream_keeps_partial_response_when_consumer_stops_early() {
+        let cache = UpstreamTraceCache::new();
+        cache
+            .put(
+                "trace-2",
+                UpstreamTrace {
+                    request_body: Some("request".to_string()),
+                    response_body: None,
+                },
+            )
+            .await;
+
+        let mut captured = capture_response_stream(
+            Box::pin(stream::iter(vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"received")),
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b" never-read")),
+            ])),
+            cache.clone(),
+            Some("trace-2".to_string()),
+        );
+
+        let _ = captured.next().await;
+        drop(captured);
+
+        assert_eq!(
+            cache.get("trace-2").await.unwrap().response_body.as_deref(),
+            Some("received")
+        );
     }
 }

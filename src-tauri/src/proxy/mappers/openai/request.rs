@@ -54,6 +54,11 @@ pub fn transform_openai_request(
         .as_ref()
         .map(|t| t.thinking_type.as_deref() == Some("enabled"))
         .unwrap_or(false);
+    let route_thinking_budget = request
+        .thinking
+        .as_ref()
+        .and_then(|thinking| thinking.effort.as_deref())
+        .and_then(crate::proxy::common::route_reasoning::effort_to_gemini_budget);
     let user_thinking_budget = request.thinking.as_ref().and_then(|t| t.budget_tokens);
 
     // [NEW] 检查历史消息是否兼容思维模型 (是否有 Assistant 消息缺失 reasoning_content)
@@ -475,33 +480,40 @@ pub fn transform_openai_request(
             let tb_config = crate::proxy::config::get_thinking_budget_config();
             // 优先使用用户在请求中传入的 budget，否则从规格表中获取默认值
             let default_budget = model_specs::get_thinking_budget(mapped_model, token);
-            let user_budget: i64 = user_thinking_budget
+            let user_budget: i64 = route_thinking_budget
+                .or(user_thinking_budget)
                 .map(|b| b as i64)
                 .unwrap_or(default_budget as i64);
 
-            let budget = match tb_config.mode {
-                crate::proxy::config::ThinkingBudgetMode::Passthrough => user_budget,
-                crate::proxy::config::ThinkingBudgetMode::Custom => {
-                    let mut custom_value = tb_config.custom_value as i64;
-                    // 如果自定义值超过了模型规格上限，则进行裁剪
-                    if custom_value > default_budget as i64 {
-                        tracing::warn!(
+            let budget = if route_thinking_budget.is_some() {
+                // A route-level effort is an explicit per-target override and
+                // therefore must not be replaced by the global fixed budget.
+                user_budget
+            } else {
+                match tb_config.mode {
+                    crate::proxy::config::ThinkingBudgetMode::Passthrough => user_budget,
+                    crate::proxy::config::ThinkingBudgetMode::Custom => {
+                        let mut custom_value = tb_config.custom_value as i64;
+                        // 如果自定义值超过了模型规格上限，则进行裁剪
+                        if custom_value > default_budget as i64 {
+                            tracing::warn!(
                             "[OpenAI-Request] Custom budget {} exceeds model spec limit {}, capping.",
                             custom_value, default_budget
                         );
-                        custom_value = default_budget as i64;
+                            custom_value = default_budget as i64;
+                        }
+                        custom_value
                     }
-                    custom_value
-                }
-                crate::proxy::config::ThinkingBudgetMode::Auto => {
-                    // Auto 模式下，直接应用规格建议的预算
-                    if user_budget > default_budget as i64 {
-                        default_budget as i64
-                    } else {
-                        user_budget
+                    crate::proxy::config::ThinkingBudgetMode::Auto => {
+                        // Auto 模式下，直接应用规格建议的预算
+                        if user_budget > default_budget as i64 {
+                            default_budget as i64
+                        } else {
+                            user_budget
+                        }
                     }
+                    crate::proxy::config::ThinkingBudgetMode::Adaptive => user_budget,
                 }
-                crate::proxy::config::ThinkingBudgetMode::Adaptive => user_budget,
             };
 
             gen_config["thinkingConfig"] = json!({
@@ -859,11 +871,21 @@ pub fn to_claude_body(request: &OpenAIRequest) -> Value {
             .into();
     }
     if let Some(ref thinking) = request.thinking {
-        body["thinking"] = json!({
-            "type": thinking.thinking_type.clone().unwrap_or_else(|| "enabled".to_string()),
-            "budget_tokens": thinking.budget_tokens,
-            "effort": thinking.effort,
+        let mut thinking_body = json!({
+            "type": thinking
+                .thinking_type
+                .clone()
+                .unwrap_or_else(|| "enabled".to_string()),
         });
+        if let Some(budget_tokens) = thinking.budget_tokens {
+            thinking_body["budget_tokens"] = json!(budget_tokens);
+        }
+        body["thinking"] = thinking_body;
+        if let Some(effort) = thinking.effort.as_deref() {
+            // Claude's current effort API belongs in output_config rather
+            // than inside the thinking object.
+            body["output_config"] = json!({ "effort": effort });
+        }
     }
     if let Some(ref tools) = request.tools {
         body["tools"] = serde_json::to_value(tools).unwrap_or(Value::Null);

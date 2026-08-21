@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, Check, Edit3 } from 'lucide-react';
+import { ChevronDown, Check, Edit3, Search } from 'lucide-react';
 import { cn } from '../../utils/cn';
 
 export interface SelectOption {
@@ -12,7 +12,7 @@ export interface SelectOption {
 interface GroupedSelectProps {
     value: string;
     onChange: (value: string) => void;
-    options: SelectOption[];
+    options: ReadonlyArray<SelectOption>;
     placeholder?: string;
     className?: string;
     disabled?: boolean;
@@ -31,13 +31,22 @@ export default function GroupedSelect({
     const [isOpen, setIsOpen] = useState(false);
     const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0, width: 0 });
     const [customInput, setCustomInput] = useState(''); // 新增: 自定义输入值
+    const [searchQuery, setSearchQuery] = useState('');
     const containerRef = useRef<HTMLDivElement>(null);
     const buttonRef = useRef<HTMLButtonElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null); // 新增: 下拉菜单引用
     const customInputRef = useRef<HTMLInputElement>(null); // 新增: 自定义输入框引用
+    const searchInputRef = useRef<HTMLInputElement>(null);
+
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+    const filteredOptions = normalizedSearch
+        ? options.filter((option) => [option.value, option.label, option.group]
+            .filter(Boolean)
+            .some((part) => part?.toLowerCase().includes(normalizedSearch)))
+        : options;
 
     // 按组分组选项
-    const groupedOptions = options.reduce((acc, option) => {
+    const groupedOptions = filteredOptions.reduce((acc, option) => {
         const group = option.group || 'Other';
         if (!acc[group]) {
             acc[group] = [];
@@ -90,14 +99,12 @@ export default function GroupedSelect({
     }, [isOpen]);
 
     const handleSelect = (optionValue: string) => {
-        console.log('[GroupedSelect] handleSelect called:', optionValue);
         onChange(optionValue);
         setIsOpen(false);
     };
 
     const handleCustomInputSubmit = () => {
         if (customInput.trim()) {
-            console.log('[GroupedSelect] Custom input submitted:', customInput.trim());
             onChange(customInput.trim());
             setCustomInput('');
             setIsOpen(false);
@@ -106,12 +113,19 @@ export default function GroupedSelect({
 
     const handleToggle = () => {
         if (!disabled) {
+            if (!isOpen) setSearchQuery('');
             setIsOpen(!isOpen);
             if (!isOpen) {
                 updateDropdownPosition();
             }
         }
     };
+
+    useEffect(() => {
+        if (isOpen) {
+            window.requestAnimationFrame(() => searchInputRef.current?.focus());
+        }
+    }, [isOpen]);
 
     return (
         <div ref={containerRef} className={cn('relative', className)}>
@@ -121,6 +135,7 @@ export default function GroupedSelect({
                 type="button"
                 onClick={handleToggle}
                 disabled={disabled}
+                aria-expanded={isOpen}
                 className={cn(
                     'w-full px-3 py-2 text-left text-xs font-mono',
                     'bg-white dark:bg-gray-800',
@@ -165,6 +180,30 @@ export default function GroupedSelect({
                         'animate-in fade-in-0 zoom-in-95 duration-100'
                     )}
                 >
+                    <div className="sticky top-0 z-20 border-b border-gray-200 bg-white p-2 dark:border-gray-700 dark:bg-gray-800">
+                        <div className="relative">
+                            <Search
+                                size={13}
+                                className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500"
+                            />
+                            <input
+                                ref={searchInputRef}
+                                type="search"
+                                value={searchQuery}
+                                onChange={(event) => setSearchQuery(event.target.value)}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Escape') {
+                                        event.preventDefault();
+                                        setIsOpen(false);
+                                    }
+                                }}
+                                placeholder="搜索模型 ID 或名称"
+                                aria-label="搜索模型"
+                                className="w-full rounded-md border border-gray-300 bg-gray-50 py-1.5 pl-7 pr-2 text-[10px] text-gray-900 outline-none transition focus:border-blue-500 focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                            />
+                        </div>
+                    </div>
+
                     {Object.entries(groupedOptions).map(([group, groupOptions]) => (
                         <div key={group}>
                             {/* 分组标题 */}
@@ -197,6 +236,12 @@ export default function GroupedSelect({
                             ))}
                         </div>
                     ))}
+
+                    {filteredOptions.length === 0 && (
+                        <div className="px-3 py-5 text-center text-[10px] text-gray-500 dark:text-gray-400">
+                            {normalizedSearch ? '没有匹配的模型' : '暂无可用模型'}
+                        </div>
+                    )}
 
                     {/* 自定义输入区域 */}
                     {allowCustomInput && (

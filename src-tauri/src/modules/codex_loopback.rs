@@ -57,14 +57,9 @@ impl CodexLoopbackListener {
     }
 
     pub fn redirect_uri(&self) -> String {
-        match self.local_addr {
-            std::net::SocketAddr::V4(address) => {
-                format!("http://{}:{}/auth/callback", address.ip(), address.port())
-            }
-            std::net::SocketAddr::V6(address) => {
-                format!("http://[{}]:{}/auth/callback", address.ip(), address.port())
-            }
-        }
+        // The Codex OAuth client registration is exact and uses this
+        // canonical hostname, even though the socket is bound to loopback.
+        format!("http://localhost:{}/auth/callback", self.local_addr.port())
     }
 
     pub async fn accept(&self) -> Result<CodexPendingCallback, CodexLoopbackError> {
@@ -312,5 +307,16 @@ mod tests {
             CodexLoopbackListener::bind(address).await,
             Err(CodexLoopbackError::Bind(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn redirect_uri_uses_codex_registered_localhost_host() {
+        let listener = CodexLoopbackListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().port();
+
+        assert_eq!(
+            listener.redirect_uri(),
+            format!("http://localhost:{port}/auth/callback")
+        );
     }
 }

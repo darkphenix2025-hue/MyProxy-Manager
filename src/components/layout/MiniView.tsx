@@ -12,8 +12,6 @@ import { enterMiniMode, exitMiniMode } from '../../utils/windowManager';
 import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 
-import { useConfigStore } from '../../stores/useConfigStore';
-
 interface ProxyRequestLog {
     id: string;
     model?: string;
@@ -28,7 +26,6 @@ interface ProxyRequestLog {
 export default function MiniView() {
     const { setMiniView } = useViewStore();
     const { currentAccount, refreshQuota, fetchCurrentAccount } = useAccountStore();
-    const { config } = useConfigStore();
     const { t } = useTranslation();
     const [isRefreshing, setIsRefreshing] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -75,22 +72,6 @@ export default function MiniView() {
         };
         fetchVersion();
     }, []);
-
-    // Auto-refresh logic based on config
-    useEffect(() => {
-        if (!config?.auto_refresh || !config?.refresh_interval || config.refresh_interval <= 0) return;
-
-        console.log(`[MiniView] Starting auto-refresh timer: ${config.refresh_interval} mins`);
-
-        const intervalId = setInterval(() => {
-            if (!isRefreshing && currentAccount) {
-                console.log('[MiniView] Auto-refreshing quota...');
-                handleRefresh();
-            }
-        }, config.refresh_interval * 60 * 1000);
-
-        return () => clearInterval(intervalId);
-    }, [config?.auto_refresh, config?.refresh_interval, currentAccount, isRefreshing]);
 
     // Enter mini mode & Auto-resize based on content
     useEffect(() => {

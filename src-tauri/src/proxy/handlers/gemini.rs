@@ -93,22 +93,44 @@ pub async fn handle_generate(
 
     // [NEW] ProviderRouter dispatch for Gemini native requests
     // Resolve model route first so route table mappings apply before provider selection
-    let gemini_mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
-        &model_name,
-        &*state.custom_mapping.read().await,
-    );
-    let router = state.provider_router.read().await;
-    let selection = if !router.is_empty() {
-        let sel = router.select(&gemini_mapped_model, None);
-        if router.is_empty() || sel.provider.name.is_empty() {
-            None
-        } else {
-            Some((sel.resolved_model.clone(), sel.provider.clone()))
-        }
+    let route_resolution = state
+        .resolve_model_for_protocol(
+            &model_name,
+            crate::proxy::config::ProviderProtocol::GeminiV1Internal,
+        )
+        .await;
+    if let Some(error) = route_resolution.cooldown_error.as_ref() {
+        return Ok(state.model_cooldown_error_response(error));
+    }
+    let gemini_mapped_model = route_resolution.model;
+    let route_effort = if route_resolution.fallback_reasoning_effort.is_some() {
+        route_resolution.fallback_reasoning_effort.clone()
     } else {
-        None
+        let route_effort_config = state.route_reasoning_effort.read().await;
+        crate::proxy::common::route_reasoning::resolve_route_reasoning_effort(
+            &model_name,
+            Some(&gemini_mapped_model),
+            &route_effort_config,
+        )
     };
-    drop(router);
+    let selection = route_resolution
+        .provider_selection
+        .map(|selection| (selection.resolved_model, selection.provider));
+
+    let selection = match selection {
+        Some((resolved_model, provider)) => Some((
+            resolved_model,
+            state
+                .resolve_provider_auth(provider)
+                .await
+                .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?,
+        )),
+        None => None,
+    };
+
+    if let Some(effort) = route_effort.as_deref() {
+        crate::proxy::common::route_reasoning::apply_to_gemini_body(&mut body, effort);
+    }
 
     if let Some((resolved_model, provider)) = selection {
         match provider.protocol {
@@ -149,6 +171,12 @@ pub async fn handle_generate(
                 );
                 return Ok(resp);
             }
+            crate::proxy::config::ProviderProtocol::CodexResponses => {
+                tracing::warn!(
+                    "[{}] Codex Responses providers require the /v1/responses endpoint",
+                    trace_id
+                );
+            }
             crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
                 // Fall through to existing TokenManager + Gemini v1internal path
             }
@@ -166,10 +194,13 @@ pub async fn handle_generate(
 
     for attempt in 0..max_attempts {
         // 3. 模型路由解析
-        let mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
-            &model_name,
-            &*state.custom_mapping.read().await,
-        );
+        let mapped_model = state
+            .resolve_model_for_protocol(
+                &model_name,
+                crate::proxy::config::ProviderProtocol::GeminiV1Internal,
+            )
+            .await
+            .model;
         // 提取 tools 列表以进行联网探测 (Gemini 风格可能是嵌套的)
         let tools_val: Option<Vec<Value>> =
             body.get("tools").and_then(|t| t.as_array()).map(|arr| {
@@ -770,48 +801,61 @@ pub async fn handle_generate(
 
         // 429/401 → 尝试 ProviderRouter 重新路由到非 google 供应商
         if status_code == 429 || status_code == 401 {
-            let router = state.provider_router.read().await;
-            let new_selection = router.select(&mapped_model, Some("google"));
-            if new_selection.provider.name != "google" && !new_selection.provider.name.is_empty() {
-                let sel_name = new_selection.provider.name.clone();
-                let sel_resolved = new_selection.resolved_model.clone();
-                let sel_protocol = new_selection.provider.protocol.clone();
-                let sel_provider = (*new_selection.provider).clone();
-                drop(router);
+            let new_selection = state
+                .select_provider_for_model(
+                    &mapped_model,
+                    Some("google"),
+                    crate::proxy::config::ProviderProtocol::GeminiV1Internal,
+                )
+                .await;
+            if let Some(new_selection) = new_selection {
+                if new_selection.provider.name != "google"
+                    && !new_selection.provider.name.is_empty()
+                {
+                    let sel_name = new_selection.provider.name.clone();
+                    let sel_resolved = new_selection.resolved_model.clone();
+                    let sel_protocol = new_selection.provider.protocol.clone();
+                    let sel_provider = new_selection.provider.clone();
 
-                let mapped_via_provider = crate::proxy::providers::router::map_model_for_provider(
-                    &sel_resolved,
-                    &sel_provider.model_mapping,
-                );
-                tracing::info!(
-                    "[gemini_{}] Provider reroute: {} -> provider='{}', model='{}'",
-                    session_id,
-                    mapped_model,
-                    sel_name,
-                    mapped_via_provider
-                );
+                    let sel_provider = state
+                        .resolve_provider_auth(sel_provider)
+                        .await
+                        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
 
-                let result = match sel_protocol {
-                    crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
-                        let mut r =
-                            crate::proxy::providers::zai_gemini::forward_gemini_via_anthropic(
-                                &state,
-                                &sel_provider,
-                                &mapped_via_provider,
-                                &body,
-                                &headers,
-                                client_wants_stream,
-                                llm_trace_id.as_deref(),
-                            )
-                            .await;
-                        r.headers_mut().insert(
-                            "X-Upstream-Protocol",
-                            axum::http::HeaderValue::from_static("anthropic"),
+                    let mapped_via_provider =
+                        crate::proxy::providers::router::map_model_for_provider(
+                            &sel_resolved,
+                            &sel_provider.model_mapping,
                         );
-                        Some(r)
-                    }
-                    crate::proxy::config::ProviderProtocol::OpenAICompatible => {
-                        let mut r =
+                    tracing::info!(
+                        "[gemini_{}] Provider reroute: {} -> provider='{}', model='{}'",
+                        session_id,
+                        mapped_model,
+                        sel_name,
+                        mapped_via_provider
+                    );
+
+                    let result = match sel_protocol {
+                        crate::proxy::config::ProviderProtocol::AnthropicPassthrough => {
+                            let mut r =
+                                crate::proxy::providers::zai_gemini::forward_gemini_via_anthropic(
+                                    &state,
+                                    &sel_provider,
+                                    &mapped_via_provider,
+                                    &body,
+                                    &headers,
+                                    client_wants_stream,
+                                    llm_trace_id.as_deref(),
+                                )
+                                .await;
+                            r.headers_mut().insert(
+                                "X-Upstream-Protocol",
+                                axum::http::HeaderValue::from_static("anthropic"),
+                            );
+                            Some(r)
+                        }
+                        crate::proxy::config::ProviderProtocol::OpenAICompatible => {
+                            let mut r =
                             crate::proxy::providers::zai_gemini::forward_gemini_via_openai_compat(
                                 &state,
                                 &sel_provider,
@@ -822,26 +866,32 @@ pub async fn handle_generate(
                                 llm_trace_id.as_deref(),
                             )
                             .await;
-                        r.headers_mut().insert(
-                            "X-Upstream-Protocol",
-                            axum::http::HeaderValue::from_static("openai"),
-                        );
-                        Some(r)
-                    }
-                    crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
-                        tracing::warn!(
+                            r.headers_mut().insert(
+                                "X-Upstream-Protocol",
+                                axum::http::HeaderValue::from_static("openai"),
+                            );
+                            Some(r)
+                        }
+                        crate::proxy::config::ProviderProtocol::CodexResponses => {
+                            tracing::warn!(
+                                "[gemini_{}] Codex Responses provider cannot serve Gemini requests",
+                                session_id
+                            );
+                            None
+                        }
+                        crate::proxy::config::ProviderProtocol::GeminiV1Internal => {
+                            tracing::warn!(
                             "[gemini_{}] Provider '{}' uses GeminiV1Internal protocol, skipping",
                             session_id,
                             sel_name
                         );
-                        None
+                            None
+                        }
+                    };
+                    if let Some(resp) = result {
+                        return Ok(resp);
                     }
-                };
-                if let Some(resp) = result {
-                    return Ok(resp);
                 }
-            } else {
-                drop(router);
             }
         }
 

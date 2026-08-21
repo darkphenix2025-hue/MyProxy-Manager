@@ -345,32 +345,26 @@ pub async fn save_config(
     // 通知托盘配置已更新
     let _ = app.emit("config://updated", ());
 
-    // 热更新正在运行的服务
-    let instance_lock = proxy_state.instance.read().await;
-    if let Some(instance) = instance_lock.as_ref() {
+    // 热更新当前实际承载请求的服务。
+    // 即使逻辑服务实例尚未创建，常驻管理服务器也可能已经在处理请求，
+    // 因此不能只检查 proxy_state.instance。
+    if let Some(axum_server) = proxy_state.runtime_axum_server().await {
         // 更新模型映射
-        instance.axum_server.update_mapping(&config.proxy).await;
+        axum_server.update_mapping(&config.proxy).await;
         // 更新上游代理
-        instance
-            .axum_server
+        axum_server
             .update_proxy(config.proxy.upstream_proxy.clone())
             .await;
         // 更新安全策略 (auth)
-        instance.axum_server.update_security(&config.proxy).await;
+        axum_server.update_security(&config.proxy).await;
         // 更新 z.ai 配置
-        instance.axum_server.update_zai(&config.proxy).await;
+        axum_server.update_zai(&config.proxy).await;
         // 更新实验性配置
-        instance
-            .axum_server
-            .update_experimental(&config.proxy)
-            .await;
+        axum_server.update_experimental(&config.proxy).await;
         // 更新调试日志配置
-        instance
-            .axum_server
-            .update_debug_logging(&config.proxy)
-            .await;
+        axum_server.update_debug_logging(&config.proxy).await;
         // [NEW] 更新 User-Agent 配置
-        instance.axum_server.update_user_agent(&config.proxy).await;
+        axum_server.update_user_agent(&config.proxy).await;
         // 更新 Thinking Budget 配置
         crate::proxy::update_thinking_budget_config(config.proxy.thinking_budget.clone());
         // [NEW] 更新全局系统提示词配置
@@ -378,22 +372,19 @@ pub async fn save_config(
         // [NEW] 更新全局图像思维模式配置
         crate::proxy::update_image_thinking_mode(config.proxy.image_thinking_mode.clone());
         // 更新代理池配置
-        instance
-            .axum_server
+        axum_server
             .update_proxy_pool(config.proxy.proxy_pool.clone())
             .await;
         // 更新供应商路由
-        instance
-            .axum_server
+        axum_server
             .update_provider_router(config.proxy.providers.clone())
             .await;
         // 更新协议转换单元灰度配置
-        instance
-            .axum_server
+        axum_server
             .update_translator(&config.proxy.translator)
             .await;
         // 更新熔断配置
-        instance
+        axum_server
             .token_manager
             .update_circuit_breaker_config(config.circuit_breaker.clone())
             .await;

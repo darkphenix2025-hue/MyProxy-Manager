@@ -104,9 +104,20 @@ async fn forward_mcp(
         out = out.header(header::CONTENT_TYPE, ct.clone());
     }
 
-    let stream = resp.bytes_stream().map(|chunk| match chunk {
-        Ok(b) => Ok::<Bytes, std::io::Error>(b),
-        Err(e) => Ok(Bytes::from(format!("Upstream stream error: {}", e))),
+    let stream = resp.bytes_stream().scan(false, |errored, chunk| {
+        if *errored {
+            return std::future::ready(None);
+        }
+
+        let result = match chunk {
+            Ok(bytes) => Ok::<Bytes, std::io::Error>(bytes),
+            Err(error) => {
+                *errored = true;
+                tracing::error!("MCP upstream stream error: {}", error);
+                Err(std::io::Error::other(error))
+            }
+        };
+        std::future::ready(Some(result))
     });
 
     out.body(Body::from_stream(stream)).unwrap_or_else(|_| {

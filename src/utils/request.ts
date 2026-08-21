@@ -124,9 +124,16 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_active_oauth_client': { url: '/api/accounts/oauth/client', method: 'GET' },
   'set_active_oauth_client': { url: '/api/accounts/oauth/client', method: 'POST' },
   'start_codex_login': { url: '/api/accounts/codex/login/start', method: 'POST' },
-  'get_codex_login_status': { url: '/api/accounts/codex/login/:sessionId', method: 'GET' },
-  'cancel_codex_login': { url: '/api/accounts/codex/login/:sessionId', method: 'DELETE' },
+  'get_codex_login_status': { url: '/api/accounts/codex/login/:session_id', method: 'GET' },
+  'cancel_codex_login': { url: '/api/accounts/codex/login/:session_id', method: 'DELETE' },
   'list_account_connections': { url: '/api/connections', method: 'GET' },
+  'set_codex_connection_enabled': { url: '/api/connections/:credential_id/status', method: 'PATCH' },
+  'refresh_codex_auth_file': { url: '/api/connections/:credential_id/refresh', method: 'POST' },
+  'delete_codex_auth_file': { url: '/api/connections/:credential_id', method: 'DELETE' },
+  'import_codex_auth_file': { url: '/api/connections/codex/import', method: 'POST' },
+  'export_codex_auth_file': { url: '/api/connections/:credential_id/export', method: 'POST' },
+  'list_codex_models': { url: '/api/connections/:credential_id/models', method: 'GET' },
+  'get_codex_quota': { url: '/api/connections/:credential_id/quota', method: 'GET' },
 
   // Import
   'import_v1_accounts': { url: '/api/accounts/import/v1', method: 'POST' },
@@ -172,6 +179,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_droid_config_content': { url: '/api/proxy/droid/config', method: 'POST' },
 
   // Provider Testing
+  'fetch_provider_models': { url: '/api/proxy/providers/models', method: 'POST' },
   'test_provider_models': { url: '/api/proxy/providers/test', method: 'POST' },
 
   // Proxy Pool (Web Mode Fix)
@@ -183,7 +191,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
 
   // Model Cooldown
   'get_model_cooldowns': { url: '/api/proxy/model-cooldowns', method: 'GET' },
-  'clear_model_cooldowns': { url: '/api/proxy/model-cooldowns/clear', method: 'POST' },
+  'clear_model_cooldowns': { url: '/api/proxy/model-cooldowns', method: 'DELETE' },
 };
 
 export async function request<T>(cmd: string, args?: any): Promise<T> {

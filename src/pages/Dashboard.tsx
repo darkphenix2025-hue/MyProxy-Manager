@@ -1,4 +1,4 @@
-import { RefreshCw, Zap, TrendingUp, Cpu, Users } from 'lucide-react';
+import { Activity, CheckCircle2, Clock3, RefreshCw, Zap, TrendingUp, Cpu, Users } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
@@ -12,6 +12,9 @@ interface TokenStatsAggregated {
     total_output_tokens: number;
     total_tokens: number;
     request_count: number;
+    success_count: number;
+    error_count: number;
+    average_duration_ms: number;
 }
 interface AccountTokenStats {
     account_email: string;
@@ -19,6 +22,9 @@ interface AccountTokenStats {
     total_output_tokens: number;
     total_tokens: number;
     request_count: number;
+    success_count: number;
+    error_count: number;
+    average_duration_ms: number;
 }
 interface ModelTokenStats {
     model: string;
@@ -26,6 +32,9 @@ interface ModelTokenStats {
     total_output_tokens: number;
     total_tokens: number;
     request_count: number;
+    success_count: number;
+    error_count: number;
+    average_duration_ms: number;
 }
 interface ModelTrendPoint {
     period: string;
@@ -40,7 +49,14 @@ interface TokenStatsSummary {
     total_output_tokens: number;
     total_tokens: number;
     total_requests: number;
+    successful_requests: number;
+    failed_requests: number;
+    success_rate: number;
+    average_duration_ms: number;
+    unique_sources: number;
     unique_accounts: number;
+    unique_providers: number;
+    unique_models: number;
 }
 type TimeRange = 'hourly' | 'daily' | 'weekly';
 
@@ -56,8 +72,16 @@ const formatNumber = (num: number): string => {
     if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
     return num.toString();
 };
+const formatDuration = (milliseconds: number): string => {
+    if (milliseconds >= 1000) return `${(milliseconds / 1000).toFixed(2)}s`;
+    return `${Math.round(milliseconds)}ms`;
+};
 const shortenModelName = (model: string): string =>
     model.replace('gemini-', 'g-').replace('claude-', 'c-').replace('-preview', '').replace('-latest', '');
+const shortenSourceName = (source: string): string => {
+    const label = source.includes('@') ? source.split('@')[0] : source;
+    return label.length > 22 ? `${label.slice(0, 20)}…` : label;
+};
 
 // --- Dashboard ---
 function Dashboard() {
@@ -79,16 +103,18 @@ function Dashboard() {
     const [modelData, setModelData] = useState<ModelTokenStats[]>([]);
     const [accountData, setAccountData] = useState<AccountTokenStats[]>([]);
     const [loadingStats, setLoadingStats] = useState(true);
+    const [statsError, setStatsError] = useState<string | null>(null);
     const [viewMode, setViewMode] = useState<'model' | 'account'>('model');
 
     const fetchStats = async () => {
         setLoadingStats(true);
+        setStatsError(null);
         try {
             let hours = 24;
             switch (timeRange) {
                 case 'hourly': hours = 24; break;
                 case 'daily': hours = 168; break;
-                case 'weekly': hours = 720; break;
+                case 'weekly': hours = 672; break;
             }
 
             const [data, modelTrend, accountTrend, accountsStats, modelsStats, summaryData] = await Promise.all([
@@ -96,10 +122,10 @@ function Dashboard() {
                     ? 'get_token_stats_weekly' : timeRange === 'daily'
                         ? 'get_token_stats_daily' : 'get_token_stats_hourly',
                     timeRange === 'weekly' ? { weeks: 4 } : timeRange === 'daily' ? { days: 7 } : { hours: 24 }),
-                invoke<ModelTrendPoint[]>(timeRange === 'weekly' ? 'get_token_stats_model_trend_daily' : 'get_token_stats_model_trend_hourly',
-                    timeRange === 'weekly' ? { days: 30 } : { hours: 24 }),
-                invoke<AccountTrendPoint[]>(timeRange === 'weekly' ? 'get_token_stats_account_trend_daily' : 'get_token_stats_account_trend_hourly',
-                    timeRange === 'weekly' ? { days: 30 } : { hours: 24 }),
+                invoke<ModelTrendPoint[]>(timeRange === 'hourly' ? 'get_token_stats_model_trend_hourly' : 'get_token_stats_model_trend_daily',
+                    timeRange === 'hourly' ? { hours: 24 } : { days: timeRange === 'daily' ? 7 : 28 }),
+                invoke<AccountTrendPoint[]>(timeRange === 'hourly' ? 'get_token_stats_account_trend_hourly' : 'get_token_stats_account_trend_daily',
+                    timeRange === 'hourly' ? { hours: 24 } : { days: timeRange === 'daily' ? 7 : 28 }),
                 invoke<AccountTokenStats[]>('get_token_stats_by_account', { hours }),
                 invoke<ModelTokenStats[]>('get_token_stats_by_model', { hours }),
                 invoke<TokenStatsSummary>('get_token_stats_summary', { hours }),
@@ -131,6 +157,7 @@ function Dashboard() {
             }));
         } catch (error) {
             console.error('Failed to fetch token stats:', error);
+            setStatsError(error instanceof Error ? error.message : String(error));
         } finally {
             setLoadingStats(false);
         }
@@ -139,7 +166,7 @@ function Dashboard() {
     useEffect(() => { fetchStats(); }, [timeRange]);
 
     const pieData = accountData.slice(0, 8).map((a, i) => ({
-        name: a.account_email.split('@')[0] + '...',
+        name: shortenSourceName(a.account_email),
         value: a.total_tokens,
         fullEmail: a.account_email,
         color: COLORS[i % COLORS.length],
@@ -215,9 +242,36 @@ function Dashboard() {
                     </button>
                 </div>
 
+                {statsError && (
+                    <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+                        {t('token_stats.load_failed', '统计数据加载失败')}：{statsError}
+                    </div>
+                )}
+
                 {/* Token Stats 摘要卡片 */}
                 {summary && (
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
+                            <div className="flex items-center gap-2 text-sky-600/80 dark:text-sky-400/80 text-xs mb-1">
+                                <Activity className="w-4 h-4 text-sky-500" />{t('token_stats.total_requests', '总请求')}
+                            </div>
+                            <div className="text-2xl font-bold text-sky-600 dark:text-sky-400">{formatNumber(summary.total_requests)}</div>
+                        </div>
+                        <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
+                            <div className="flex items-center gap-2 text-emerald-600/80 dark:text-emerald-400/80 text-xs mb-1">
+                                <CheckCircle2 className="w-4 h-4 text-emerald-500" />{t('token_stats.success_rate', '成功率')}
+                            </div>
+                            <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{summary.success_rate.toFixed(1)}%</div>
+                            <div className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
+                                {t('token_stats.successful', '成功')} {formatNumber(summary.successful_requests)} · {t('token_stats.failed', '失败')} {formatNumber(summary.failed_requests)}
+                            </div>
+                        </div>
+                        <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
+                            <div className="flex items-center gap-2 text-amber-600/80 dark:text-amber-400/80 text-xs mb-1">
+                                <Clock3 className="w-4 h-4 text-amber-500" />{t('token_stats.average_latency', '平均耗时')}
+                            </div>
+                            <div className="text-2xl font-bold text-amber-600 dark:text-amber-400">{formatDuration(summary.average_duration_ms)}</div>
+                        </div>
                         <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
                             <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-xs mb-1">
                                 <Zap className="w-4 h-4 text-blue-500" />{t('token_stats.total_tokens', '总 Token')}
@@ -238,15 +292,15 @@ function Dashboard() {
                         </div>
                         <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
                             <div className="flex items-center gap-2 text-green-600/80 dark:text-green-400/80 text-xs mb-1">
-                                <Users className="w-4 h-4 text-green-500" />{t('token_stats.accounts_used', '活跃账号')}
+                                <Users className="w-4 h-4 text-green-500" />{t('token_stats.sources_used', '活跃来源')}
                             </div>
-                            <div className="text-2xl font-bold text-green-600 dark:text-green-400">{summary.unique_accounts}</div>
+                            <div className="text-2xl font-bold text-green-600 dark:text-green-400">{summary.unique_sources}</div>
                         </div>
                         <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
                             <div className="flex items-center gap-2 text-orange-600/80 dark:text-orange-400/80 text-xs mb-1">
                                 <Cpu className="w-4 h-4 text-orange-500" />{t('token_stats.models_used', '使用模型')}
                             </div>
-                            <div className="text-2xl font-bold text-orange-600 dark:text-orange-400">{modelData.length}</div>
+                            <div className="text-2xl font-bold text-orange-600 dark:text-orange-400">{summary.unique_models}</div>
                         </div>
                     </div>
                 )}
@@ -256,7 +310,7 @@ function Dashboard() {
                     <div className="flex items-center justify-between mb-4">
                         <h2 className="text-base font-semibold text-gray-800 dark:text-white flex items-center gap-2">
                             {viewMode === 'model' ? <Cpu className="w-5 h-5 text-purple-500" /> : <Users className="w-5 h-5 text-green-500" />}
-                            {viewMode === 'model' ? t('token_stats.model_trend', '分模型使用趋势') : t('token_stats.account_trend', '分账号使用趋势')}
+                            {viewMode === 'model' ? t('token_stats.model_trend', '分模型使用趋势') : t('token_stats.account_trend', '分来源使用趋势')}
                         </h2>
                         <div className="flex bg-gray-100/80 dark:bg-gray-700/50 rounded-lg p-1">
                             <button onClick={() => setViewMode('model')}
@@ -265,7 +319,7 @@ function Dashboard() {
                             </button>
                             <button onClick={() => setViewMode('account')}
                                 className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${viewMode === 'account' ? 'bg-white dark:bg-gray-600 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-gray-500 dark:text-gray-400'}`}>
-                                {t('token_stats.by_account_view', '按账号')}
+                                {t('token_stats.by_account_view', '按来源')}
                             </button>
                         </div>
                     </div>
@@ -279,7 +333,7 @@ function Dashboard() {
                                         axisLine={false} tickLine={false} dy={10} />
                                     <YAxis tick={{ fontSize: 11, fill: '#6b7280' }} tickFormatter={(val) => formatNumber(val)} axisLine={false} tickLine={false} />
                                     <Tooltip content={<CustomTrendTooltip />} cursor={{ stroke: '#6b7280', strokeWidth: 1, strokeDasharray: '4 4', fill: 'transparent' }} allowEscapeViewBox={{ x: true, y: true }} />
-                                    <Legend formatter={(value) => viewMode === 'model' ? shortenModelName(value) : value.split('@')[0]}
+                                    <Legend formatter={(value) => viewMode === 'model' ? shortenModelName(value) : shortenSourceName(value)}
                                         wrapperStyle={{ fontSize: '11px', paddingTop: '10px', maxHeight: '60px', overflowY: 'auto' }} />
                                     {(viewMode === 'model' ? allModels : allAccounts).map((item, idx) => (
                                         <Area key={item} type="monotone" dataKey={item} stackId="1"
@@ -323,7 +377,7 @@ function Dashboard() {
                         </div>
                     </div>
                     <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
-                        <h2 className="text-base font-semibold text-gray-800 dark:text-white mb-3">{t('token_stats.by_account', '分账号统计')}</h2>
+                        <h2 className="text-base font-semibold text-gray-800 dark:text-white mb-3">{t('token_stats.by_account', '分来源统计')}</h2>
                         <div className="h-40">
                             {pieData.length > 0 ? (
                                 <ResponsiveContainer width="100%" height="100%">
@@ -345,7 +399,7 @@ function Dashboard() {
                                 <div key={acc.account_email} className="flex items-center justify-between text-xs">
                                     <div className="flex items-center gap-1.5">
                                         <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: COLORS[idx % COLORS.length] }} />
-                                        <span className="text-gray-600 dark:text-gray-300 truncate max-w-[100px]">{acc.account_email.split('@')[0]}</span>
+                                        <span className="text-gray-600 dark:text-gray-300 truncate max-w-[140px]" title={acc.account_email}>{shortenSourceName(acc.account_email)}</span>
                                     </div>
                                     <span className="font-medium text-gray-800 dark:text-white">{formatNumber(acc.total_tokens)}</span>
                                 </div>
@@ -373,7 +427,9 @@ function Dashboard() {
                             </thead>
                             <tbody>
                                 {modelData.map((model, idx) => {
-                                    const pct = summary ? ((model.total_tokens / summary.total_tokens) * 100).toFixed(1) : '0';
+                                    const pct = summary && summary.total_tokens > 0
+                                        ? ((model.total_tokens / summary.total_tokens) * 100).toFixed(1)
+                                        : '0.0';
                                     return (
                                         <tr key={model.model} className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-700/30">
                                             <td className="py-2 px-3">

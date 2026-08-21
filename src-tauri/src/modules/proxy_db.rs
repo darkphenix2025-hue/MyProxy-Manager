@@ -28,7 +28,7 @@ fn connect_db() -> Result<Connection, String> {
 
 pub fn init_db() -> Result<(), String> {
     // connect_db will initialize WAL mode and other pragmas
-    let conn = connect_db()?;
+    let mut conn = connect_db()?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS request_logs (
@@ -79,6 +79,83 @@ pub fn init_db() -> Result<(), String> {
         "ALTER TABLE request_logs ADD COLUMN upstream_response_body TEXT",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE request_logs ADD COLUMN message_start_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE request_logs ADD COLUMN raw_response_body TEXT",
+        [],
+    );
+
+    // Keep lightweight usage data separate from traffic payloads. Traffic logs
+    // may be removed by retention or by the user, while statistics must remain.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS request_statistics (
+            id TEXT PRIMARY KEY,
+            timestamp INTEGER NOT NULL,
+            status INTEGER NOT NULL,
+            duration INTEGER NOT NULL DEFAULT 0,
+            model TEXT,
+            mapped_model TEXT,
+            upstream_model TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            account_email TEXT,
+            provider_name TEXT,
+            username TEXT,
+            client_ip TEXT,
+            protocol TEXT,
+            upstream_protocol TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_request_statistics_timestamp
+            ON request_statistics (timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_request_statistics_status
+            ON request_statistics (status);
+        CREATE INDEX IF NOT EXISTS idx_request_statistics_client_ip
+            ON request_statistics (client_ip);
+        CREATE TABLE IF NOT EXISTS proxy_schema_migrations (
+            migration_key TEXT PRIMARY KEY,
+            applied_at INTEGER NOT NULL
+        );",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let statistics_backfilled: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM proxy_schema_migrations
+                WHERE migration_key = 'request_statistics_v1'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if !statistics_backfilled {
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO request_statistics (
+                id, timestamp, status, duration, model, mapped_model, upstream_model,
+                input_tokens, output_tokens, account_email, provider_name, username,
+                client_ip, protocol, upstream_protocol
+             )
+             SELECT id, COALESCE(timestamp, 0), COALESCE(status, 0),
+                    COALESCE(duration, 0), model, mapped_model, upstream_model,
+                    input_tokens, output_tokens, account_email, provider_name, username,
+                    client_ip, protocol, upstream_protocol
+             FROM request_logs",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO proxy_schema_migrations (migration_key, applied_at)
+             VALUES ('request_statistics_v1', ?1)",
+            [chrono::Utc::now().timestamp_millis()],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+    }
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON request_logs (timestamp DESC)",
@@ -96,15 +173,67 @@ pub fn init_db() -> Result<(), String> {
     Ok(())
 }
 
+fn save_statistics_with_conn(conn: &Connection, log: &ProxyRequestLog) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO request_statistics (
+            id, timestamp, status, duration, model, mapped_model, upstream_model,
+            input_tokens, output_tokens, account_email, provider_name, username,
+            client_ip, protocol, upstream_protocol
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(id) DO UPDATE SET
+            timestamp = excluded.timestamp,
+            status = excluded.status,
+            duration = excluded.duration,
+            model = excluded.model,
+            mapped_model = excluded.mapped_model,
+            upstream_model = excluded.upstream_model,
+            input_tokens = excluded.input_tokens,
+            output_tokens = excluded.output_tokens,
+            account_email = excluded.account_email,
+            provider_name = excluded.provider_name,
+            username = excluded.username,
+            client_ip = excluded.client_ip,
+            protocol = excluded.protocol,
+            upstream_protocol = excluded.upstream_protocol",
+        params![
+            log.id,
+            log.timestamp,
+            log.status,
+            log.duration,
+            log.model,
+            log.mapped_model,
+            log.upstream_model,
+            log.input_tokens,
+            log.output_tokens,
+            log.account_email,
+            log.provider_name,
+            log.username,
+            log.client_ip,
+            log.protocol,
+            log.upstream_protocol,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Persist statistics without retaining the traffic request/response payload.
+pub fn save_statistics(log: &ProxyRequestLog) -> Result<(), String> {
+    init_db()?;
+    let conn = connect_db()?;
+    save_statistics_with_conn(&conn, log)
+}
+
 pub fn save_log(log: &ProxyRequestLog) -> Result<(), String> {
-    // Ensure table exists (idempotent, safe to call on every write)
+    // Ensure both traffic and statistics schemas exist.
     init_db()?;
 
-    let conn = connect_db()?;
+    let mut conn = connect_db()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "INSERT INTO request_logs (id, timestamp, method, url, status, duration, model, error, request_body, response_body, input_tokens, output_tokens, account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url, upstream_request_body, upstream_response_body)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+    tx.execute(
+        "INSERT INTO request_logs (id, timestamp, method, url, status, duration, model, error, request_body, response_body, input_tokens, output_tokens, account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url, upstream_request_body, upstream_response_body, message_start_id, raw_response_body)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         params![
             log.id,
             log.timestamp,
@@ -129,13 +258,18 @@ pub fn save_log(log: &ProxyRequestLog) -> Result<(), String> {
             log.upstream_url,
             log.upstream_request_body,
             log.upstream_response_body,
+            log.message_start_id,
+            log.raw_response_body,
         ],
     ).map_err(|e| e.to_string())?;
+
+    save_statistics_with_conn(&tx, log)?;
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
-/// Get logs summary (without large request_body and response_body fields) with pagination
+/// Get logs summary (without large request/response body fields) with pagination
 pub fn get_logs_summary(limit: usize, offset: usize) -> Result<Vec<ProxyRequestLog>, String> {
     let conn = connect_db()?;
 
@@ -143,7 +277,8 @@ pub fn get_logs_summary(limit: usize, offset: usize) -> Result<Vec<ProxyRequestL
         "SELECT id, timestamp, method, url, status, duration, model, error,
                 NULL as request_body, NULL as response_body,
                 input_tokens, output_tokens, account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url,
-                NULL as upstream_request_body, NULL as upstream_response_body
+                NULL as upstream_request_body, NULL as upstream_response_body,
+                message_start_id, NULL as raw_response_body
          FROM request_logs
          ORDER BY timestamp DESC
          LIMIT ?1 OFFSET ?2"
@@ -175,6 +310,8 @@ pub fn get_logs_summary(limit: usize, offset: usize) -> Result<Vec<ProxyRequestL
                 upstream_url: row.get(20).unwrap_or(None),
                 upstream_request_body: None,
                 upstream_response_body: None,
+                message_start_id: row.get(23).unwrap_or(None),
+                raw_response_body: None,
                 in_flight: false,
             })
         })
@@ -203,7 +340,7 @@ pub fn get_stats() -> Result<crate::proxy::monitor::ProxyStats, String> {
             COUNT(*) as total,
             COALESCE(SUM(CASE WHEN status >= 200 AND status < 400 THEN 1 ELSE 0 END), 0) as success,
             COALESCE(SUM(CASE WHEN status < 200 OR status >= 400 THEN 1 ELSE 0 END), 0) as error
-         FROM request_logs",
+         FROM request_statistics",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -225,7 +362,7 @@ pub fn get_log_detail(log_id: &str) -> Result<ProxyRequestLog, String> {
             "SELECT id, timestamp, method, url, status, duration, model, error,
                 request_body, response_body, input_tokens, output_tokens,
                 account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url,
-                upstream_request_body, upstream_response_body
+                upstream_request_body, upstream_response_body, message_start_id, raw_response_body
          FROM request_logs
          WHERE id = ?1",
         )
@@ -256,6 +393,8 @@ pub fn get_log_detail(log_id: &str) -> Result<ProxyRequestLog, String> {
             upstream_url: row.get(20).unwrap_or(None),
             upstream_request_body: row.get(21).unwrap_or(None),
             upstream_response_body: row.get(22).unwrap_or(None),
+            message_start_id: row.get(23).unwrap_or(None),
+            raw_response_body: row.get(24).unwrap_or(None),
             in_flight: false,
         })
     })
@@ -266,7 +405,10 @@ pub fn get_log_detail(log_id: &str) -> Result<ProxyRequestLog, String> {
 pub fn cleanup_old_logs(days: i64) -> Result<usize, String> {
     let conn = connect_db()?;
 
-    let cutoff_timestamp = chrono::Utc::now().timestamp() - (days * 24 * 3600);
+    let retention_ms = days.max(0).saturating_mul(24 * 3600 * 1000);
+    let cutoff_timestamp = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_sub(retention_ms);
 
     let deleted = conn
         .execute(
@@ -306,6 +448,16 @@ pub fn clear_logs() -> Result<(), String> {
 
     let conn = connect_db()?;
     conn.execute("DELETE FROM request_logs", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Explicitly clear accumulated statistics. Traffic-log retention never calls
+/// this function; it is reserved for the dedicated statistics reset action.
+pub fn clear_statistics() -> Result<(), String> {
+    init_db()?;
+    let conn = connect_db()?;
+    conn.execute("DELETE FROM request_statistics", [])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -367,7 +519,8 @@ pub fn get_logs_filtered(
         "SELECT id, timestamp, method, url, status, duration, model, error,
                 NULL as request_body, NULL as response_body,
                 input_tokens, output_tokens, account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url,
-                NULL as upstream_request_body, NULL as upstream_response_body
+                NULL as upstream_request_body, NULL as upstream_response_body,
+                message_start_id, NULL as raw_response_body
          FROM request_logs
          WHERE (status < 200 OR status >= 400)
          ORDER BY timestamp DESC
@@ -376,7 +529,8 @@ pub fn get_logs_filtered(
         "SELECT id, timestamp, method, url, status, duration, model, error,
                 NULL as request_body, NULL as response_body,
                 input_tokens, output_tokens, account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url,
-                NULL as upstream_request_body, NULL as upstream_response_body
+                NULL as upstream_request_body, NULL as upstream_response_body,
+                message_start_id, NULL as raw_response_body
          FROM request_logs
          ORDER BY timestamp DESC
          LIMIT ?1 OFFSET ?2"
@@ -384,7 +538,8 @@ pub fn get_logs_filtered(
         "SELECT id, timestamp, method, url, status, duration, model, error,
                 NULL as request_body, NULL as response_body,
                 input_tokens, output_tokens, account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url,
-                NULL as upstream_request_body, NULL as upstream_response_body
+                NULL as upstream_request_body, NULL as upstream_response_body,
+                message_start_id, NULL as raw_response_body
          FROM request_logs
          WHERE (url LIKE ?3 OR method LIKE ?3 OR model LIKE ?3 OR CAST(status AS TEXT) LIKE ?3 OR account_email LIKE ?3 OR client_ip LIKE ?3)
          ORDER BY timestamp DESC
@@ -419,6 +574,8 @@ pub fn get_logs_filtered(
                     upstream_url: row.get(20).unwrap_or(None),
                     upstream_request_body: None,
                     upstream_response_body: None,
+                    message_start_id: row.get(23).unwrap_or(None),
+                    raw_response_body: None,
                     in_flight: false,
                 })
             })
@@ -452,6 +609,8 @@ pub fn get_logs_filtered(
                     upstream_url: row.get(20).unwrap_or(None),
                     upstream_request_body: None,
                     upstream_response_body: None,
+                    message_start_id: row.get(23).unwrap_or(None),
+                    raw_response_body: None,
                     in_flight: false,
                 })
             })
@@ -485,6 +644,8 @@ pub fn get_logs_filtered(
                     upstream_url: row.get(20).unwrap_or(None),
                     upstream_request_body: None,
                     upstream_response_body: None,
+                    message_start_id: row.get(23).unwrap_or(None),
+                    raw_response_body: None,
                     in_flight: false,
                 })
             })
@@ -504,7 +665,7 @@ pub fn get_all_logs_for_export() -> Result<Vec<ProxyRequestLog>, String> {
             "SELECT id, timestamp, method, url, status, duration, model, error,
                 request_body, response_body, input_tokens, output_tokens,
                 account_email, mapped_model, protocol, client_ip, username, provider_name, upstream_protocol, upstream_model, upstream_url,
-                upstream_request_body, upstream_response_body
+                upstream_request_body, upstream_response_body, message_start_id, raw_response_body
          FROM request_logs
          ORDER BY timestamp DESC",
         )
@@ -536,6 +697,8 @@ pub fn get_all_logs_for_export() -> Result<Vec<ProxyRequestLog>, String> {
                 upstream_url: row.get(20).unwrap_or(None),
                 upstream_request_body: row.get(21).unwrap_or(None),
                 upstream_response_body: row.get(22).unwrap_or(None),
+                message_start_id: row.get(23).unwrap_or(None),
+                raw_response_body: row.get(24).unwrap_or(None),
                 in_flight: false,
             })
         })
@@ -568,7 +731,8 @@ pub fn get_token_usage_by_ip(limit: usize, hours: i64) -> Result<Vec<IpTokenStat
     // Convert 'hours' to milliseconds
     let since = chrono::Utc::now().timestamp_millis() - (hours * 3600 * 1000);
 
-    // [FIX] 不再从 request_logs 表获取 username，因为该字段可能为空
+    // Statistics are independent from traffic-log retention. Usernames are
+    // still resolved from user_token_db because that binding is more reliable.
     // 先获取 IP 统计数据，然后再单独查询每个 IP 的用户名
     let mut stmt = conn
         .prepare(
@@ -578,7 +742,7 @@ pub fn get_token_usage_by_ip(limit: usize, hours: i64) -> Result<Vec<IpTokenStat
             COALESCE(SUM(input_tokens), 0) as input,
             COALESCE(SUM(output_tokens), 0) as output,
             COUNT(*) as cnt
-         FROM request_logs
+         FROM request_statistics
          WHERE timestamp >= ?1 AND client_ip IS NOT NULL AND client_ip != ''
          GROUP BY client_ip
          ORDER BY total DESC

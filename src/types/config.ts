@@ -8,24 +8,67 @@ export interface UpstreamProxyConfig {
 // ============================================================================
 
 /** 供应商协议类型 */
-export type ProviderProtocol = 'anthropic_passthrough' | 'open_a_i_compatible' | 'gemini_v1_internal';
+export type ProviderProtocol =
+    | 'anthropic_passthrough'
+    | 'open_a_i_compatible'
+    | 'codex_responses'
+    | 'gemini_v1_internal';
+
+/** Per-route reasoning effort, stored in protocol-neutral form. */
+export type RouteReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
 /** 供应商分发模式 */
 export type ProviderDispatchMode = 'exclusive' | 'pooled' | 'fallback';
+
+/** Persisted metadata and capabilities for one provider model. */
+export interface ProviderModelConfig {
+    id: string;
+    /** Display name returned by the upstream model-list endpoint. */
+    display_name?: string;
+    /** User-defined alias shown in model selectors. */
+    alias?: string;
+    /** Whether this model may be used with the image generation endpoints. */
+    supports_images?: boolean;
+    /** Explicit reasoning levels supported by this model; empty means protocol defaults. */
+    reasoning_efforts?: string[];
+}
+
+/** Protocol-specific connection and routing settings for one provider. */
+export interface ProviderProtocolConfig {
+    protocol: ProviderProtocol;
+    enabled: boolean;
+    base_url: string;
+    api_key: string;
+    credential_id?: string;
+    dispatch_mode: ProviderDispatchMode;
+    priority: number;
+    model_prefixes: string[];
+    model_mapping: Record<string, string>;
+    request_timeout_secs?: number;
+}
 
 /** 上游供应商配置 */
 export interface UpstreamProvider {
     name: string;
     provider_id?: string;
+    /** Legacy route IDs retained after merging protocol-specific entries. */
+    provider_id_aliases?: string[];
+    /** Stable UI grouping key for migrated split provider records. */
+    provider_group?: string;
     enabled: boolean;
     base_url: string;
     api_key: string;
+    credential_id?: string;
     protocol: ProviderProtocol;
     dispatch_mode: ProviderDispatchMode;
     priority: number;
     model_prefixes: string[];
     model_mapping: Record<string, string>;
     available_models?: string;
+    /** Detailed model records. `available_models` remains for backward compatibility. */
+    model_configs?: ProviderModelConfig[];
+    /** Enabled protocol variants; model_configs is shared by all variants. */
+    protocols?: ProviderProtocolConfig[];
     request_timeout_secs?: number;
 }
 
@@ -38,6 +81,8 @@ export interface ProxyConfig {
     admin_password?: string;
     auto_start: boolean;
     custom_mapping?: Record<string, string | WeightedTarget[]>;
+    /** Per-target reasoning override; legacy template keys remain supported. */
+    route_reasoning_effort?: Record<string, RouteReasoningEffort | string>;
     request_timeout: number;
     enable_logging: boolean;
     debug_logging?: DebugLoggingConfig;
@@ -165,6 +210,7 @@ export interface AppConfig {
     auto_launch?: boolean; // 开机自动启动
     accounts_page_size?: number; // 账号列表每页显示数量,默认 0 表示自动计算
     hidden_menu_items?: string[]; // 隐藏的菜单项路径列表
+    menu_visibility_version?: number;
     scheduled_warmup: ScheduledWarmupConfig;
     quota_protection: QuotaProtectionConfig; // [NEW] 配额保护配置
     pinned_quota_models: PinnedQuotaModelsConfig; // [NEW] 配额关注列表
@@ -239,7 +285,7 @@ export interface ProxyPoolConfig {
 // 模型冷却 + 兜底模型 + 权重路由
 // ============================================================================
 
-/** 带权重的路由目标 */
+/** 带整数比例权重的路由目标；实际占比为 weight / 全部目标权重。 */
 export interface WeightedTarget {
     target: string;
     weight: number;
@@ -256,11 +302,17 @@ export interface FallbackModelConfig {
     enabled: boolean;
     model: string;
     provider_id: string;
+    /** Protocol-neutral reasoning effort for the fallback target. */
+    reasoning_effort?: RouteReasoningEffort | string;
 }
 
 /** 活跃冷却条目（前端展示用） */
 export interface ModelCooldownEntry {
     model: string;
     provider: string;
+    protocol: string;
     remaining_secs: number;
+    duration_secs: number;
+    started_at: number;
+    reason?: string;
 }

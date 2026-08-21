@@ -1,4 +1,5 @@
 use crate::modules::user_token_db::{self, TokenIpBinding, UserToken};
+use chrono::{Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,7 +89,13 @@ pub struct UserTokenStats {
 #[tauri::command]
 pub async fn get_user_token_summary() -> Result<UserTokenStats, String> {
     let tokens = user_token_db::list_tokens()?;
-    let active_tokens = tokens.iter().filter(|t| t.enabled).count();
+    let now = Utc::now().timestamp();
+    let active_tokens = tokens
+        .iter()
+        .filter(|token| {
+            token.enabled && token.expires_at.is_none_or(|expires_at| expires_at >= now)
+        })
+        .count();
 
     // 统计唯一用户
     let mut users = std::collections::HashSet::new();
@@ -96,13 +103,23 @@ pub async fn get_user_token_summary() -> Result<UserTokenStats, String> {
         users.insert(t.username.clone());
     }
 
-    // 这里简单返回一些数据，请求数最好从数据库聚合查询
-    // 目前仅作为演示，请求数暂不精确统计今日的
+    let local_now = Local::now();
+    let today_start = Local
+        .from_local_datetime(
+            &local_now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .ok_or("failed_to_calculate_local_day_start")?,
+        )
+        .earliest()
+        .ok_or("failed_to_resolve_local_day_start")?
+        .timestamp();
+    let today_requests = user_token_db::get_request_count_since(today_start)?;
 
     Ok(UserTokenStats {
         total_tokens: tokens.len(),
         active_tokens,
         total_users: users.len(),
-        today_requests: 0, // TODO: Implement daily stats query
+        today_requests,
     })
 }

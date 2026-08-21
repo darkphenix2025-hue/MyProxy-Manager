@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 // use std::path::PathBuf;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{OnceLock, RwLock};
 
 // ============================================================================
@@ -212,9 +213,22 @@ pub enum ProviderProtocol {
     /// Provider speaks OpenAI Chat Completions API.
     #[serde(alias = "openai_compatible")]
     OpenAICompatible,
+    /// Provider speaks the native OpenAI Codex Responses API.
+    CodexResponses,
     /// Provider speaks Google v1internal (Gemini) API.
     /// Requests are transformed from OpenAI/Claude to Gemini format.
     GeminiV1Internal,
+}
+
+impl ProviderProtocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AnthropicPassthrough => "anthropic_passthrough",
+            Self::OpenAICompatible => "open_a_i_compatible",
+            Self::CodexResponses => "codex_responses",
+            Self::GeminiV1Internal => "gemini_v1_internal",
+        }
+    }
 }
 
 /// Dispatch mode for a provider within the routing chain.
@@ -231,19 +245,122 @@ pub enum ProviderDispatchMode {
     Fallback,
 }
 
-/// A single upstream provider configured by API Key + Base URL.
+/// A single model exposed by an upstream provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderModelConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_images: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Protocol-specific connection and routing settings belonging to one logical
+/// provider.  Model metadata intentionally stays on [`UpstreamProvider`] so a
+/// provider such as BIGMODEL can expose one shared model catalog to all of its
+/// enabled protocols.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderProtocolConfig {
+    #[serde(default)]
+    pub protocol: ProviderProtocol,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    #[serde(default)]
+    pub dispatch_mode: ProviderDispatchMode,
+    #[serde(default = "default_provider_priority")]
+    pub priority: u8,
+    #[serde(default)]
+    pub model_prefixes: Vec<String>,
+    #[serde(default)]
+    pub model_mapping: HashMap<String, String>,
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+}
+
+/// Model route used when the requested model has no valid provider match.
+///
+/// The effort is stored in the same protocol-neutral vocabulary as normal
+/// route overrides and is translated immediately before forwarding.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FallbackModelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub reasoning_effort: String,
+}
+
+/// Runtime cooldown policy used after an upstream provider returns HTTP 429.
+/// Cooldown entries themselves are intentionally kept in memory by the proxy
+/// runtime and are not persisted in the application configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCooldownConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_model_cooldown_duration")]
+    pub duration_secs: u64,
+}
+
+fn default_model_cooldown_duration() -> u64 {
+    600
+}
+
+impl Default for ModelCooldownConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            duration_secs: default_model_cooldown_duration(),
+        }
+    }
+}
+
+/// A single upstream provider configured by API Key + Base URL.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UpstreamProvider {
     pub name: String,
     /// Short routing identifier (1-10 chars, alphanumeric, non-digit start).
     /// Enables direct routing via `provider_id/model_name` format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    /// Older provider IDs kept as aliases when multiple protocol-specific
+    /// entries are merged into one logical provider (for example `bigop`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_id_aliases: Vec<String>,
+    /// Stable grouping key used by the UI when migrating legacy split entries
+    /// into one logical provider record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_group: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
+    /// Optional credential managed by the provider auth-file runtime.
+    /// When set, the current access token is resolved at request time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    /// Runtime-only ChatGPT account identifier required by Codex upstreams.
+    /// It is resolved from the auth-file and is never persisted with provider config.
+    #[serde(skip)]
+    pub account_id: Option<String>,
     #[serde(default)]
     pub protocol: ProviderProtocol,
     #[serde(default)]
@@ -259,9 +376,250 @@ pub struct UpstreamProvider {
     /// Comma-separated list of available models, e.g. "gemini-2.5-pro,gemini-2.5-flash".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available_models: Option<String>,
+    /// Detailed model records used by the provider editor and route model picker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_configs: Vec<ProviderModelConfig>,
+    /// Enabled protocol variants for this logical provider.  Empty means the
+    /// legacy single-protocol fields above are authoritative.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<ProviderProtocolConfig>,
     /// Optional HTTP request timeout in seconds.
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
+}
+
+impl UpstreamProvider {
+    /// Expand one logical provider into routable protocol-specific entries.
+    /// The router uses these entries internally while the config/UI continue
+    /// to present a single provider and a shared model catalog.
+    pub fn protocol_variants(&self) -> Vec<Self> {
+        if self.protocols.is_empty() {
+            return vec![self.clone()];
+        }
+
+        self.protocols
+            .iter()
+            .filter(|protocol| protocol.enabled)
+            .map(|protocol| {
+                let mut provider = self.clone();
+                provider.protocol = protocol.protocol.clone();
+                provider.base_url = protocol.base_url.clone();
+                provider.api_key = protocol.api_key.clone();
+                provider.credential_id = protocol.credential_id.clone();
+                provider.dispatch_mode = protocol.dispatch_mode.clone();
+                provider.priority = protocol.priority;
+                provider.model_prefixes = protocol.model_prefixes.clone();
+                provider.model_mapping = protocol.model_mapping.clone();
+                provider.request_timeout_secs = protocol.request_timeout_secs;
+                provider.protocols.clear();
+                provider
+            })
+            .collect()
+    }
+}
+
+fn provider_name_without_protocol_suffix(name: &str) -> String {
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.ends_with("op") {
+        let without_suffix = &trimmed[..trimmed.len() - 2];
+        let without_separator = without_suffix.trim_end_matches(['_', '-', ' ']);
+        if !without_separator.is_empty() {
+            return without_separator.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn provider_group_key(provider: &UpstreamProvider) -> String {
+    provider
+        .provider_group
+        .as_deref()
+        .map(|group| group.trim().to_ascii_lowercase())
+        .filter(|group| !group.is_empty())
+        .unwrap_or_else(|| {
+            provider_name_without_protocol_suffix(&provider.name).to_ascii_lowercase()
+        })
+}
+
+fn legacy_provider_protocol_config(provider: &UpstreamProvider) -> ProviderProtocolConfig {
+    ProviderProtocolConfig {
+        protocol: provider.protocol.clone(),
+        enabled: provider.enabled,
+        base_url: provider.base_url.clone(),
+        api_key: provider.api_key.clone(),
+        credential_id: provider.credential_id.clone(),
+        dispatch_mode: provider.dispatch_mode.clone(),
+        priority: provider.priority,
+        model_prefixes: provider.model_prefixes.clone(),
+        model_mapping: provider.model_mapping.clone(),
+        request_timeout_secs: provider.request_timeout_secs,
+    }
+}
+
+/// Merge legacy entries that represented one upstream service once per
+/// protocol.  This is used at runtime as well as by the UI migration so an
+/// old `BIGMODEL` + `BIGMODEL_OP` configuration immediately supports one
+/// shared model route and protocol-aware dispatch, even before it is saved
+/// again from the editor.
+pub fn merge_provider_protocol_entries(providers: Vec<UpstreamProvider>) -> Vec<UpstreamProvider> {
+    let mut groups: Vec<(String, Vec<UpstreamProvider>)> = Vec::new();
+    for provider in providers {
+        let key = provider_group_key(&provider);
+        if let Some((_, members)) = groups.iter_mut().find(|(group_key, _)| group_key == &key) {
+            members.push(provider);
+        } else {
+            groups.push((key, vec![provider]));
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(group_key, members)| {
+            if members.len() == 1 {
+                return members
+                    .into_iter()
+                    .next()
+                    .expect("provider group is not empty");
+            }
+
+            let base = members
+                .iter()
+                .find(|provider| {
+                    provider_name_without_protocol_suffix(&provider.name)
+                        .eq_ignore_ascii_case(provider.name.trim())
+                })
+                .unwrap_or(&members[0]);
+
+            let mut protocols: Vec<ProviderProtocolConfig> = Vec::new();
+            for member in &members {
+                let member_protocols = if member.protocols.is_empty() {
+                    vec![legacy_provider_protocol_config(member)]
+                } else {
+                    member.protocols.clone()
+                };
+                for mut protocol in member_protocols {
+                    protocol.enabled &= member.enabled;
+                    if let Some(existing) = protocols
+                        .iter_mut()
+                        .find(|existing| existing.protocol == protocol.protocol)
+                    {
+                        existing.enabled |= protocol.enabled;
+                    } else {
+                        protocols.push(protocol);
+                    }
+                }
+            }
+
+            let active_protocol = protocols
+                .iter()
+                .find(|protocol| protocol.enabled)
+                .or_else(|| protocols.first())
+                .expect("provider group has at least one protocol");
+
+            let mut model_configs = Vec::new();
+            let mut model_ids = Vec::new();
+            for member in &members {
+                for model in &member.model_configs {
+                    if !model_ids.contains(&model.id) {
+                        model_ids.push(model.id.clone());
+                        model_configs.push(model.clone());
+                    }
+                }
+                if let Some(available_models) = &member.available_models {
+                    for model_id in available_models
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                    {
+                        if !model_ids.iter().any(|known| known == model_id) {
+                            model_ids.push(model_id.to_string());
+                            model_configs.push(ProviderModelConfig {
+                                id: model_id.to_string(),
+                                display_name: None,
+                                alias: None,
+                                supports_images: false,
+                                reasoning_efforts: Vec::new(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            let provider_ids: Vec<String> = members
+                .iter()
+                .flat_map(|member| {
+                    member
+                        .provider_id
+                        .iter()
+                        .chain(member.provider_id_aliases.iter())
+                        .cloned()
+                })
+                .collect();
+            let primary_provider_id = base
+                .provider_id
+                .clone()
+                .or_else(|| provider_ids.first().cloned());
+            let provider_id_aliases = provider_ids
+                .into_iter()
+                .filter(|provider_id| primary_provider_id.as_deref() != Some(provider_id.as_str()))
+                .fold(Vec::new(), |mut aliases, provider_id| {
+                    if !aliases.contains(&provider_id) {
+                        aliases.push(provider_id);
+                    }
+                    aliases
+                });
+
+            let mut merged = base.clone();
+            merged.name = provider_name_without_protocol_suffix(&base.name);
+            merged.provider_id = primary_provider_id;
+            merged.provider_id_aliases = provider_id_aliases;
+            merged.provider_group = Some(group_key);
+            merged.enabled = members.iter().any(|provider| provider.enabled);
+            merged.protocol = active_protocol.protocol.clone();
+            merged.base_url = active_protocol.base_url.clone();
+            merged.api_key = active_protocol.api_key.clone();
+            merged.credential_id = active_protocol.credential_id.clone();
+            merged.dispatch_mode = active_protocol.dispatch_mode.clone();
+            merged.priority = active_protocol.priority;
+            merged.model_prefixes = active_protocol.model_prefixes.clone();
+            merged.model_mapping = active_protocol.model_mapping.clone();
+            merged.request_timeout_secs = active_protocol.request_timeout_secs;
+            merged.available_models = (!model_ids.is_empty()).then(|| model_ids.join(", "));
+            merged.model_configs = model_configs;
+            merged.protocols = protocols;
+            merged
+        })
+        .collect()
+}
+
+impl fmt::Debug for UpstreamProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UpstreamProvider")
+            .field("name", &self.name)
+            .field("provider_id", &self.provider_id)
+            .field("provider_id_aliases", &self.provider_id_aliases)
+            .field("provider_group", &self.provider_group)
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("credential_id", &self.credential_id)
+            .field(
+                "account_id",
+                &self.account_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("protocol", &self.protocol)
+            .field("dispatch_mode", &self.dispatch_mode)
+            .field("priority", &self.priority)
+            .field("model_prefixes", &self.model_prefixes)
+            .field("model_mapping", &self.model_mapping)
+            .field("available_models", &self.available_models)
+            .field("model_configs", &self.model_configs)
+            .field("protocols", &self.protocols)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .finish()
+    }
 }
 
 /// Validate that a provider_id matches the allowed format:
@@ -454,6 +812,84 @@ pub struct SecurityMonitorConfig {
     pub whitelist: IpWhitelistConfig,
 }
 
+/// 一个模型路由规则的目标值。
+///
+/// 字符串形式用于兼容旧版配置；数组形式用于保存 1 对 N 的加权目标。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum CustomMappingValue {
+    Single(String),
+    Weighted(Vec<WeightedTarget>),
+}
+
+/// 1 对 N 路由目标及其整数比例权重；实际占比为 weight / 总权重。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WeightedTarget {
+    pub target: String,
+    pub weight: u32,
+}
+
+pub type CustomMappingTable = HashMap<String, CustomMappingValue>;
+
+impl CustomMappingValue {
+    /// 按规则选择一个目标。空目标或零权重目标不会参与选择。
+    pub fn select_target(&self) -> Option<String> {
+        self.select_target_with(|_| true)
+    }
+
+    /// 按规则选择一个目标，同时过滤当前不可用的目标。权重只在有效
+    /// 目标之间重新计算，避免某个冷却目标继续占用原有权重比例。
+    pub fn select_target_with<F>(&self, mut is_available: F) -> Option<String>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        match self {
+            Self::Single(target) => {
+                let target = target.trim();
+                (!target.is_empty() && is_available(target)).then(|| target.to_string())
+            }
+            Self::Weighted(targets) => {
+                let total_weight: u64 = targets
+                    .iter()
+                    .filter(|target| {
+                        target.weight > 0
+                            && !target.target.trim().is_empty()
+                            && is_available(target.target.trim())
+                    })
+                    .map(|target| u64::from(target.weight))
+                    .sum();
+
+                if total_weight == 0 {
+                    return targets
+                        .iter()
+                        .find(|target| {
+                            !target.target.trim().is_empty() && is_available(target.target.trim())
+                        })
+                        .map(|target| target.target.trim().to_string());
+                }
+
+                use rand::Rng;
+                let mut offset = rand::thread_rng().gen_range(0..total_weight);
+                for target in targets {
+                    if target.weight == 0
+                        || target.target.trim().is_empty()
+                        || !is_available(target.target.trim())
+                    {
+                        continue;
+                    }
+                    let weight = u64::from(target.weight);
+                    if offset < weight {
+                        return Some(target.target.trim().to_string());
+                    }
+                    offset -= weight;
+                }
+
+                None
+            }
+        }
+    }
+}
+
 /// 反代服务配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -486,9 +922,25 @@ pub struct ProxyConfig {
     /// 是否自动启动
     pub auto_start: bool,
 
-    /// 自定义精确模型映射表 (key: 原始模型名, value: 目标模型名)
+    /// 自定义模型映射表。值可以是单个目标模型，也可以是带权重的目标数组。
     #[serde(default)]
-    pub custom_mapping: std::collections::HashMap<String, String>,
+    pub custom_mapping: CustomMappingTable,
+
+    /// 按路由目标覆盖推理强度。旧配置可以使用原始模型模板作为键；
+    /// 新配置使用 `<模板>::<目标模型>`，从而让 1 对 N 的每个目标拥有独立强度。
+    /// 值使用统一的 canonical effort 名称（low/medium/high/xhigh/max/ultra）。
+    #[serde(default)]
+    pub route_reasoning_effort: std::collections::HashMap<String, String>,
+
+    /// Route used when neither the mapped model nor its provider can be
+    /// matched. Empty/disabled values leave the original routing behavior
+    /// unchanged.
+    #[serde(default)]
+    pub fallback_model: FallbackModelConfig,
+
+    /// Temporary model cooling policy after upstream rate limiting.
+    #[serde(default)]
+    pub model_cooldown: ModelCooldownConfig,
 
     /// API 请求超时时间(秒)
     #[serde(default = "default_request_timeout")]
@@ -586,7 +1038,10 @@ impl Default for ProxyConfig {
             api_key: format!("sk-{}", uuid::Uuid::new_v4().simple()),
             admin_password: None,
             auto_start: false,
-            custom_mapping: std::collections::HashMap::new(),
+            custom_mapping: CustomMappingTable::new(),
+            route_reasoning_effort: std::collections::HashMap::new(),
+            fallback_model: FallbackModelConfig::default(),
+            model_cooldown: ModelCooldownConfig::default(),
             request_timeout: default_request_timeout(),
             enable_logging: true, // 默认开启，支持 token 统计功能
             debug_logging: DebugLoggingConfig::default(),
@@ -701,33 +1156,70 @@ pub enum ProxySelectionStrategy {
     WeightedRoundRobin,
 }
 
-/// Build an upstream endpoint without duplicating the /v1 prefix.
-/// Providers may be configured as an origin, an origin ending in /v1, or
-/// as a complete endpoint URL.
+/// Build an upstream endpoint without duplicating an API version prefix.
+/// Providers may be configured as an origin, an origin ending in /v1 or /v4,
+/// or as a complete endpoint URL.
 pub fn build_provider_api_url(base_url: &str, endpoint: &str) -> String {
-    let base = base_url.trim().trim_end_matches('/');
+    let configured_base = base_url.trim().trim_end_matches('/');
     let endpoint = endpoint.trim_start_matches('/');
     let endpoint_suffix = format!("/{endpoint}");
 
-    if base.ends_with(&endpoint_suffix) {
-        return base.to_string();
+    if configured_base.ends_with(&endpoint_suffix) {
+        return configured_base.to_string();
     }
 
-    if base.ends_with("/v1") || base.contains("/v1/") {
+    // The UI accepts both a provider root (`.../v1`) and a complete API
+    // endpoint (`.../v1/responses`).  A complete endpoint is still a useful
+    // base for a different operation, such as `GET /models`, so remove only
+    // the known operation suffix before appending the requested endpoint.
+    let base = strip_known_provider_endpoint(configured_base);
+
+    if contains_api_version_segment(base) {
         format!("{base}/{endpoint}")
     } else {
         format!("{base}/v1/{endpoint}")
     }
 }
 
-/// OpenCode Go's GPT 5.6 Luna model is exposed through the Responses API.
+fn strip_known_provider_endpoint(base_url: &str) -> &str {
+    ["/chat/completions", "/responses", "/messages", "/models"]
+        .iter()
+        .find_map(|suffix| base_url.strip_suffix(suffix))
+        .unwrap_or(base_url)
+}
+
+fn contains_api_version_segment(base_url: &str) -> bool {
+    let authority_and_path = base_url
+        .split_once("://")
+        .map(|(_, remainder)| remainder)
+        .unwrap_or(base_url);
+    let path = authority_and_path
+        .split_once('/')
+        .map(|(_, path)| path)
+        .unwrap_or("");
+
+    path.split(['/', '?', '#']).any(is_api_version_segment)
+}
+
+fn is_api_version_segment(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    chars.next() == Some('v')
+        && chars
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+}
+
+/// OpenCode Go exposes these models through the Responses API.
 pub fn uses_responses_api(model: &str) -> bool {
     let model = model
         .split_once('(')
         .map(|(base, _)| base)
         .unwrap_or(model)
         .trim();
-    model.eq_ignore_ascii_case("gpt-5.6-luna")
+    matches!(
+        model.to_ascii_lowercase().as_str(),
+        "gpt-5.6-luna" | "grok-4.5" | "muse-spark-1.2" | "muse-spark-1.2-contributor"
+    )
 }
 
 #[cfg(test)]
@@ -786,12 +1278,60 @@ mod tests {
             ),
             "https://opencode.ai/zen/go/v1/chat/completions"
         );
+        assert_eq!(
+            build_provider_api_url("https://opencode.ai/zen/go/v1/responses", "models"),
+            "https://opencode.ai/zen/go/v1/models"
+        );
+    }
+
+    #[test]
+    fn test_build_provider_api_url_respects_any_version_segment() {
+        assert_eq!(
+            build_provider_api_url("https://open.bigmodel.cn/api/paas/v4", "chat/completions"),
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        );
+        assert_eq!(
+            build_provider_api_url("https://example.com/api/v4/", "models"),
+            "https://example.com/api/v4/models"
+        );
+        assert_eq!(
+            build_provider_api_url("https://example.com/api/v1beta", "models"),
+            "https://example.com/api/v1beta/models"
+        );
+        assert_eq!(
+            build_provider_api_url("https://example.com/api", "models"),
+            "https://example.com/api/v1/models"
+        );
     }
 
     #[test]
     fn test_open_code_go_responses_model_detection() {
         assert!(uses_responses_api("gpt-5.6-luna"));
         assert!(uses_responses_api("gpt-5.6-luna(medium)"));
+        assert!(uses_responses_api("grok-4.5"));
+        assert!(uses_responses_api("muse-spark-1.2"));
+        assert!(uses_responses_api("muse-spark-1.2-contributor"));
         assert!(!uses_responses_api("glm-5.3"));
+    }
+
+    #[test]
+    fn test_custom_mapping_deserializes_legacy_and_weighted_values() {
+        let mapping: CustomMappingTable = serde_json::from_value(serde_json::json!({
+            "gpt-*": "big/gpt-5",
+            "claude-*": [
+                { "target": "ali/sonnet", "weight": 70 },
+                { "target": "big/sonnet", "weight": 30 }
+            ]
+        }))
+        .expect("custom mapping should accept string and weighted values");
+
+        assert!(matches!(
+            mapping.get("gpt-*") ,
+            Some(CustomMappingValue::Single(target)) if target == "big/gpt-5"
+        ));
+        assert!(matches!(
+            mapping.get("claude-*") ,
+            Some(CustomMappingValue::Weighted(targets)) if targets.len() == 2
+        ));
     }
 }

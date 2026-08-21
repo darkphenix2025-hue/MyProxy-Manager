@@ -6,6 +6,46 @@ use crate::models::AppConfig;
 
 const CONFIG_FILE: &str = "gui_config.json";
 
+fn migrate_menu_visibility_defaults(value: &mut serde_json::Value) -> bool {
+    let current_version = value
+        .get("menu_visibility_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u8;
+    if current_version >= crate::models::config::MENU_VISIBILITY_DEFAULTS_VERSION {
+        return false;
+    }
+
+    let mut hidden_items: Vec<String> = value
+        .get("hidden_menu_items")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for path in crate::models::config::default_hidden_menu_items() {
+        if !hidden_items.contains(&path) {
+            hidden_items.push(path);
+        }
+    }
+
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    object.insert(
+        "hidden_menu_items".to_string(),
+        serde_json::json!(hidden_items),
+    );
+    object.insert(
+        "menu_visibility_version".to_string(),
+        serde_json::json!(crate::models::config::MENU_VISIBILITY_DEFAULTS_VERSION),
+    );
+    true
+}
+
 /// Load application configuration
 pub fn load_app_config() -> Result<AppConfig, String> {
     let data_dir = get_data_dir()?;
@@ -80,6 +120,10 @@ pub fn load_app_config() -> Result<AppConfig, String> {
                 serde_json::Value::Object(custom_mapping),
             );
         }
+    }
+
+    if migrate_menu_visibility_defaults(&mut v) {
+        modified = true;
     }
 
     let config: AppConfig = serde_json::from_value(v)
